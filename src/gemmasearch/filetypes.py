@@ -24,9 +24,22 @@ EXTENSIONS: dict[str, str] = {
 }
 
 
+# Files with a text extension that are really build files or boilerplate, not user content.
+_EXCLUDED_STEMS = frozenset({
+    "cmakelists", "cmakecache", "robots", "constraints", "copying", "notice", "notices",
+    "third_party_notices", "thirdpartynotices",
+})
+_EXCLUDED_STEM_PREFIXES = ("requirements", "license", "licence")  # requirements-dev, LICENSE.electron
+
+
 def classify(name: str) -> str | None:
     """Return the kind for a file name, or None if it should not be indexed."""
     dot = name.rfind(".")
     if dot <= 0:  # no extension, or a dotfile like ".bashrc"
         return None
-    return EXTENSIONS.get(name[dot + 1 :].lower())
+    kind = EXTENSIONS.get(name[dot + 1 :].lower())
+    if kind == TEXT:
+        stem = name[:dot].casefold()
+        if stem in _EXCLUDED_STEMS or stem.startswith(_EXCLUDED_STEM_PREFIXES):
+            return None
+    return kind
