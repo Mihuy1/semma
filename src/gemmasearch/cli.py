@@ -1,9 +1,12 @@
-"""Command line interface: `gemmasearch scan | status`."""
+"""Command line interface: `gemmasearch scan | index | search | status | reset`."""
 
 from __future__ import annotations
 
 import argparse
+import json
+import signal
 import sys
+import threading
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -92,6 +95,13 @@ def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def _duration(seconds: float) -> str:
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
 def cmd_status(args: argparse.Namespace, cfg: Config) -> int:
     if not cfg.db_path.exists():
         print("No index yet. Run `gemmasearch scan`.")
@@ -103,9 +113,150 @@ def cmd_status(args: argparse.Namespace, cfg: Config) -> int:
     for kind in ft.KINDS:
         if any(k == kind for k, _ in counts):
             print(f"{kind:<8}" + "".join(f"{counts.get((kind, s), 0):>10,}" for s in statuses))
+
+    index = store.index_counts()
+    vectors = index.pop("vectors")
+    chunks = sum(index.values())
+    per_modality = ", ".join(f"{m} {n:,}" for m, n in sorted(index.items()))
+    print(f"\nChunks: {chunks:,}" + (f" ({per_modality})" if per_modality else "") + f"   vectors: {vectors:,}")
+    model = store.get_meta("model_id")
+    if model:
+        print(f"Model: {model} ({store.embedding_dim()}-d)")
     last = store.get_meta("last_scan_at")
     if last:
-        print(f"\nLast scan: {time.strftime('%Y-%m-%d %H:%M', time.localtime(float(last)))}")
+        print(f"Last scan: {time.strftime('%Y-%m-%d %H:%M', time.localtime(float(last)))}")
+
+    failed = store.failed_files()
+    if failed:
+        errors = Counter((r["error"] or "").split("\n")[0][:100] for r in failed)
+        print(f"\nFailed files: {len(failed):,}" + ("" if args.failed else "  (--failed to list them)"))
+        for err, n in errors.most_common(5 if not args.failed else None):
+            print(f"  {n:>6,}  {err}")
+        if args.failed:
+            print()
+            for r in failed:
+                print(f"  {r['kind']:<6} {_short(r['path'], cfg.home)}\n         {r['error']}")
+    return 0
+
+
+def _install_stop_handler(stop: threading.Event) -> None:
+    """First Ctrl-C asks for a graceful stop; a second one aborts immediately."""
+    def handler(signum: int, frame: object) -> None:
+        if stop.is_set():
+            raise KeyboardInterrupt
+        stop.set()
+        print("\nStopping after the current batch (Ctrl-C again to abort)...", file=sys.stderr, flush=True)
+
+    signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
+
+
+def cmd_index(args: argparse.Namespace, cfg: Config) -> int:
+    from .embedder import Embedder
+    from .indexer import IndexStats, Indexer
+
+    if not cfg.db_path.exists():
+        print("No index yet. Run `gemmasearch scan` first.")
+        return 1
+    store = Store(cfg.db_path)
+    embedder = Embedder(cfg)
+    indexer = Indexer(store, cfg, embedder, prefetch=not args.no_prefetch)
+    stop = threading.Event()
+    _install_stop_handler(stop)
+
+    if indexer.count_pending(args.kind) == 0:
+        print("Nothing to index.")
+        return 0
+    print(f"Loading {cfg.model_name}...", end=" ", flush=True)
+    embedder.load()
+    print(f"{embedder.device}, {embedder.load_seconds:.1f}s")
+
+    tty = sys.stdout.isatty()
+    last_print = 0.0
+
+    def progress(st: IndexStats) -> None:
+        nonlocal last_print
+        now = time.monotonic()
+        if now - last_print < (0.25 if tty else 10) and st.current:
+            return
+        last_print = now
+        rate = st.done / st.seconds if st.seconds > 0 else 0.0
+        eta = _duration((st.total - st.done) / rate) if rate > 0 else "?"
+        line = (f"{st.done:,}/{st.total:,} files  {rate:.1f} files/s  {st.chunks:,} chunks  "
+                f"{st.failed} failed  {st.skipped} skipped  ETA {eta}")
+        if tty:
+            cur = _short(st.current, cfg.home) if st.current else ""
+            width = 120 - len(line)
+            cur = ("..." + cur[-(width - 3):]) if len(cur) > width > 3 else cur
+            print(f"\r\033[K{line}  {cur}", end="", flush=True)
+        else:
+            print(line, flush=True)
+
+    st = indexer.run(limit=args.limit, kinds=args.kind, progress=progress, stop=stop)
+    embedder.release_cache()
+    if tty:
+        print()
+    rate = st.done / st.seconds if st.seconds > 0 else 0.0
+    print(f"{'Stopped' if st.stopped else 'Done'}: {st.indexed:,} indexed, {st.failed:,} failed, "
+          f"{st.skipped:,} skipped (changed since scan), {st.chunks:,} chunks in {_duration(st.seconds)} "
+          f"({rate:.1f} files/s, embedding {st.embed_seconds:.1f}s)")
+    return 130 if st.stopped else 0
+
+
+def cmd_search(args: argparse.Namespace, cfg: Config) -> int:
+    from .embedder import Embedder
+    from .search import Searcher
+
+    if not cfg.db_path.exists():
+        print("No index yet. Run `gemmasearch scan` and `gemmasearch index`.")
+        return 1
+    store = Store(cfg.db_path)
+    embedder = Embedder(cfg)
+    stored_model = store.get_meta("model_id")
+    if stored_model and stored_model != embedder.model_id:
+        print(f"Index was built with {stored_model}, not {embedder.model_id}; re-run `gemmasearch index`.",
+              file=sys.stderr)
+        return 1
+    embedder.load()
+    searcher = Searcher(store, cfg, embedder)
+    results = searcher.search(args.query, limit=args.n, kinds=args.kind)
+    t = searcher.last_timings
+    if args.json:
+        print(json.dumps({"results": [r.to_dict() for r in results],
+                          "timings_ms": {"load": round(embedder.load_seconds * 1000),
+                                         "embed": round(t.embed_ms, 1), "search": round(t.search_ms, 1)}},
+                         ensure_ascii=False, indent=2))
+        return 0
+    for r in results:
+        sim = f"{r.similarity:.3f}" if r.similarity is not None else "  -  "
+        where = f" [{r.locator}]" if r.locator else ""
+        print(f"{sim}  {r.kind:<6} {_short(r.path, cfg.home)}{where}   ({'+'.join(r.matched)})")
+        if r.snippet:
+            print(f"               {r.snippet[:150]}")
+    if not results:
+        print("No matches.")
+    print(f"\n{len(results)} results; model load {embedder.load_seconds * 1000:.0f} ms, "
+          f"query embedding {t.embed_ms:.1f} ms, search {t.search_ms:.1f} ms")
+    return 0
+
+
+def cmd_reset(args: argparse.Namespace, cfg: Config) -> int:
+    if not args.yes:
+        what = "the whole database (scan queue included)" if args.all else "all embeddings and chunks"
+        print(f"This deletes {what} in {cfg.db_path}. Re-run with --yes to confirm.")
+        return 1
+    if args.all:
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{cfg.db_path}{suffix}").unlink(missing_ok=True)
+        print(f"Deleted {cfg.db_path}")
+        return 0
+    if not cfg.db_path.exists():
+        print("No index.")
+        return 0
+    store = Store(cfg.db_path)
+    store.reset_index()
+    store.db.execute("VACUUM")
+    print("Index cleared; every file is pending again.")
     return 0
 
 
@@ -123,7 +274,26 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_scan)
 
     st = sub.add_parser("status", help="show index counts")
+    st.add_argument("--failed", action="store_true", help="list every file that failed to index")
     st.set_defaults(func=cmd_status)
+
+    ix = sub.add_parser("index", help="extract and embed pending files in priority order (phase 2)")
+    ix.add_argument("--limit", type=int, help="index at most N files")
+    ix.add_argument("--kind", action="append", choices=ft.KINDS, help="only this kind (repeatable)")
+    ix.add_argument("--no-prefetch", action="store_true", help="extract and embed on one thread")
+    ix.set_defaults(func=cmd_index)
+
+    se = sub.add_parser("search", help="search the index")
+    se.add_argument("query")
+    se.add_argument("-n", type=int, default=10, help="number of results")
+    se.add_argument("--kind", action="append", choices=ft.KINDS, help="only this kind (repeatable)")
+    se.add_argument("--json", action="store_true", help="machine-readable output")
+    se.set_defaults(func=cmd_search)
+
+    rs = sub.add_parser("reset", help="drop all embeddings (files are queued again)")
+    rs.add_argument("--yes", action="store_true", help="confirm")
+    rs.add_argument("--all", action="store_true", help="delete the whole database file instead")
+    rs.set_defaults(func=cmd_reset)
     return p
 
 
