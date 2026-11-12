@@ -544,6 +544,39 @@ def test_user_pause_and_resume(tmp_path: Path) -> None:
     asyncio.run(main())
 
 
+@pytest.mark.parametrize("why", ["gpu_busy", "user"])
+def test_index_model_unloaded_while_indexing_is_paused_with_pending_files(tmp_path: Path, why: str) -> None:
+    async def main() -> None:
+        write_docs(tmp_path, {f"doc{i:02d}.md": f"note number {i} about gardening" for i in range(30)})
+        cfg = make_cfg(tmp_path)
+        cfg.index_model_unload_seconds = 0.2
+        gpu = StubGpu()
+        emb = LifecycleEmbedder()
+        ext = FakeExtractor(on_chunk=lambda p, i: time.sleep(0.03))
+        d = make_daemon(cfg, embedder=emb, gpu=gpu, extractor=ext)
+        d.start()
+        try:
+            await wait_until(lambda: emb.index_model_loaded, what="index model loaded")
+            if why == "gpu_busy":
+                gpu.is_busy = True  # a game started: its VRAM matters more than our pending files
+            else:
+                d.pause()
+            await wait_until(lambda: d._phase == "paused", 3, "pause")
+            assert (await d.status())["pending"] > 0
+            await wait_until(lambda: not emb.index_model_loaded, 3, "index model unload while paused")
+            assert (await d.status())["index_model_loaded"] is False
+            if why == "gpu_busy":
+                gpu.is_busy = False
+            else:
+                d.resume()
+            await until_idle(d, 10)
+            assert (await d.status())["indexed"] == 30
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
 # -- watcher -------------------------------------------------------------------------------
 
 def test_watcher_change_rescans_and_indexes_new_file(home: Path) -> None:

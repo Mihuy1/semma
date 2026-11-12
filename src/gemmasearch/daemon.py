@@ -435,6 +435,12 @@ class Daemon:
             except Exception:
                 log.exception("idle check failed")
 
+    def _unload_index_if_no_work(self) -> bool:
+        """On the model thread (keeps SQLite off the event loop)."""
+        if self._phase == "indexing" or (self._phase != "paused" and self.indexer.count_pending() > 0):
+            return False
+        return self.embedder.unload_index()
+
     async def check_idle(self) -> bool:
         """Unload the full index model after its grace period once indexing finishes, and unload
         the query model (or legacy single model) after `model_idle_unload_minutes` without queries."""
@@ -446,14 +452,16 @@ class Daemon:
 
         has_split = hasattr(self.embedder, "unload_index") and hasattr(self.embedder, "unload_query")
         if has_split:
-            # 1. Full index model: unload after index_model_unload_seconds once not indexing and no pending work.
+            # 1. Full index model: unload after index_model_unload_seconds once not indexing and no
+            #    pending work. Paused indexing (GPU busy, user pause) gives it back even with
+            #    files pending; the next slice loads it again.
             idx_grace = self._index_unload_seconds()
             if (idx_grace > 0 and self._index_model_loaded() and self._phase != "indexing"
                     and not self._queries_in_flight):
                 last_idx = max(self._last_work, float(getattr(self.embedder, "index_last_used", 0.0)))
                 needed_idx = min(idx_grace, GPU_BUSY_UNLOAD_S) if self._gpu_busy else idx_grace
-                if now - last_idx >= needed_idx and self.indexer.count_pending() == 0:
-                    unloaded = await loop.run_in_executor(self._model_exec, self.embedder.unload_index)
+                if now - last_idx >= needed_idx:
+                    unloaded = await loop.run_in_executor(self._model_exec, self._unload_index_if_no_work)
                     if unloaded is not False:
                         log.info("index model unloaded after %.0fs without indexing%s", needed_idx,
                                  " (GPU busy)" if self._gpu_busy else "")
