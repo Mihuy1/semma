@@ -859,6 +859,8 @@ def setup_logging(level: str | int | None = None) -> None:
         logging.getLogger(noisy).setLevel(logging.WARNING)  # one INFO line per Hub request otherwise
     # The unit sets HF_HUB_OFFLINE=1, so the Hub's "offline mode, using cached commit" warning is
     # expected on every model load (and huggingface_hub prints it twice via its own handler).
+    # huggingface_hub resets its logger level when imported, so set its own verbosity variable.
+    os.environ.setdefault("HF_HUB_VERBOSITY", "error")
     logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
 
