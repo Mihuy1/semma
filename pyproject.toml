@@ -3,8 +3,19 @@ name = "gemmasearch"
 version = "0.1.0"
 description = "Semantic desktop search for KDE KRunner, powered by EmbeddingGemma 2 and sqlite-vec"
 readme = "README.md"
-requires-python = ">=3.13"
-dependencies = []
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "charset-normalizer>=3.5.2",
+    "numpy>=2",
+    "pillow>=13.0.0",
+    "pillow-heif>=1.8.1",
+    "pypdfium2>=5.15.2",
+    "sentence-transformers[image,video]>=6.1",
+    "soundfile>=0.14.0",
+    "sqlite-vec>=0.1.9",
+    "torch>=2.15.0",
+    "transformers>=5",
+]
 
 [project.scripts]
 gemmasearch = "gemmasearch.cli:main"
