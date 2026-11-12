@@ -1,12 +1,14 @@
 """Office documents without third-party libraries: ODF (odt/ott/odp), DOCX, PPTX and RTF.
 
-ZIP members are read with an uncompressed-size cap (zip bombs) and any XML containing a
-DTD/entity declaration is rejected (entity-expansion attacks; real office XML never has one).
+ZIP members are read with an uncompressed-size cap (zip bombs) and any XML with a DTD is
+rejected by the parser itself, whatever the encoding (entity-expansion attacks; real office XML
+never has one).
 """
 
 from __future__ import annotations
 
 import codecs
+import posixpath
 import re
 import zipfile
 import xml.etree.ElementTree as ET
@@ -15,12 +17,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .base import Chunk, ExtractionError
-from .text import TextSpan, _short, chunk_text, make_snippet, normalize_newlines, spans_to_chunks
+from .text import (
+    MAX_CHUNKS,
+    TextSpan,
+    _short,
+    chunk_text,
+    make_snippet,
+    normalize_newlines,
+    spans_to_chunks,
+)
 
 if TYPE_CHECKING:
     from ..config import Config
 
-MAX_MEMBER_BYTES = 64 * 2**20  # uncompressed size of one XML part
+# Uncompressed size of one XML part. An ElementTree takes ~15-20x the XML size in memory, so
+# 32 MiB of XML can already cost ~0.5 GB; real documents are far smaller (a 500-page thesis
+# has a document.xml of a few MiB).
+MAX_MEMBER_BYTES = 32 * 2**20
 MAX_TOTAL_BYTES = 256 * 2**20  # uncompressed bytes read from one archive
 MAX_SLIDES = 1000
 MIN_SLIDE_CHARS = 3
@@ -37,6 +50,7 @@ NS = {
     "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
     "mc": "http://schemas.openxmlformats.org/markup-compatibility/2006",
     "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
 }
 
 
@@ -98,12 +112,38 @@ class _Zip:
         return parse_xml(self.read(name), name)
 
 
+class _DTDFound(Exception):
+    pass
+
+
+class _NoDTDBuilder(ET.TreeBuilder):
+    """A TreeBuilder that aborts parsing at the start of any <!DOCTYPE ...>.
+
+    expat reports the doctype before reading its internal subset, so no entity is ever
+    declared. This works for every encoding expat accepts (a byte search for b"<!DOCTYPE"
+    misses UTF-16 parts).
+    """
+
+    def doctype(self, name, pubid, system):  # called by the C XMLParser
+        raise _DTDFound
+
+
+def _reject_dtd(*_args) -> None:
+    raise _DTDFound
+
+
 def parse_xml(data: bytes, name: str = "XML") -> ET.Element:
-    if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
-        raise ExtractionError(f"{name} contains a DTD; refusing to parse")
+    parser = ET.XMLParser(target=_NoDTDBuilder())
+    expat = getattr(parser, "parser", None)  # only the pure-Python XMLParser exposes expat
+    if expat is not None:
+        expat.StartDoctypeDeclHandler = _reject_dtd
+        expat.EntityDeclHandler = _reject_dtd
     try:
-        return ET.fromstring(data)
-    except ET.ParseError as e:
+        parser.feed(data)
+        return parser.close()
+    except _DTDFound:
+        raise ExtractionError(f"{name} contains a DTD; refusing to parse") from None
+    except (ET.ParseError, ValueError) as e:  # ValueError: e.g. an unsupported encoding
         raise ExtractionError(f"{name} is not valid XML ({e}); encrypted or corrupt?") from e
 
 
@@ -142,11 +182,15 @@ def _doc_chunks(doc: _Doc) -> Iterator[Chunk]:
 
 
 def _slide_chunks(slides: Iterator[tuple[int, str]]) -> Iterator[Chunk]:
+    count = 0
     for number, text in slides:
         text = normalize_newlines(text).strip()
         if sum(not c.isspace() for c in text) < MIN_SLIDE_CHARS:
             continue
         for span in chunk_text(text):
+            if count >= MAX_CHUNKS:
+                return
+            count += 1
             yield Chunk("text", span.text, f"slide {number}", make_snippet(span.text), float(number))
 
 
@@ -384,11 +428,42 @@ def _pptx_notes_part(z: _Zip, slide_name: str) -> str | None:
     return None
 
 
+def _pptx_slide_order(z: _Zip) -> list[str]:
+    """Slide part names in presentation order (p:sldIdLst), or [] if that cannot be read."""
+    rels_name = "ppt/_rels/presentation.xml.rels"
+    if not (z.has("ppt/presentation.xml") and z.has(rels_name)):
+        return []
+    try:
+        pres = z.xml("ppt/presentation.xml")
+        rels = z.xml(rels_name)
+    except ExtractionError:
+        return []
+    targets = {}
+    for rel in rels.iterfind("rel:Relationship", NS):
+        target = rel.get("Target", "")
+        if rel.get("TargetMode") == "External" or not target:
+            continue
+        path = target.lstrip("/") if target.startswith("/") else posixpath.join("ppt", target)
+        targets[rel.get("Id")] = posixpath.normpath(path)
+    order: list[str] = []
+    for sld in pres.iterfind("p:sldIdLst/p:sldId", NS):
+        name = targets.get(sld.get(_q("r:id")))
+        if name and name not in order and z.has(name):
+            order.append(name)
+    return order
+
+
 def extract_pptx(path: Path) -> Iterator[Chunk]:
     with _Zip(path) as z:
-        slides = sorted(
-            ((int(m.group(1)), name) for name in z.names() if (m := _SLIDE_RE.match(name))),
-        )[:MAX_SLIDES]
+        # Presentation order (slide N = Nth slide in the show); if presentation.xml is missing
+        # or broken, fall back to the numeric order of the slide file names.
+        order = _pptx_slide_order(z)
+        if order:
+            slides = list(enumerate(order, 1))[:MAX_SLIDES]
+        else:
+            slides = sorted(
+                ((int(m.group(1)), name) for name in z.names() if (m := _SLIDE_RE.match(name))),
+            )[:MAX_SLIDES]
         if not slides:
             raise ExtractionError("no slides found (not a PPTX presentation?)")
 
@@ -492,8 +567,12 @@ def rtf_to_text(data: bytes) -> str:
                 continue
             if word == b"u" and arg is not None:
                 if not skip:
+                    # Signed 16-bit UTF-16 code units; non-BMP characters come as surrogate
+                    # pairs, combined below. Anything out of range becomes U+FFFD.
                     code = int(arg)
-                    out.append(chr(code + 65536 if code < 0 else code))
+                    if -32768 <= code < 0:
+                        code += 65536
+                    out.append(chr(code) if 0 < code <= 0xFFFF else "\ufffd")
                 to_skip = uc
                 continue
             if skip:
@@ -524,7 +603,8 @@ def rtf_to_text(data: bytes) -> str:
             if not skip and text:
                 out.append(text.decode(encoding, errors="replace"))
     flush()
-    text = "".join(out)
+    # Combine \uN surrogate pairs (emoji etc.); lone surrogates become U+FFFD.
+    text = "".join(out).encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
     # Collapse the blank lines produced by \par sequences into paragraph breaks.
     text = re.sub(r"[ \t]+\n", "\n", text)
     return re.sub(r"\n{3,}", "\n\n", text)
@@ -543,6 +623,8 @@ def extract_rtf(path: Path) -> Iterator[Chunk]:
 
 # ----------------------------------------------------------------------------- dispatch
 
+# filetypes.py routes only odt/ott/odp/docx/pptx/rtf here; the template/macro variants share
+# the same formats and are listed so that enabling them there is all it takes.
 _BY_SUFFIX = {
     ".odt": extract_odf, ".ott": extract_odf, ".odp": extract_odf, ".otp": extract_odf,
     ".docx": extract_docx, ".docm": extract_docx, ".dotx": extract_docx,
