@@ -12,8 +12,11 @@ Verified with sentence-transformers 6.3 (see extract/base.py for the content typ
 from __future__ import annotations
 
 import logging
+import os
 import threading
-from collections.abc import Sequence
+from collections import OrderedDict
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
@@ -29,6 +32,11 @@ log = logging.getLogger(__name__)
 # The context is 8192 tokens; extractors chunk well below that, this only guards against a
 # runaway chunk (Finnish averages roughly 3 characters per token).
 MAX_TEXT_CHARS = 16_000
+
+QUERY_CACHE_SIZE = 256  # type-as-you-go sends the same prefixes again (backspace, re-typing)
+# After a CUDA OOM the batch size of that modality stays reduced; it is doubled again (up to the
+# configured size) only after this many successful batches in a row.
+OOM_REGROW_AFTER = 200
 
 
 class EmbedderLike(Protocol):
@@ -72,20 +80,99 @@ def embed_chunks(embedder: EmbedderLike, chunks: Sequence[Chunk], title: str | S
     return out
 
 
+class GpuLock:
+    """A lock where waiting queries go before waiting index batches.
+
+    `threading.Lock` is unfair: a query arriving during a long video batch could lose the lock
+    to the next batch again and again. Here a batch only takes the GPU when no query is
+    waiting, so a query waits for at most the one batch already running.
+    """
+
+    def __init__(self) -> None:
+        self._cv = threading.Condition()
+        self._busy = False
+        self._queries_waiting = 0
+
+    @property
+    def queries_waiting(self) -> int:
+        return self._queries_waiting
+
+    @contextmanager
+    def query(self) -> Iterator[None]:
+        with self._cv:
+            self._queries_waiting += 1
+            try:
+                self._cv.wait_for(lambda: not self._busy)
+            finally:
+                self._queries_waiting -= 1
+            self._busy = True
+        try:
+            yield
+        finally:
+            self._release()
+
+    @contextmanager
+    def batch(self) -> Iterator[None]:
+        with self._cv:
+            self._cv.wait_for(lambda: not self._busy and self._queries_waiting == 0)
+            self._busy = True
+        try:
+            yield
+        finally:
+            self._release()
+
+    def _release(self) -> None:
+        with self._cv:
+            self._busy = False
+            self._cv.notify_all()
+
+
+def _normalise(vecs: np.ndarray) -> np.ndarray:
+    """L2-normalise rows in float32 (the model normalises in bfloat16: norms off by up to ~1%)."""
+    vecs = np.asarray(vecs, dtype=np.float32)
+    norms = np.linalg.norm(vecs, axis=-1, keepdims=True)
+    return vecs / np.where(norms > 0, norms, 1)
+
+
+def quiet_model_loading() -> None:
+    """No "Loading weights: 100%|..." progress bars from transformers / huggingface_hub.
+    Warnings and errors still go through logging."""
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    try:
+        import transformers.utils.logging as tlog
+
+        tlog.disable_progress_bar()
+    except Exception:  # pragma: no cover - transformers missing or moved the helper
+        pass
+    try:
+        from huggingface_hub.utils import disable_progress_bars
+
+        disable_progress_bars()
+    except Exception:  # pragma: no cover
+        pass
+
+
 class Embedder:
-    """Lazily loaded, thread-safe model wrapper. One lock guards the GPU, so a daemon can serve
-    queries from another thread while indexing (each call waits for at most one batch)."""
+    """Lazily loaded, thread-safe model wrapper. A daemon can serve queries from one thread
+    while another indexes: queries take priority over index batches (GpuLock), so a query waits
+    for at most the batch already running."""
 
     def __init__(self, cfg: Config | None = None, model_name: str | None = None, device: str | None = None):
         self.model_name = model_name or (cfg.model_name if cfg else DEFAULT_MODEL)
         self.model_id = self.model_name
         self.requested_device = device or (cfg.device if cfg else None)
         self.batch_sizes = dict(cfg.batch_sizes if cfg else DEFAULT_BATCH_SIZES)
+        # Current batch size per modality: reduced after a CUDA OOM, regrown slowly.
+        self._limits: dict[str, int] = {}
+        self._ok_batches: dict[str, int] = {}
         self.dim = 768  # replaced with the model's own value on load
         self.device: str | None = None
         self.load_seconds = 0.0
         self._model: Any = None
-        self._lock = threading.Lock()
+        self._gpu = GpuLock()
+        self._load_lock = threading.Lock()
+        self._query_cache: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._query_cache_lock = threading.Lock()
 
     # -- lifecycle --------------------------------------------------------------
     @property
@@ -93,7 +180,7 @@ class Embedder:
         return self._model is not None
 
     def load(self) -> None:
-        with self._lock:
+        with self._gpu.query():
             self._load_locked()
 
     def _load_locked(self) -> None:
@@ -101,6 +188,7 @@ class Embedder:
             return
         import time
 
+        quiet_model_loading()
         import torch
         from sentence_transformers import SentenceTransformer
 
@@ -114,20 +202,20 @@ class Embedder:
         self.dim = int(get_dim())
         # Warm up: the first CUDA call compiles/loads kernels (~0.5 s), which would otherwise
         # land on the first user query.
-        model.encode_query(["warm up"], convert_to_numpy=True)
+        model.encode_query(["warm up"], convert_to_numpy=True, show_progress_bar=False)
         self.device = device
         self._model = model
         self.load_seconds = time.monotonic() - started
         log.info("loaded %s on %s (%s) in %.1fs", self.model_name, device, dtype, self.load_seconds)
 
     def unload(self) -> None:
-        with self._lock:
+        with self._gpu.query():
             self._model = None
             self._empty_cache()
 
     def release_cache(self) -> None:
         """Return cached-but-unused CUDA memory to the driver (e.g. after a run of video batches)."""
-        with self._lock:
+        with self._gpu.query():
             self._empty_cache()
 
     def _empty_cache(self) -> None:
@@ -138,59 +226,93 @@ class Embedder:
 
     # -- encoding -------------------------------------------------------------
     def embed_query(self, query: str) -> np.ndarray:
-        with self._lock:
+        """Query vector (read-only array; repeated queries come from a small LRU cache)."""
+        with self._query_cache_lock:
+            hit = self._query_cache.get(query)
+            if hit is not None:
+                self._query_cache.move_to_end(query)
+                return hit
+        with self._gpu.query():
             self._load_locked()
-            vec = self._model.encode_query([query], convert_to_numpy=True, normalize_embeddings=True)
-        return np.asarray(vec[0], dtype=np.float32)
+            vec = self._model.encode_query([query], convert_to_numpy=True, normalize_embeddings=True,
+                                           show_progress_bar=False)
+        out = _normalise(vec[0])
+        out.flags.writeable = False
+        with self._query_cache_lock:
+            self._query_cache[query] = out
+            while len(self._query_cache) > QUERY_CACHE_SIZE:
+                self._query_cache.popitem(last=False)
+        return out
 
     def embed_chunks(self, chunks: Sequence[Chunk], title: str | Sequence[str]) -> np.ndarray:
         return embed_chunks(self, chunks, title)
 
+    def batch_limit(self, modality: str) -> int:
+        return self._limits.get(modality, max(1, self.batch_sizes.get(modality, 8)))
+
     def embed_batch(self, modality: str, contents: Sequence[Any], titles: Sequence[str]) -> np.ndarray:
-        """Embed single-modality contents in batches of the configured size."""
+        """Embed single-modality contents in batches of the configured size.
+
+        On a CUDA OOM the batch is halved and retried. The recovery runs after the `except`
+        block: inside it the traceback still references the failed call's frames and their
+        tensors, so emptying the cache there frees little. The reduced size is remembered for
+        the modality and only regrown after OOM_REGROW_AFTER clean batches.
+        """
         inputs = [model_input(modality, c, t) for c, t in zip(contents, titles, strict=True)]
-        size = max(1, self.batch_sizes.get(modality, 8))
         parts: list[np.ndarray] = []
         i = 0
         while i < len(inputs):
+            size = self.batch_limit(modality)
             batch = inputs[i : i + size]
+            oom = False
             try:
                 parts.append(self._encode(batch))
             except Exception as exc:
-                if not _is_oom(exc) or size == 1:
+                if not _is_oom(exc) or len(batch) == 1:
                     raise
-                size = max(1, size // 2)
-                log.warning("CUDA out of memory on %s batch of %d, retrying with %d", modality, len(batch), size)
+                oom = True
+            if oom:
+                del batch
+                smaller = max(1, size // 2)
+                self._limits[modality] = smaller
+                self._ok_batches[modality] = 0
+                log.warning("CUDA out of memory on a %s batch of %d, continuing with %d", modality, size, smaller)
                 self.release_cache()
                 continue
             i += len(batch)
+            self._regrow(modality, size)
         if not parts:
             return np.empty((0, self.dim), dtype=np.float32)
         return np.concatenate(parts).astype(np.float32, copy=False)
 
-    def _encode(self, inputs: list[Any]) -> np.ndarray:
-        import torch
+    def _regrow(self, modality: str, size: int) -> None:
+        if modality not in self._limits:
+            return
+        ok = self._ok_batches.get(modality, 0) + 1
+        self._ok_batches[modality] = ok
+        if ok >= OOM_REGROW_AFTER:
+            configured = max(1, self.batch_sizes.get(modality, 8))
+            grown = min(configured, size * 2)
+            if grown >= configured:
+                del self._limits[modality]
+            else:
+                self._limits[modality] = grown
+            self._ok_batches[modality] = 0
 
-        with self._lock:
+    def _encode(self, inputs: list[Any]) -> np.ndarray:
+        with self._gpu.batch():
             self._load_locked()
-            try:
-                vecs = self._model.encode(inputs, prompt="", batch_size=len(inputs), convert_to_numpy=True,
-                                          normalize_embeddings=True, show_progress_bar=False)
-            except torch.cuda.OutOfMemoryError:
-                self._empty_cache()
-                raise
+            vecs = self._model.encode(inputs, prompt="", batch_size=len(inputs), convert_to_numpy=True,
+                                      normalize_embeddings=True, show_progress_bar=False)
         vecs = np.asarray(vecs, dtype=np.float32)
         if not np.isfinite(vecs).all():
             raise FloatingPointError("model produced non-finite embeddings")
-        return vecs
+        return _normalise(vecs)
 
 
 def _is_oom(exc: BaseException) -> bool:
     try:
         import torch
-
-        if isinstance(exc, torch.cuda.OutOfMemoryError):
-            return True
     except ImportError:  # pragma: no cover
-        pass
-    return "out of memory" in str(exc).lower()
+        return False
+    return isinstance(exc, torch.cuda.OutOfMemoryError)
