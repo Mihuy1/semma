@@ -571,6 +571,98 @@ def test_query_device_cpu_selects_float32_cpu_and_invalid_warns(tmp_path: Path, 
     assert "query_device" in capsys.readouterr().err
 
 
+class _ConcurrencyStubST:
+    """SentenceTransformer stand-in that records concurrent calls per model instance."""
+
+    load_seconds = 0.0
+    created: list[_ConcurrencyStubST] = []
+
+    def __init__(self, model_name: str, **kwargs):
+        time.sleep(type(self).load_seconds)
+        self.text_only = "config_kwargs" in kwargs
+        self.active = self.max_active = 0
+        self._lock = threading.Lock()
+        type(self).created.append(self)
+
+    def eval(self):
+        return self
+
+    def get_sentence_embedding_dimension(self) -> int:
+        return DIM
+
+    def _call(self, seconds: float, inputs) -> np.ndarray:
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(seconds)
+            return np.stack([bag_of_words(str(x)) for x in inputs])
+        finally:
+            with self._lock:
+                self.active -= 1
+
+    def encode_query(self, inputs, **kw):
+        return self._call(0.1, inputs)
+
+    def encode(self, inputs, **kw):
+        return self._call(0.3, inputs)
+
+
+def _cpu_query_embedder(monkeypatch) -> Embedder:
+    import sentence_transformers
+
+    _ConcurrencyStubST.created = []
+    _ConcurrencyStubST.load_seconds = 0.0
+    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", _ConcurrencyStubST)
+    cfg = load_config(path=Path("/nonexistent.toml"))
+    cfg.device, cfg.query_device = "cuda", "cpu"
+    e = Embedder(cfg)
+    monkeypatch.setattr(e, "_empty_cache", lambda *a, **k: None)  # no CUDA here
+    return e
+
+
+def test_cpu_query_never_uses_the_index_model_outside_the_gpu_lock(monkeypatch) -> None:
+    # A query waits for the CPU lock while the CPU query model is unloaded, and indexing loads
+    # the full model meanwhile: the query must not encode with the full model next to a batch.
+    e = _cpu_query_embedder(monkeypatch)
+    e.load_query()
+    e._cpu_query_lock.acquire()  # as unload_query holds it
+    q = threading.Thread(target=e.embed_query, args=("hello world",))
+    q.start()
+    time.sleep(0.05)
+    e._query_model = None  # unload_query's body
+    b = threading.Thread(target=e.embed_batch, args=("text", ["a b c"], ["t"]))
+    b.start()
+    while e._model is None:
+        time.sleep(0.005)
+    time.sleep(0.05)  # the batch is encoding
+    e._cpu_query_lock.release()
+    q.join(5)
+    b.join(5)
+    full = [m for m in _ConcurrencyStubST.created if not m.text_only]
+    assert len(full) == 1 and full[0].max_active == 1
+
+
+def test_cpu_query_model_load_is_shared_after_index_unload(monkeypatch) -> None:
+    # The index model goes away while a query waits for the GPU lock; that query and a
+    # concurrent load_query (the daemon's model thread) must share one CPU query model load.
+    e = _cpu_query_embedder(monkeypatch)
+    e.embed_batch("text", ["a"], ["t"])
+    _ConcurrencyStubST.load_seconds = 0.3
+    with e._gpu.batch():  # as unload_index holds it
+        q = threading.Thread(target=e.embed_query, args=("hello world",))
+        q.start()
+        time.sleep(0.05)
+        e._model = None
+    time.sleep(0.05)  # the query is loading the CPU query model
+    loader = threading.Thread(target=e.load_query)
+    loader.start()
+    q.join(5)
+    loader.join(5)
+    assert sum(m.text_only for m in _ConcurrencyStubST.created) == 1
+    assert e.query_model_loaded and e.query_device == "cpu"
+
+
 def test_waiting_query_goes_before_waiting_batches() -> None:
     lock = GpuLock()
     order: list[str] = []

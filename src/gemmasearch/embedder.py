@@ -403,30 +403,27 @@ class Embedder:
             if hit is not None:
                 self._query_cache.move_to_end(query)
                 return hit
-        # Reuse the full model if it is already loaded (and we don't already have a CPU query model).
-        if self._query_model is None and self._model is not None:
-            with self._gpu.query():
-                model = self._model or self._query_model
-                if model is None:
-                    dev = self._resolve_query_device()
-                    self._load_query_locked(dev)
-                    model = self._query_model or self._model
-                vec = model.encode_query([query], convert_to_numpy=True, normalize_embeddings=True,
-                                         show_progress_bar=False)
-                now = time.monotonic()
-                self.last_used = now
-                self.query_last_used = now
-        else:
+        # The full index model is only touched under the GPU lock, a CPU query model only under
+        # the CPU query lock (a GPU query model under the GPU lock). Models can be loaded or
+        # dropped while we wait for a lock, so each attempt re-checks under it and retries.
+        vec = None
+        while vec is None:
+            if self._query_model is None and self._model is not None:
+                # Reuse the loaded full model instead of loading the query model.
+                with self._gpu.query():
+                    if self._model is not None:
+                        vec = self._run_query(self._model, query)
+                continue
             dev = self.query_device or self._resolve_query_device()
+            gpu_locked = dev != "cpu"  # _query_lock: the GPU lock, which also guards _model
             with self._query_lock(dev):
-                if self._query_model is None and self._model is None:
-                    self._load_query_locked(dev)
-                model = self._query_model if self._query_model is not None else self._model
-                vec = model.encode_query([query], convert_to_numpy=True, normalize_embeddings=True,
-                                         show_progress_bar=False)
-                now = time.monotonic()
-                self.last_used = now
-                self.query_last_used = now
+                if self._query_model is None and (self._model is None or gpu_locked):
+                    self._load_query_locked(dev)  # no-op if the full model is loaded
+                model = self._query_model
+                if model is None and gpu_locked:
+                    model = self._model
+                if model is not None:
+                    vec = self._run_query(model, query)
         out = _normalise(vec[0])
         out.flags.writeable = False
         with self._query_cache_lock:
@@ -434,6 +431,15 @@ class Embedder:
             while len(self._query_cache) > QUERY_CACHE_SIZE:
                 self._query_cache.popitem(last=False)
         return out
+
+    def _run_query(self, model: Any, query: str) -> np.ndarray:
+        """Encode one query; the caller holds the lock that guards `model`."""
+        vec = model.encode_query([query], convert_to_numpy=True, normalize_embeddings=True,
+                                 show_progress_bar=False)
+        now = time.monotonic()
+        self.last_used = now
+        self.query_last_used = now
+        return vec
 
     def embed_chunks(self, chunks: Sequence[Chunk], title: str | Sequence[str]) -> np.ndarray:
         return embed_chunks(self, chunks, title)
