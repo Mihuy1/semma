@@ -19,7 +19,7 @@ from gemmasearch import config as config_mod
 from gemmasearch import indexer as indexer_mod
 from gemmasearch.cli import main as cli_main
 from gemmasearch.config import MAX_KNN_K, load_config
-from gemmasearch.embedder import Embedder, GpuLock
+from gemmasearch.embedder import Embedder, GpuLock, LlamaOOMError
 from gemmasearch.extract.base import Chunk
 from gemmasearch.indexer import INDEX_FORMAT_VERSION, Indexer, ModelMismatch
 from gemmasearch.search import Searcher
@@ -395,11 +395,9 @@ class FakeModel:
         self.queries = 0
 
     def encode(self, inputs, **kw):
-        import torch
-
         self.sizes.append(len(inputs))
         if len(inputs) > self.max_batch:
-            raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 2 GiB")
+            raise LlamaOOMError("Vulkan out of memory. Tried to allocate 2 GiB")
         return np.full((len(inputs), DIM), 1.0, dtype=np.float32)
 
     def encode_query(self, inputs, **kw):
@@ -460,23 +458,26 @@ def test_query_cache_and_float32_normalisation() -> None:
     assert not a.flags.writeable
 
 
-def test_embedder_query_path_loads_text_only_and_reuses_full_model(monkeypatch) -> None:
-    import sentence_transformers
-    import torch
+def test_embedder_query_path_loads_text_only_and_reuses_full_model(tmp_path: Path, monkeypatch) -> None:
+    from gemmasearch import embedder as emb_mod
 
-    st_calls: list[dict] = []
+    worker_calls: list[dict] = []
+    workers: list[StubWorker] = []
 
-    class StubST:
-        def __init__(self, model_name: str, **kwargs):
-            st_calls.append({"model_name": model_name, **kwargs})
+    class StubWorker:
+        def __init__(self, lib_dir: Path, text_model_path: Path, mmproj_path: Path | None, use_gpu: bool, **_kwargs):
+            worker_calls.append({
+                "lib_dir": lib_dir,
+                "text_model_path": text_model_path,
+                "mmproj_path": mmproj_path,
+                "use_gpu": use_gpu,
+            })
+            self.dim = DIM
+            self.device = "vulkan" if use_gpu else "cpu"
             self.queries = 0
             self.batches = 0
-
-        def eval(self):
-            return self
-
-        def get_sentence_embedding_dimension(self) -> int:
-            return DIM
+            self.closed = False
+            workers.append(self)
 
         def encode_query(self, inputs, **kw):
             self.queries += 1
@@ -486,81 +487,109 @@ def test_embedder_query_path_loads_text_only_and_reuses_full_model(monkeypatch) 
             self.batches += 1
             return np.stack([bag_of_words(str(x)) for x in inputs])
 
-    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", StubST)
+        def close(self) -> None:
+            self.closed = True
+
+    ensured_files: list[str] = []
+
+    def fake_ensure_model_file(kind: str, model_dir: Path) -> Path:
+        ensured_files.append(kind)
+        return model_dir / f"{kind}.gguf"
+
+    monkeypatch.setattr(emb_mod, "ensure_model_file", fake_ensure_model_file)
+    monkeypatch.setattr(emb_mod, "_WorkerHandle", StubWorker)
     cfg = load_config(path=Path("/nonexistent.toml"))
-    cfg.device = "cuda"
+    cfg.model_dir = tmp_path / "models"
+    cfg.device = "vulkan"
     e = Embedder(cfg)
 
-    # 1. Query path loads the text-only model with vision_config=None, audio_config=None, local_files_only=True.
+    # 1. Query path loads the text-only worker (mmproj_path=None) on GPU and only requests the "text" GGUF.
     v1 = e.embed_query("hello world")
     assert v1.shape == (DIM,)
     assert e.query_model_loaded and not e.index_model_loaded and e.loaded
-    assert len(st_calls) == 1
-    assert st_calls[0]["config_kwargs"] == {"vision_config": None, "audio_config": None}
-    assert st_calls[0]["local_files_only"] is True
-    assert st_calls[0]["device"] == "cuda"
-    assert st_calls[0]["model_kwargs"] == {"dtype": torch.bfloat16}
+    assert ensured_files == ["text"]
+    assert len(worker_calls) == 1
+    assert worker_calls[0]["text_model_path"] == tmp_path / "models" / "text.gguf"
+    assert worker_calls[0]["mmproj_path"] is None
+    assert worker_calls[0]["use_gpu"] is True
+    q_worker = workers[-1]
+    assert not q_worker.closed
 
-    # 2. Indexing loads the full multimodal model (no config_kwargs) and drops the GPU query model.
-    st_calls.clear()
+    # 2. Indexing loads the full multimodal worker (mmproj_path is not None) and closes the GPU query worker.
+    worker_calls.clear()
+    ensured_files.clear()
     b = e.embed_batch("text", ["some text"], ["doc.md"])
     assert b.shape == (1, DIM)
     assert e.index_model_loaded and not e.query_model_loaded and e.loaded
-    assert len(st_calls) == 1
-    assert "config_kwargs" not in st_calls[0]
+    assert q_worker.closed
+    assert ensured_files == ["text", "mmproj"]
+    assert len(worker_calls) == 1
+    assert worker_calls[0]["text_model_path"] == tmp_path / "models" / "text.gguf"
+    assert worker_calls[0]["mmproj_path"] == tmp_path / "models" / "mmproj.gguf"
+    assert worker_calls[0]["use_gpu"] is True
 
-    # 3. While the full model is loaded, a new query reuses it without loading the query model.
-    st_calls.clear()
-    full_model = e._model
-    queries_before = full_model.queries
+    # 3. While the full worker is loaded, a new query reuses it without spawning a query worker.
+    worker_calls.clear()
+    ensured_files.clear()
+    full_worker = e._model
+    queries_before = full_worker.queries
     e.embed_query("another query")
-    assert st_calls == []
+    assert worker_calls == []
+    assert ensured_files == []
     assert not e.query_model_loaded and e.index_model_loaded
-    assert full_model.queries == queries_before + 1
+    assert full_worker.queries == queries_before + 1
 
-    # 4. Unloading the index model leaves nothing loaded; next query loads the text-only model again.
+    # 4. Unloading the index worker closes it and leaves nothing loaded; next query spawns the text-only worker again.
     assert e.unload_index() is True
+    assert full_worker.closed
     assert not e.loaded
     e.embed_query("third query")
     assert e.query_model_loaded and not e.index_model_loaded
-    assert len(st_calls) == 1
-    assert st_calls[0]["config_kwargs"] == {"vision_config": None, "audio_config": None}
+    assert ensured_files == ["text"]
+    assert len(worker_calls) == 1
+    assert worker_calls[0]["mmproj_path"] is None
 
 
 def test_query_device_cpu_selects_float32_cpu_and_invalid_warns(tmp_path: Path, monkeypatch, capsys) -> None:
-    import sentence_transformers
-    import torch
+    from gemmasearch import embedder as emb_mod
 
-    st_calls: list[dict] = []
+    worker_calls: list[dict] = []
 
-    class StubST:
-        def __init__(self, model_name: str, **kwargs):
-            st_calls.append({"model_name": model_name, **kwargs})
-
-        def eval(self):
-            return self
-
-        def get_sentence_embedding_dimension(self) -> int:
-            return DIM
+    class StubWorker:
+        def __init__(self, lib_dir: Path, text_model_path: Path, mmproj_path: Path | None, use_gpu: bool, **_kwargs):
+            worker_calls.append({
+                "lib_dir": lib_dir,
+                "text_model_path": text_model_path,
+                "mmproj_path": mmproj_path,
+                "use_gpu": use_gpu,
+            })
+            self.dim = DIM
+            self.device = "vulkan" if use_gpu else "cpu"
 
         def encode_query(self, inputs, **kw):
             return np.stack([bag_of_words(q) for q in inputs])
 
-    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", StubST)
+        def encode(self, inputs, **kw):
+            return np.stack([bag_of_words(str(x)) for x in inputs])
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(emb_mod, "ensure_model_file", lambda kind, model_dir: model_dir / f"{kind}.gguf")
+    monkeypatch.setattr(emb_mod, "_WorkerHandle", StubWorker)
 
     conf = tmp_path / "c.toml"
     conf.write_text('[daemon]\nquery_device = "cpu"\nindex_model_unload_seconds = 45\n')
     cfg = load_config(conf, home=tmp_path)
     assert cfg.query_device == "cpu"
     assert cfg.index_model_unload_seconds == 45.0
-    cfg.device = "cuda"  # even when indexing uses CUDA, query_device="cpu" uses CPU + float32
+    cfg.device = "vulkan"  # even when indexing uses GPU, query_device="cpu" uses CPU
 
     e = Embedder(cfg)
     e.embed_query("cpu query")
-    assert len(st_calls) == 1
-    assert st_calls[0]["device"] == "cpu"
-    assert st_calls[0]["model_kwargs"] == {"dtype": torch.float32}
-    assert st_calls[0]["config_kwargs"] == {"vision_config": None, "audio_config": None}
+    assert len(worker_calls) == 1
+    assert worker_calls[0]["use_gpu"] is False
+    assert worker_calls[0]["mmproj_path"] is None
     assert e.query_device == "cpu"
 
     # Unknown query_device warns and falls back to "auto".
@@ -571,24 +600,22 @@ def test_query_device_cpu_selects_float32_cpu_and_invalid_warns(tmp_path: Path, 
     assert "query_device" in capsys.readouterr().err
 
 
-class _ConcurrencyStubST:
-    """SentenceTransformer stand-in that records concurrent calls per model instance."""
+class _ConcurrencyStubWorker:
+    """_WorkerHandle stand-in that records concurrent calls per worker instance."""
 
     load_seconds = 0.0
-    created: list[_ConcurrencyStubST] = []
+    created: list[_ConcurrencyStubWorker] = []
 
-    def __init__(self, model_name: str, **kwargs):
+    def __init__(self, lib_dir: Path, text_model_path: Path, mmproj_path: Path | None, use_gpu: bool, **_kwargs):
         time.sleep(type(self).load_seconds)
-        self.text_only = "config_kwargs" in kwargs
+        self.text_only = mmproj_path is None
+        self.use_gpu = use_gpu
+        self.dim = DIM
+        self.device = "vulkan" if use_gpu else "cpu"
         self.active = self.max_active = 0
+        self.closed = False
         self._lock = threading.Lock()
         type(self).created.append(self)
-
-    def eval(self):
-        return self
-
-    def get_sentence_embedding_dimension(self) -> int:
-        return DIM
 
     def _call(self, seconds: float, inputs) -> np.ndarray:
         with self._lock:
@@ -607,18 +634,20 @@ class _ConcurrencyStubST:
     def encode(self, inputs, **kw):
         return self._call(0.3, inputs)
 
+    def close(self) -> None:
+        self.closed = True
+
 
 def _cpu_query_embedder(monkeypatch) -> Embedder:
-    import sentence_transformers
+    from gemmasearch import embedder as emb_mod
 
-    _ConcurrencyStubST.created = []
-    _ConcurrencyStubST.load_seconds = 0.0
-    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", _ConcurrencyStubST)
+    _ConcurrencyStubWorker.created = []
+    _ConcurrencyStubWorker.load_seconds = 0.0
+    monkeypatch.setattr(emb_mod, "ensure_model_file", lambda kind, model_dir: model_dir / f"{kind}.gguf")
+    monkeypatch.setattr(emb_mod, "_WorkerHandle", _ConcurrencyStubWorker)
     cfg = load_config(path=Path("/nonexistent.toml"))
-    cfg.device, cfg.query_device = "cuda", "cpu"
-    e = Embedder(cfg)
-    monkeypatch.setattr(e, "_empty_cache", lambda *a, **k: None)  # no CUDA here
-    return e
+    cfg.device, cfg.query_device = "vulkan", "cpu"
+    return Embedder(cfg)
 
 
 def test_cpu_query_never_uses_the_index_model_outside_the_gpu_lock(monkeypatch) -> None:
@@ -639,7 +668,7 @@ def test_cpu_query_never_uses_the_index_model_outside_the_gpu_lock(monkeypatch) 
     e._cpu_query_lock.release()
     q.join(5)
     b.join(5)
-    full = [m for m in _ConcurrencyStubST.created if not m.text_only]
+    full = [m for m in _ConcurrencyStubWorker.created if not m.text_only]
     assert len(full) == 1 and full[0].max_active == 1
 
 
@@ -648,7 +677,7 @@ def test_cpu_query_model_load_is_shared_after_index_unload(monkeypatch) -> None:
     # concurrent load_query (the daemon's model thread) must share one CPU query model load.
     e = _cpu_query_embedder(monkeypatch)
     e.embed_batch("text", ["a"], ["t"])
-    _ConcurrencyStubST.load_seconds = 0.3
+    _ConcurrencyStubWorker.load_seconds = 0.3
     with e._gpu.batch():  # as unload_index holds it
         q = threading.Thread(target=e.embed_query, args=("hello world",))
         q.start()
@@ -659,7 +688,7 @@ def test_cpu_query_model_load_is_shared_after_index_unload(monkeypatch) -> None:
     loader.start()
     q.join(5)
     loader.join(5)
-    assert sum(m.text_only for m in _ConcurrencyStubST.created) == 1
+    assert sum(m.text_only for m in _ConcurrencyStubWorker.created) == 1
     assert e.query_model_loaded and e.query_device == "cpu"
 
 

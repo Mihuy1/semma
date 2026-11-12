@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -19,18 +20,23 @@ pytestmark = pytest.mark.gpu
 
 
 @pytest.fixture(scope="module")
-def embedder() -> Embedder:
+def embedder() -> Iterator[Embedder]:
     e = Embedder()
     e.load()
-    return e
+    try:
+        yield e
+    finally:
+        e.unload()
 
 
 def test_document_format_matches_builtin_prompt(embedder: Embedder) -> None:
-    """Our "title: none | text: ..." formatting with prompt="" equals encode_document (no double prefix)."""
+    """Our "title: none | text: ..." formatting matches raw prompt encoding and bf16 reference."""
     text = "The cat sat on the mat."
     ours = embedder.embed_batch("text", [text], ["none"])[0]
-    builtin = embedder._model.encode_document([text], convert_to_numpy=True, normalize_embeddings=True)[0]
-    assert float(ours @ builtin) > 0.99  # bf16 batching noise only
+    direct = embedder._model.encode(["title: none | text: " + text])[0]
+    ref = np.load(Path(__file__).parent / "data" / "reference_bf16.npz")
+    assert float(ours @ direct) > 0.9999
+    assert float(ours @ ref["docs_text"][0]) > 0.999
     assert ours.dtype == np.float32 and ours.shape == (768,)
     assert abs(float(np.linalg.norm(ours)) - 1) < 1e-2
 
@@ -65,18 +71,19 @@ def test_semantic_search_end_to_end(tmp_path: Path, embedder: Embedder) -> None:
 
 
 def test_text_only_query_model_matches_full_and_drops_vision_audio(embedder: Embedder) -> None:
+    from PIL import Image
+
     q_emb = Embedder()
     q_emb.load_query()
+    worker = q_emb._query_model
     try:
         assert q_emb.query_model_loaded and not q_emb.index_model_loaded
-        st_model = q_emb._query_model
-        assert st_model is not None
-        # Verify vision and audio encoders are absent from the text-only model.
-        mod_names = [name for name, _ in st_model.named_modules()]
-        assert not any("vision" in n or "audio" in n for n in mod_names), mod_names
-        auto_model = st_model[0].auto_model
-        assert getattr(auto_model.config, "vision_config", None) is None
-        assert getattr(auto_model.config, "audio_config", None) is None
+        assert worker is not None
+        # Verify multimodal projector is not loaded in the text-only query worker (for both image and audio).
+        with pytest.raises(RuntimeError, match="multimodal projector is not loaded"):
+            worker.encode([{"image": Image.new("RGB", (64, 64), (255, 0, 0))}])
+        with pytest.raises(RuntimeError, match="multimodal projector is not loaded"):
+            worker.encode([{"audio": np.zeros(16_000, dtype=np.float32)}])
 
         for query in ("my CV", "how do I bake sourdough bread", "koulujen energiankulutus"):
             v_full = embedder.embed_query(query)
@@ -85,3 +92,6 @@ def test_text_only_query_model_matches_full_and_drops_vision_audio(embedder: Emb
             assert cos > 0.9999, f"{query!r}: cosine={cos}"
     finally:
         q_emb.unload()
+        assert not q_emb.loaded
+        if worker is not None:
+            assert worker._closed
