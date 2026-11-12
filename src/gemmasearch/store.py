@@ -191,21 +191,28 @@ class Store:
         rows.clear()
         return count
 
-    def finish_scan(self, generation: int, scanned_roots: Iterable[Path]) -> int:
+    def finish_scan(self, generation: int, scanned_roots: Iterable[Path],
+                    failed_dirs: Iterable[str] = ()) -> int:
         """Forget files under the scanned roots that this scan did not see (deleted or now excluded).
 
-        Only roots that were actually scanned are touched, so an unmounted drive keeps its index.
+        Files below a directory that could not be listed (permission error, I/O error, stale
+        network mount, unmounted root) are kept: not seeing them proves nothing.
         Their chunks cascade away, and the triggers drop the vectors and FTS rows with them.
         """
+        failed = tuple(d.rstrip("/") + "/" for d in failed_dirs)
         removed = 0
         with self.db:
             for root in scanned_roots:
                 prefix = str(root).rstrip("/") + "/"
-                cur = self.db.execute(
-                    "DELETE FROM files WHERE last_seen < ? AND substr(path, 1, ?) = ?",
+                if prefix in failed:
+                    continue
+                rows = self.db.execute(
+                    "SELECT id, path FROM files WHERE last_seen < ? AND substr(path, 1, ?) = ?",
                     (generation, len(prefix), prefix),
-                )
-                removed += cur.rowcount
+                ).fetchall()
+                doomed = [(r[0],) for r in rows if not r[1].startswith(failed)]
+                self.db.executemany("DELETE FROM files WHERE id = ?", doomed)
+                removed += len(doomed)
         self.set_meta("last_scan_at", str(time.time()))
         return removed
 

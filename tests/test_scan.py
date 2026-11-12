@@ -33,7 +33,8 @@ def touch(path: Path, size: int = 5000, age_days: float = 1000) -> Path:
 @pytest.mark.parametrize(
     ("name", "kind"),
     [("a.PDF", ft.PDF), ("notes.md", ft.TEXT), ("x.odt", ft.OFFICE), ("p.HEIC", ft.IMAGE),
-     ("s.flac", ft.AUDIO), ("v.mkv", ft.VIDEO), ("main.py", None), ("Makefile", None), (".md", None)],
+     ("s.flac", ft.AUDIO), ("v.mkv", ft.VIDEO), ("main.py", None), ("Makefile", None), (".md", None),
+     ("CMakeLists.txt", None), ("requirements-dev.txt", None), ("LICENSE.md", None), ("LICENSE.electron.txt", None), ("notes.TXT", ft.TEXT), ("notice-board.md", ft.TEXT)],
 )
 def test_classify(name: str, kind: str | None) -> None:
     assert ft.classify(name) == kind
@@ -84,6 +85,7 @@ def test_scanner_exclusions_and_projects(tmp_path: Path) -> None:
     touch(tmp_path / "Downloads/setup.exe")  # a lone installer does not make Downloads an app
     touch(tmp_path / "Games/Zomboid/game.exe")
     touch(tmp_path / "Games/Zomboid/fmod.dll")
+    touch(tmp_path / "Games/Zomboid/steam_api64.dll")
     touch(tmp_path / "Games/Zomboid/media/sound.ogg")
 
     cfg = make_cfg(tmp_path)
@@ -165,3 +167,117 @@ def test_user_dirs_are_respected(tmp_path: Path) -> None:
     os.environ.pop("XDG_CONFIG_HOME", None)
     cfg = make_cfg(tmp_path)
     assert cfg.locations[tmp_path / "Asiakirjat"] == 40
+
+
+# -- regression tests for the review findings ---------------------------------------------------
+
+def scan_paths(cfg: Config, **kw) -> set[str]:
+    return {Path(f.path).relative_to(cfg.home).as_posix() for f in Scanner(cfg).scan(now=NOW, **kw)}
+
+
+def test_non_utf8_name_is_skipped_not_fatal(tmp_path: Path) -> None:
+    touch(tmp_path / "Documents/good.md")
+    bad = os.fsencode(tmp_path / "Documents") + b"/caf\xe9.md"
+    with open(bad, "wb") as fh:
+        fh.write(b"x" * 5000)
+    cfg = make_cfg(tmp_path)
+    scanner = Scanner(cfg)
+    store = Store(":memory:")
+    gen = store.begin_scan()
+    assert store.upsert_scanned(scanner.scan(now=NOW), gen) == 1
+    assert scanner.stats.bad_names == 1
+
+
+def test_unreadable_dir_keeps_its_index(tmp_path: Path) -> None:
+    touch(tmp_path / "Documents/locked/a.md")
+    touch(tmp_path / "Documents/b.md")
+    cfg = make_cfg(tmp_path)
+    store = Store(":memory:")
+    scanner = Scanner(cfg)
+    gen = store.begin_scan()
+    store.upsert_scanned(scanner.scan(now=NOW), gen)
+    store.finish_scan(gen, scanner.stats.roots, scanner.stats.failed_dirs)
+
+    locked = tmp_path / "Documents/locked"
+    locked.chmod(0)
+    try:
+        gen = store.begin_scan()
+        store.upsert_scanned(scanner.scan(now=NOW), gen)
+        removed = store.finish_scan(gen, scanner.stats.roots, scanner.stats.failed_dirs)
+    finally:
+        locked.chmod(0o755)
+    if os.geteuid() == 0:
+        pytest.skip("root can read anything")
+    assert removed == 0
+    assert store.db.execute("SELECT count(*) FROM files").fetchone()[0] == 2
+
+
+def test_empty_root_is_treated_as_unmounted(tmp_path: Path) -> None:
+    drive = tmp_path / "drive"
+    touch(drive / "a.md")
+    cfg = make_cfg(tmp_path)
+    store = Store(":memory:")
+    scanner = Scanner(cfg)
+    gen = store.begin_scan()
+    store.upsert_scanned(scanner.scan([drive], now=NOW), gen)
+    (drive / "a.md").unlink()  # the "drive" now looks like an empty mount point
+    gen = store.begin_scan()
+    store.upsert_scanned(scanner.scan([drive], now=NOW), gen)
+    assert store.finish_scan(gen, scanner.stats.roots, scanner.stats.failed_dirs) == 0
+
+
+def test_downloads_with_installer_and_dlls_is_not_pruned(tmp_path: Path) -> None:
+    touch(tmp_path / "Downloads/setup.exe")
+    touch(tmp_path / "Downloads/a.dll")
+    touch(tmp_path / "Downloads/b.dll")
+    touch(tmp_path / "Downloads/paper.pdf")
+    touch(tmp_path / "Downloads/tool/tool.exe")
+    touch(tmp_path / "Downloads/tool/one.dll")
+    touch(tmp_path / "Downloads/tool/notes.md")  # one exe + one dll: not an app install
+    assert scan_paths(make_cfg(tmp_path)) == {"Downloads/paper.pdf", "Downloads/tool/notes.md"}
+
+
+def test_marker_in_root_or_anchor_is_not_a_project(tmp_path: Path) -> None:
+    touch(tmp_path / ".git/HEAD")  # dotfiles repo in ~
+    touch(tmp_path / "Documents/package.json")
+    touch(tmp_path / "Documents/build/report.pdf")
+    touch(tmp_path / "notes.md")
+    files = {Path(f.path).name: f for f in Scanner(make_cfg(tmp_path)).scan(now=NOW)}
+    assert set(files) == {"report.pdf", "notes.md"}
+    assert not any(f.in_project for f in files.values())
+
+
+def test_system_dirs_only_pruned_at_root_and_case_insensitive(tmp_path: Path) -> None:
+    touch(tmp_path / "Windows/system.txt")
+    touch(tmp_path / "$Recycle.Bin/x.md")
+    touch(tmp_path / "Documents/Windows/tips.md")
+    touch(tmp_path / "Documents/NODE_MODULES/x.md")
+    assert scan_paths(make_cfg(tmp_path)) == {"Documents/Windows/tips.md"}
+
+
+def test_virtualenv_pruned_anywhere(tmp_path: Path) -> None:
+    touch(tmp_path / "myenv/pyvenv.cfg")
+    touch(tmp_path / "myenv/lib/readme.md")
+    touch(tmp_path / "Documents/a.md")
+    assert scan_paths(make_cfg(tmp_path)) == {"Documents/a.md"}
+
+
+def test_nested_roots_are_walked_once(tmp_path: Path) -> None:
+    touch(tmp_path / "Documents/a.md")
+    touch(tmp_path / "b.md")
+    cfg = make_cfg(tmp_path)
+    cfg.roots = [tmp_path, tmp_path / "Documents"]
+    files = [f.path for f in Scanner(cfg).scan(now=NOW)]
+    assert sorted(files) == sorted({str(tmp_path / "Documents/a.md"), str(tmp_path / "b.md")})
+
+
+def test_symlinked_home_is_canonicalised(tmp_path: Path) -> None:
+    real = tmp_path / "var/home/user"
+    touch(real / "Documents/a.md")
+    link = tmp_path / "home"
+    link.symlink_to(tmp_path / "var/home")
+    cfg = load_config(path=tmp_path / "none.toml", home=link / "user")
+    cfg.include_mounts = False
+    files = list(Scanner(cfg).scan(now=NOW))
+    assert [f.path for f in files] == [str(real / "Documents/a.md")]
+    assert files[0].score.parts["loc"] == 40

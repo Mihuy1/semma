@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from . import filetypes as ft
-from .config import Config, load_config
+from .config import Config, canonical, load_config
 from .scanner import ScannedFile, Scanner
 from .store import Store
 
@@ -37,7 +37,14 @@ def _location_label(cfg: Config, scanner: Scanner, path: str) -> str:
 
 def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
     scanner = Scanner(cfg)
-    roots = [Path(r).expanduser().resolve() for r in args.root] if args.root else None
+    roots = None
+    if args.root:
+        roots = [canonical(Path(r)) for r in args.root]
+        allowed = cfg.effective_roots()
+        outside = [r for r in roots if not any(r.is_relative_to(a) for a in allowed)]
+        if outside:
+            print(f"Not inside a configured root: {', '.join(map(str, outside))}", file=sys.stderr)
+            return 2
 
     if args.dry_run:
         files = list(scanner.scan(roots))
@@ -46,12 +53,12 @@ def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
         gen = store.begin_scan()
         files = []
         store.upsert_scanned((files.append(f) or f for f in scanner.scan(roots)), gen)
-        removed = store.finish_scan(gen, scanner.stats.roots)
+        removed = store.finish_scan(gen, scanner.stats.roots, scanner.stats.failed_dirs)
 
     st = scanner.stats
     print(f"Scanned {', '.join(_short(str(r), cfg.home) for r in st.roots)} in {st.seconds:.1f}s: "
           f"{st.dirs:,} dirs, {st.files_seen:,} files, {st.matched:,} indexable, "
-          f"{st.too_large} too large, {st.errors} unreadable")
+          f"{st.too_large} too large, {st.errors} unreadable, {st.bad_names} non-UTF-8 names")
     top_pruned = ", ".join(f"{k} x{v}" for k, v in st.pruned.most_common(8))
     print(f"Pruned dirs: {top_pruned}")
 

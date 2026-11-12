@@ -10,23 +10,27 @@ from typing import Any
 
 from . import filetypes as ft
 
-# Directory names that are never descended into, wherever they appear.
+# Directory names that are never descended into, wherever they appear (compared case-insensitively).
 DEFAULT_EXCLUDE_DIR_NAMES: tuple[str, ...] = (
     # dependency / tooling caches
-    "node_modules", "__pycache__", "site-packages", "venv", "npm-cache", "bower_components",
-    # Windows system folders (NTFS data drives)
-    "$RECYCLE.BIN", "System Volume Information", "Config.Msi", "WUDownloadCache",
-    "msdownld.tmp", "Program Files", "Program Files (x86)", "ProgramData", "Windows",
-    "WindowsApps", "WpSystem", "found.000", "lost+found",
+    "node_modules", "__pycache__", "site-packages", "npm-cache", "bower_components",
     # game libraries
     "SteamLibrary", "steamapps", "XboxGames", "Epic Games", "GOG Games",
     # extracted AppImages
     "squashfs-root",
 )
 
+# Operating-system folders pruned only directly below a scan root (e.g. an NTFS data drive),
+# so that a user's own "~/Documents/Windows" notes folder is still indexed.
+DEFAULT_ROOT_SYSTEM_DIR_NAMES: tuple[str, ...] = (
+    "$RECYCLE.BIN", "System Volume Information", "Config.Msi", "WUDownloadCache",
+    "msdownld.tmp", "Program Files", "Program Files (x86)", "ProgramData", "Windows",
+    "WindowsApps", "WpSystem", "found.000", "lost+found", "Recovery", "PerfLogs",
+)
+
 # Directory names skipped only inside a software project (outside one they may be real folders).
 DEFAULT_PROJECT_BUILD_DIR_NAMES: tuple[str, ...] = (
-    "build", "dist", "target", "out", "vendor", "env", "coverage", "bin", "obj",
+    "build", "dist", "target", "out", "vendor", "env", "venv", "coverage", "bin", "obj",
 )
 
 # A directory containing any of these is the root of a software project.
@@ -137,8 +141,9 @@ class Config:
     roots: list[Path]
     include_mounts: bool = True
     skip_hidden: bool = True
-    skip_app_installs: bool = True  # prune folders containing both .exe and .dll files
+    skip_app_installs: bool = True  # prune installed Windows apps/games (see scanner._is_app_install)
     exclude_dir_names: frozenset[str] = frozenset(DEFAULT_EXCLUDE_DIR_NAMES)
+    root_system_dir_names: frozenset[str] = frozenset(DEFAULT_ROOT_SYSTEM_DIR_NAMES)
     project_build_dir_names: frozenset[str] = frozenset(DEFAULT_PROJECT_BUILD_DIR_NAMES)
     project_markers: frozenset[str] = frozenset(DEFAULT_PROJECT_MARKERS)
     exclude_paths: list[Path] = field(default_factory=list)
@@ -177,16 +182,39 @@ class Config:
     rrf_k: int = 60
 
     def effective_roots(self) -> list[Path]:
-        """Configured roots plus detected mounts, de-duplicated and with nested roots removed."""
+        """Configured roots plus detected mounts, canonicalised and de-duplicated.
+
+        Nested roots are kept: the scanner never descends into another root (or into any mount
+        point), so each root is walked exactly once, by itself.
+        """
         roots = list(self.roots)
         if self.include_mounts:
             roots += detect_mounts()
         resolved: list[Path] = []
         for root in roots:
-            root = root.expanduser()
+            root = canonical(root.expanduser())
             if root.is_dir() and root not in resolved:
                 resolved.append(root)
-        return [r for r in resolved if not any(r != o and r.is_relative_to(o) for o in resolved)]
+        return resolved
+
+    def canonicalize(self) -> None:
+        """Resolve symlinks in every configured path so paths compare equal everywhere
+        (e.g. Fedora Atomic, where /home is a symlink to /var/home)."""
+        self.home = canonical(self.home)
+        self.roots = [canonical(p) for p in self.roots]
+        self.exclude_paths = [canonical(p) for p in self.exclude_paths]
+        self.locations = {canonical(p): pts for p, pts in self.locations.items()}
+        self.exclude_dir_names = frozenset(n.casefold() for n in self.exclude_dir_names)
+        self.root_system_dir_names = frozenset(n.casefold() for n in self.root_system_dir_names)
+        self.project_build_dir_names = frozenset(n.casefold() for n in self.project_build_dir_names)
+
+
+def canonical(path: Path) -> Path:
+    """Absolute path with symlinks resolved (non-strict: missing paths are fine)."""
+    try:
+        return path.expanduser().resolve()
+    except (OSError, RuntimeError):
+        return path.expanduser().absolute()
 
 
 def _expand(value: str, home: Path) -> Path:
@@ -218,6 +246,7 @@ def load_config(path: Path | None = None, home: Path | None = None) -> Config:
     if path.is_file():
         with path.open("rb") as fh:
             apply_overrides(cfg, tomllib.load(fh))
+    cfg.canonicalize()
     return cfg
 
 
@@ -237,7 +266,7 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
     for key in ("include_mounts", "skip_hidden", "skip_app_installs"):
         if key in scan:
             setattr(cfg, key, bool(scan[key]))
-    for key in ("exclude_dir_names", "project_build_dir_names", "project_markers"):
+    for key in ("exclude_dir_names", "root_system_dir_names", "project_build_dir_names", "project_markers"):
         if key in scan:
             setattr(cfg, key, frozenset(scan[key]))
     if "extra_exclude_dir_names" in scan:
