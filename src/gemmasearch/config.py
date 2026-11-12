@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,6 +67,18 @@ DEFAULT_MODEL = "google/embeddinggemma-2"
 # 32 -> 71/s at 6.7 GiB (padding and attention memory grow faster than the GPU gains);
 # images run ~21/s at any batch size (preprocessing-bound), so 8 keeps memory low.
 DEFAULT_BATCH_SIZES: dict[str, int] = {"text": 8, "image": 8, "audio": 8, "video": 2}
+
+# sqlite-vec refuses KNN queries with k above 4096.
+MAX_KNN_K = 4096
+
+# Near-duplicate collapsing in search results: two files whose best chunks for the query have at
+# least this cosine similarity are shown as one result. Calibrated on the real index
+# (1,190 files): copies of one COCO photo in different folders (re-encoded/resized) score
+# 0.88-1.00 (median 0.98, p5 0.955) while the closest pair of *different* COCO photos scores
+# 0.95, so images use 0.96. Text chunks are much more compressed: unchanged sections of two
+# thesis versions score >= 0.998, the same thesis as .odt vs .md (different chunk boundaries)
+# 0.97-0.98, and a separate notes file about the thesis up to 0.987, so text uses 0.99.
+DEFAULT_DUPLICATE_SIMILARITY: dict[str, float] = {"text": 0.99, "image": 0.96, "audio": 0.98, "video": 0.97}
 
 
 def _env_path(var: str, fallback: Path) -> Path:
@@ -178,8 +191,22 @@ class Config:
     # best match of the query (short queries inflate every similarity, which the margin absorbs).
     min_similarity: float = 0.60
     similarity_margin: float = 0.10
+    # Single-word queries (most KRunner queries) inflate every similarity and flatten the
+    # curve: on the real index "dog" had 22 files within 0.05 of its best match (0.73) and 99
+    # within 0.10. Checked by eye: dog photos score 0.70-0.73 and cats/cows/sheep start at
+    # 0.656; for "mountains" (best 0.698) real mountain photos end around 0.66, then cows,
+    # hydrants and buses at 0.64-0.65. So single words keep only the top 0.04 and >= 0.65.
+    min_similarity_short: float = 0.65
+    similarity_margin_short: float = 0.04
     knn_k: int = 200
     rrf_k: int = 60
+    # Similarity bonus for priority 100 (scaled linearly; 0 disables). Only meant to break
+    # near-ties in favour of files in the user's own folders.
+    location_prior: float = 0.02
+    duplicate_similarity: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_DUPLICATE_SIMILARITY))
+    # A long-running process keeps all vectors in RAM (768 floats = 3 KiB per chunk) up to this
+    # many chunks; beyond it, searches use sqlite-vec directly.
+    vector_cache_max_chunks: int = 1_000_000
 
     def effective_roots(self) -> list[Path]:
         """Configured roots plus detected mounts, canonicalised and de-duplicated.
@@ -250,8 +277,40 @@ def load_config(path: Path | None = None, home: Path | None = None) -> Config:
     return cfg
 
 
+KNOWN_KEYS: dict[str, frozenset[str]] = {
+    "": frozenset({"db_path", "scan", "priority", "media", "model", "index", "search"}),
+    "scan": frozenset({"roots", "include_mounts", "skip_hidden", "skip_app_installs", "exclude_dir_names",
+                       "root_system_dir_names", "project_build_dir_names", "project_markers",
+                       "extra_exclude_dir_names", "exclude_paths"}),
+    "priority": frozenset({"locations", "type_weights", "other_location", "project_penalty",
+                           "depth_penalty_per_level", "depth_penalty_max", "tiny_penalty", "huge_video_penalty",
+                           "depth_free_levels", "recency"}),
+    "media": frozenset({"max_minutes", "segment_seconds"}),
+    "model": frozenset({"name", "device"}),
+    "index": frozenset({"batch_sizes", "prefetch_chunks"}),
+    "search": frozenset({"min_similarity", "similarity_margin", "min_similarity_short", "similarity_margin_short",
+                         "knn_k", "rrf_k", "location_prior", "duplicate_similarity", "vector_cache_max_chunks"}),
+}
+
+
+def _warn(msg: str) -> None:
+    print(f"gemmasearch: config: {msg}", file=sys.stderr)
+
+
+def check_unknown_keys(data: dict[str, Any]) -> list[str]:
+    """Names of keys this version does not know (typos would otherwise be silently ignored)."""
+    unknown = [k for k in data if k not in KNOWN_KEYS[""]]
+    for section, keys in KNOWN_KEYS.items():
+        value = data.get(section) if section else None
+        if isinstance(value, dict):
+            unknown += [f"{section}.{k}" for k in value if k not in keys]
+    return unknown
+
+
 def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
     home = cfg.home
+    for key in check_unknown_keys(data):
+        _warn(f"unknown key {key!r} ignored")
     scan = data.get("scan", {})
     prio = data.get("priority", {})
     media = data.get("media", {})
@@ -302,9 +361,18 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
         cfg.batch_sizes.update({k: max(1, int(v)) for k, v in index["batch_sizes"].items()})
     if "prefetch_chunks" in index:
         cfg.prefetch_chunks = max(1, int(index["prefetch_chunks"]))
-    for key in ("min_similarity", "similarity_margin"):
+    for key in ("min_similarity", "similarity_margin", "min_similarity_short", "similarity_margin_short",
+                "location_prior"):
         if key in search:
             setattr(cfg, key, float(search[key]))
-    for key in ("knn_k", "rrf_k"):
-        if key in search:
-            setattr(cfg, key, int(search[key]))
+    if "knn_k" in search:
+        k = int(search["knn_k"])
+        if not 1 <= k <= MAX_KNN_K:
+            _warn(f"search.knn_k must be between 1 and {MAX_KNN_K}; using {min(max(k, 1), MAX_KNN_K)}")
+        cfg.knn_k = min(max(k, 1), MAX_KNN_K)
+    if "rrf_k" in search:
+        cfg.rrf_k = max(1, int(search["rrf_k"]))
+    if "duplicate_similarity" in search:
+        cfg.duplicate_similarity.update({k: float(v) for k, v in search["duplicate_similarity"].items()})
+    if "vector_cache_max_chunks" in search:
+        cfg.vector_cache_max_chunks = max(0, int(search["vector_cache_max_chunks"]))

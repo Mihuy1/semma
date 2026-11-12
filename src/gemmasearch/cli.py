@@ -14,7 +14,7 @@ from pathlib import Path
 from . import filetypes as ft
 from .config import Config, canonical, load_config
 from .scanner import ScannedFile, Scanner
-from .store import Store
+from .store import Store, db_users
 
 
 def _human(n: float) -> str:
@@ -133,6 +133,9 @@ def cmd_status(args: argparse.Namespace, cfg: Config) -> int:
     if last:
         print(f"Last scan: {time.strftime('%Y-%m-%d %H:%M', time.localtime(float(last)))}")
 
+    fmt = store.get_meta("index_format")
+    if fmt:
+        print(f"Index format: {fmt}")
     failed = store.failed_files()
     if failed:
         errors = Counter((r["error"] or "").split("\n")[0][:100] for r in failed)
@@ -160,7 +163,7 @@ def _install_stop_handler(stop: threading.Event) -> None:
 
 def cmd_index(args: argparse.Namespace, cfg: Config) -> int:
     from .embedder import Embedder
-    from .indexer import IndexStats, Indexer
+    from .indexer import IndexStats, Indexer, ModelMismatch
 
     if not cfg.db_path.exists():
         print("No index yet. Run `gemmasearch scan` first.")
@@ -170,6 +173,17 @@ def cmd_index(args: argparse.Namespace, cfg: Config) -> int:
     indexer = Indexer(store, cfg, embedder, prefetch=not args.no_prefetch)
     stop = threading.Event()
     _install_stop_handler(stop)
+
+    try:
+        requeued = indexer.prepare(rebuild=args.rebuild, retry_failed=args.retry_failed)
+    except ModelMismatch as exc:
+        print(f"The index was built with {exc.stored}, but the configured model is {exc.configured}.\n"
+              f"Vectors of different models cannot be mixed. Run `gemmasearch index --rebuild` to drop "
+              f"every vector and re-embed all files with {exc.configured}, or set model.name back.",
+              file=sys.stderr)
+        return 1
+    if requeued:
+        print(f"Queued {requeued:,} files again (rebuild, retry or a new index format).")
 
     if indexer.count_pending(args.kind) == 0:
         print("Nothing to index.")
@@ -204,8 +218,9 @@ def cmd_index(args: argparse.Namespace, cfg: Config) -> int:
     if tty:
         print()
     rate = st.done / st.seconds if st.seconds > 0 else 0.0
+    deferred = f", {st.deferred:,} deferred (database busy)" if st.deferred else ""
     print(f"{'Stopped' if st.stopped else 'Done'}: {st.indexed:,} indexed, {st.failed:,} failed, "
-          f"{st.skipped:,} skipped (changed since scan), {st.chunks:,} chunks in {_duration(st.seconds)} "
+          f"{st.skipped:,} skipped (changed since scan){deferred}, {st.chunks:,} chunks in {_duration(st.seconds)} "
           f"({rate:.1f} files/s, embedding {st.embed_seconds:.1f}s)")
     return 130 if st.stopped else 0
 
@@ -221,8 +236,8 @@ def cmd_search(args: argparse.Namespace, cfg: Config) -> int:
     embedder = Embedder(cfg)
     stored_model = store.get_meta("model_id")
     if stored_model and stored_model != embedder.model_id:
-        print(f"Index was built with {stored_model}, not {embedder.model_id}; re-run `gemmasearch index`.",
-              file=sys.stderr)
+        print(f"Index was built with {stored_model}, not {embedder.model_id}; run `gemmasearch index --rebuild` "
+              f"to re-embed everything with it, or set model.name back.", file=sys.stderr)
         return 1
     embedder.load()
     searcher = Searcher(store, cfg, embedder)
@@ -237,7 +252,8 @@ def cmd_search(args: argparse.Namespace, cfg: Config) -> int:
     for r in results:
         sim = f"{r.similarity:.3f}" if r.similarity is not None else "  -  "
         where = f" [{r.locator}]" if r.locator else ""
-        print(f"{sim}  {r.kind:<6} {_short(r.path, cfg.home)}{where}   ({'+'.join(r.matched)})")
+        similar = f"  +{r.duplicates} similar" if r.duplicates else ""
+        print(f"{sim}  {r.kind:<6} {_short(r.path, cfg.home)}{where}   ({'+'.join(r.matched)}){similar}")
         if r.snippet:
             print(f"               {r.snippet[:150]}")
     if not results:
@@ -252,6 +268,11 @@ def cmd_reset(args: argparse.Namespace, cfg: Config) -> int:
         what = "the whole database (scan queue included)" if args.all else "all embeddings and chunks"
         print(f"This deletes {what} in {cfg.db_path}. Re-run with --yes to confirm.")
         return 1
+    users = db_users(cfg.db_path) if cfg.db_path.exists() else []
+    if users and not args.force:
+        print(f"The database is open in another process (pid {', '.join(map(str, users))}); stop it first "
+              f"(or pass --force).", file=sys.stderr)
+        return 1
     if args.all:
         for suffix in ("", "-wal", "-shm"):
             Path(f"{cfg.db_path}{suffix}").unlink(missing_ok=True)
@@ -265,6 +286,13 @@ def cmd_reset(args: argparse.Namespace, cfg: Config) -> int:
     store.db.execute("VACUUM")
     print("Index cleared; every file is pending again.")
     return 0
+
+
+def _positive_int(value: str) -> int:
+    n = int(value)
+    if n <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive number, not {value}")
+    return n
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -288,11 +316,14 @@ def build_parser() -> argparse.ArgumentParser:
     ix.add_argument("--limit", type=int, help="index at most N files")
     ix.add_argument("--kind", action="append", choices=ft.KINDS, help="only this kind (repeatable)")
     ix.add_argument("--no-prefetch", action="store_true", help="extract and embed on one thread")
+    ix.add_argument("--retry-failed", action="store_true", help="queue files that failed before again")
+    ix.add_argument("--rebuild", action="store_true",
+                    help="re-embed every file (required after changing model.name; drops the old vectors then)")
     ix.set_defaults(func=cmd_index)
 
     se = sub.add_parser("search", help="search the index")
     se.add_argument("query")
-    se.add_argument("-n", type=int, default=10, help="number of results")
+    se.add_argument("-n", type=_positive_int, default=10, help="number of results")
     se.add_argument("--kind", action="append", choices=ft.KINDS, help="only this kind (repeatable)")
     se.add_argument("--json", action="store_true", help="machine-readable output")
     se.set_defaults(func=cmd_search)
@@ -300,6 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
     rs = sub.add_parser("reset", help="drop all embeddings (files are queued again)")
     rs.add_argument("--yes", action="store_true", help="confirm")
     rs.add_argument("--all", action="store_true", help="delete the whole database file instead")
+    rs.add_argument("--force", action="store_true", help="even if another process has the database open")
     rs.set_defaults(func=cmd_reset)
     return p
 
