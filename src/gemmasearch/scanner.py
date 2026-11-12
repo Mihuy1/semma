@@ -37,6 +37,7 @@ class ScanStats:
     # Directories (and roots) that could not be listed. Their previously indexed files must
     # not be forgotten just because this scan could not see them.
     failed_dirs: list[str] = field(default_factory=list)
+    walked_dirs: list[str] = field(default_factory=list)
     seconds: float = 0.0
 
 
@@ -130,6 +131,7 @@ class Scanner:
                         continue
                     if not in_project and any(n in markers for n in names):
                         in_project = True
+                stats.walked_dirs.append(dirpath)
 
                 for entry in entries:
                     name = entry.name
