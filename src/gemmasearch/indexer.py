@@ -12,12 +12,18 @@ Pipeline:
 Batching across files matters: most files (photos, notes) are a single chunk. The bounded queue
 keeps extraction a few chunks ahead of the GPU without holding many decoded videos in memory.
 A stop request leaves every file either fully committed or untouched (still pending).
+
+A buffer of a rarely used modality (one scanned PDF page among thousands of notes) is flushed
+after FLUSH_AFTER_S seconds or FLUSH_AFTER_FILES other files, so its file does not wait for the
+end of a long (in a daemon: endless) run.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import queue
+import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -28,15 +34,56 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from .config import Config
-from .store import Store
+from .store import ChunkRecord, Store
 
 if TYPE_CHECKING:
     from .embedder import EmbedderLike
     from .extract.base import Chunk
 
+log = logging.getLogger(__name__)
+
 ExtractFn = Callable[[Path, str, Config], Iterator["Chunk"]]
 SNIPPET_CHARS = 200
 QUEUE_PAGE = 256
+
+# Bump when chunking, the document prompt format or the FTS layout changes: every file is then
+# re-queued (its old chunks stay searchable until replaced). Stored in meta 'index_format'.
+# 2: schema v3 (fts_chunks recreated with a prefix index), vectors renormalised in float32.
+INDEX_FORMAT_VERSION = 2
+
+FLUSH_AFTER_S = 3.0
+FLUSH_AFTER_FILES = 16
+# Embedding failures of this many different files in a row (with no success in between) mean
+# the model/GPU is broken, not the files: the run stops instead of failing the whole queue.
+MAX_CONSECUTIVE_EMBED_FAILURES = 5
+# Transient storage errors (database locked by another process for longer than the busy
+# timeout): retry with backoff, then leave the file pending rather than recording a failure.
+STORE_RETRIES = 4
+STORE_BACKOFF_S = 0.5
+# Failed files are retried automatically up to this many attempts in total, the n-th retry no
+# sooner than n * RETRY_BACKOFF_S after the last attempt. `index --retry-failed` retries now.
+AUTO_RETRY_ATTEMPTS = 3
+RETRY_BACKOFF_S = 86_400.0
+
+
+class ModelMismatch(RuntimeError):
+    def __init__(self, stored: str | None, configured: str):
+        super().__init__(f"the index was built with {stored}, but the configured model is {configured}")
+        self.stored = stored
+        self.configured = configured
+
+
+def extractor_version() -> str:
+    """Failed files are retried once whenever this changes (an upgrade may have fixed them)."""
+    from . import __version__
+
+    try:
+        from . import extract
+
+        ext = getattr(extract, "EXTRACTOR_VERSION", None)
+    except Exception:  # pragma: no cover - reported when indexing actually starts
+        ext = None
+    return f"{__version__}/{ext}" if ext is not None else __version__
 
 
 @dataclass(slots=True)
@@ -55,6 +102,7 @@ class IndexStats:
     indexed: int = 0
     failed: int = 0
     skipped: int = 0  # changed or vanished since the scan; left pending for the next scan
+    deferred: int = 0  # could not be stored (database busy); left pending for the next run
     chunks: int = 0
     embed_seconds: float = 0.0
     seconds: float = 0.0
@@ -63,7 +111,7 @@ class IndexStats:
 
     @property
     def done(self) -> int:
-        return self.indexed + self.failed + self.skipped
+        return self.indexed + self.failed + self.skipped + self.deferred
 
 
 ProgressFn = Callable[[IndexStats], None]
@@ -90,8 +138,16 @@ class _Job:
     dead: bool = False  # failed or abandoned; its remaining chunks are ignored
 
 
-# Messages from the extraction thread.
-_CHUNK, _END, _SKIP, _FAIL, _DONE, _CRASH = "chunk", "end", "skip", "fail", "done", "crash"
+@dataclass
+class _Buffer:
+    items: list[tuple[_Job, _Record, Any]] = field(default_factory=list)
+    started: float = 0.0  # monotonic time of the oldest item
+    files_at_start: int = 0  # files finished (ended/failed/skipped) when the oldest item arrived
+
+
+# Messages from the extraction thread. _TICK: nothing arrived for a while (lets the consumer
+# flush aged buffers while a slow file is being extracted).
+_CHUNK, _END, _SKIP, _FAIL, _DONE, _CRASH, _TICK = "chunk", "end", "skip", "fail", "done", "crash", "tick"
 
 
 def _snippet(chunk: Chunk) -> str:
@@ -120,6 +176,42 @@ class Indexer:
         self.extract_fn = extract_fn
         self.prefetch = prefetch  # False: extract and embed on one thread (for comparison/debugging)
 
+    # -- preparation -------------------------------------------------------------
+    def prepare(self, rebuild: bool = False, retry_failed: bool = False) -> int:
+        """Check the stored model and index format and re-queue files as needed.
+
+        - A different model never wipes the index silently: ModelMismatch unless `rebuild`.
+        - `rebuild`: re-embed everything (with the same model, old vectors stay searchable
+          until replaced).
+        - A new INDEX_FORMAT_VERSION re-queues everything; a new extractor version re-queues
+          failed files; `retry_failed` re-queues failed files now.
+        Returns the number of files re-queued.
+        """
+        store = self.store
+        model, dim = self.embedder.model_id, self.embedder.dim
+        requeued = 0
+        if not store.model_matches(model, dim):
+            if not rebuild:
+                raise ModelMismatch(store.get_meta("model_id"), model)
+            store.set_model(model, dim)  # drops every vector, marks everything pending
+        elif store.get_meta("model_id") != model:
+            store.set_meta("model_id", model)
+        if rebuild:
+            requeued += store.requeue(("indexed", "failed"))
+
+        if store.get_meta("index_format") != str(INDEX_FORMAT_VERSION):
+            requeued += store.requeue(("indexed", "failed"))
+            store.set_meta("index_format", str(INDEX_FORMAT_VERSION))
+        version = extractor_version()
+        if store.get_meta("extractor_version") != version:
+            requeued += store.requeue(("failed",))
+            store.set_meta("extractor_version", version)
+        if retry_failed:
+            requeued += store.requeue(("failed",), reset_attempts=False)
+        else:
+            requeued += store.requeue_failed_for_retry(AUTO_RETRY_ATTEMPTS, RETRY_BACKOFF_S)
+        return requeued
+
     # -- queue ----------------------------------------------------------------
     def _queue_where(self, kinds: Sequence[str] | None) -> tuple[str, list[Any]]:
         where, args = "status = 'pending'", []
@@ -130,12 +222,12 @@ class Indexer:
 
     def count_pending(self, kinds: Sequence[str] | None = None) -> int:
         where, args = self._queue_where(kinds)
-        with self.store.lock:
-            return self.store.db.execute(f"SELECT count(*) FROM files WHERE {where}", args).fetchone()[0]
+        return self.store.db.execute(f"SELECT count(*) FROM files WHERE {where}", args).fetchone()[0]
 
     def iter_queue(self, kinds: Sequence[str] | None = None, limit: int | None = None) -> Iterator[FileRow]:
         """Pending files by priority, read a page at a time (keyset pagination, so rows being
-        marked indexed meanwhile neither shift nor repeat the order)."""
+        marked indexed meanwhile neither shift nor repeat the order). Uses the calling thread's
+        own connection."""
         where, args = self._queue_where(kinds)
         sql = (f"SELECT id, path, kind, size, mtime, priority FROM files WHERE {where} {{after}} "
                f"ORDER BY priority DESC, mtime DESC, id DESC LIMIT ?")
@@ -144,8 +236,7 @@ class Indexer:
         while remaining != 0:
             page = QUEUE_PAGE if remaining < 0 else min(QUEUE_PAGE, remaining)
             after = "AND (priority, mtime, id) < (?, ?, ?)" if last else ""
-            with self.store.lock:
-                rows = self.store.db.execute(sql.format(after=after), [*args, *(last or ()), page]).fetchall()
+            rows = self.store.db.execute(sql.format(after=after), [*args, *(last or ()), page]).fetchall()
             if not rows:
                 return
             for r in rows:
@@ -183,12 +274,18 @@ class Indexer:
                         break
                     yield (_CHUNK, row, chunk)
             except Exception as exc:  # per-file failure, keep going
+                if stop.is_set():
+                    return  # e.g. Ctrl-C killed ffmpeg: not the file's fault, leave it pending
                 yield (_FAIL, row, _error_text(exc))
                 continue
             finally:
                 close = getattr(chunks, "close", None)
                 if close:
                     close()  # lets extractors clean up (e.g. kill ffmpeg) when abandoned
+            if stop.is_set():
+                # The extraction may have been cut short by the interrupt (Ctrl-C also reaches
+                # ffmpeg); never commit a possibly truncated file as complete.
+                return
             yield (_END, row)
 
     def _threaded(self, rows: Iterator[FileRow], stop: threading.Event, cancelled: set[int]) -> Iterator[tuple]:
@@ -224,6 +321,7 @@ class Indexer:
                 except queue.Empty:
                     if stop.is_set():  # don't wait for a slow extraction to yield
                         return
+                    yield (_TICK,)
                     continue
                 if msg[0] == _DONE:
                     return
@@ -238,14 +336,16 @@ class Indexer:
     def run(self, limit: int | None = None, kinds: Sequence[str] | None = None,
             progress: ProgressFn | None = None, stop: threading.Event | None = None) -> IndexStats:
         stop = stop or threading.Event()
-        self.store.ensure_model(self.embedder.model_id, self.embedder.dim)
+        self.prepare()
         stats = IndexStats()
         pending = self.count_pending(kinds)
         stats.total = pending if limit is None else min(limit, pending)
         started = time.monotonic()
         jobs: dict[int, _Job] = {}
-        buffers: dict[str, list[tuple[_Job, _Record, Any]]] = {}
+        buffers: dict[str, _Buffer] = {}
         cancelled: set[int] = set()
+        files_finished = 0  # files whose extraction ended, failed or was skipped
+        consecutive_failures = 0  # files failing at embedding with no success in between
 
         def report() -> None:
             stats.seconds = time.monotonic() - started
@@ -261,54 +361,78 @@ class Indexer:
             job.dead = True
             cancelled.add(job.row.id)
             jobs.pop(job.row.id, None)
-            self._mark_failed(job.row, error)
-            stats.failed += 1
+            if self._mark_failed(job.row, error):
+                stats.failed += 1
+            else:
+                stats.deferred += 1
             report()
 
         def flush(modality: str) -> None:
-            items = buffers.pop(modality, [])
-            items = [it for it in items if not it[0].dead]
+            nonlocal consecutive_failures
+            buf = buffers.pop(modality, None)
+            items = [it for it in (buf.items if buf else []) if not it[0].dead]
             if not items:
                 return
             t = time.monotonic()
+            titles = [os.path.basename(it[0].row.path) for it in items]
             try:
-                vecs = self.embedder.embed_batch(modality, [it[2] for it in items],
-                                                 [os.path.basename(it[0].row.path) for it in items])
+                vecs = self.embedder.embed_batch(modality, [it[2] for it in items], titles)
                 results: list[np.ndarray | BaseException] = list(vecs)
             except Exception:
                 # Isolate the bad input: retry one by one so only its file fails.
                 results = []
-                for job, _, content in items:
+                for (_, _, content), title in zip(items, titles, strict=True):
                     try:
-                        results.append(self.embedder.embed_batch(modality, [content],
-                                                                 [os.path.basename(job.row.path)])[0])
+                        results.append(self.embedder.embed_batch(modality, [content], [title])[0])
                     except Exception as exc:
                         results.append(exc)
-                if len(items) > 1 and all(isinstance(r, BaseException) for r in results):
-                    # Every input failing points at the model/GPU, not the files: stop the run
-                    # instead of marking the whole queue failed.
+                failed_files = {job.row.id for (job, _, _), r in zip(items, results, strict=True)
+                                if isinstance(r, BaseException)}
+                if len(failed_files) >= 2 and all(isinstance(r, BaseException) for r in results):
+                    # Inputs of several files all failing points at the model/GPU, not the files:
+                    # stop the run instead of marking the whole queue failed. (All chunks of ONE
+                    # file failing is that file's problem: it fails below and the run goes on.)
                     raise results[-1]  # type: ignore[misc]
             stats.embed_seconds += time.monotonic() - t
             for (job, rec, _), res in zip(items, results, strict=True):
                 if job.dead:
                     continue
                 if isinstance(res, BaseException):
+                    consecutive_failures += 1
                     fail(job, f"embedding: {_error_text(res)}")
+                    if consecutive_failures >= MAX_CONSECUTIVE_EMBED_FAILURES:
+                        raise res
                     continue
-                rec.vector = res
+                consecutive_failures = 0
+                # Renormalise in float32: the model normalises in bfloat16 (norm error ~1%).
+                v = np.asarray(res, dtype=np.float32)
+                norm = float(np.linalg.norm(v))
+                rec.vector = v / norm if norm > 0 else v
                 job.unembedded -= 1
                 if job.ended and job.unembedded == 0:
                     finish(job)
+
+        def flush_aged() -> None:
+            now = time.monotonic()
+            for modality, buf in list(buffers.items()):
+                if now - buf.started >= FLUSH_AFTER_S or files_finished - buf.files_at_start >= FLUSH_AFTER_FILES:
+                    flush(modality)
 
         rows = self.iter_queue(kinds, limit)
         source = self._threaded(rows, stop, cancelled) if self.prefetch else self._produce(rows, stop, cancelled)
         try:
             for msg in source:
-                kind, row = msg[0], msg[1]
+                kind = msg[0]
+                if kind == _TICK:
+                    flush_aged()
+                    continue
+                row = msg[1]
                 stats.current = row.path
                 if kind == _SKIP:
                     stats.skipped += 1
+                    files_finished += 1
                     report()
+                    flush_aged()
                     continue
                 if row.id in cancelled:  # failed already; the producer may still be sending its chunks
                     continue
@@ -321,18 +445,24 @@ class Indexer:
                                   chunk.content if chunk.modality == "text" else None)
                     job.records.append(rec)
                     job.unembedded += 1
-                    buf = buffers.setdefault(chunk.modality, [])
-                    buf.append((job, rec, chunk.content))
-                    if len(buf) >= max(1, self.cfg.batch_sizes.get(chunk.modality, 8)):
+                    buf = buffers.get(chunk.modality)
+                    if buf is None:
+                        buf = buffers[chunk.modality] = _Buffer(started=time.monotonic(),
+                                                                files_at_start=files_finished)
+                    buf.items.append((job, rec, chunk.content))
+                    if len(buf.items) >= max(1, self.cfg.batch_sizes.get(chunk.modality, 8)):
                         flush(chunk.modality)
                 elif kind == _FAIL:
+                    files_finished += 1
                     fail(job, msg[2])
                 elif kind == _END:
+                    files_finished += 1
                     job.ended = True
                     if job.unembedded == 0:
                         finish(job)
                 if stop.is_set():
                     break
+                flush_aged()
             # Embed what is buffered: on a stop this finishes files that were fully extracted
             # (a partial batch is quick); files still mid-extraction stay pending.
             for job in jobs.values():
@@ -350,37 +480,50 @@ class Indexer:
         return stats
 
     # -- database writes --------------------------------------------------------
+    def _with_retry(self, what: str, fn: Callable[[], Any]) -> tuple[bool, Any]:
+        """Run a store write, retrying transient OperationalErrors ("database is locked").
+        Returns (ok, result); ok is False if it still failed after the retries."""
+        delay = STORE_BACKOFF_S
+        for attempt in range(STORE_RETRIES):
+            try:
+                return True, fn()
+            except sqlite3.OperationalError as exc:
+                if attempt == STORE_RETRIES - 1:
+                    log.warning("%s: %s; leaving the file pending", what, exc)
+                    return False, None
+                time.sleep(delay)
+                delay *= 2
+        return False, None  # pragma: no cover
+
     def _commit(self, job: _Job, stats: IndexStats) -> None:
         """Replace the file's chunks, vectors and FTS rows and mark it indexed, atomically."""
         row = job.row
-        db = self.store.db
+        records = []
+        for rec in job.records:
+            assert rec.vector is not None
+            records.append(ChunkRecord(rec.modality, rec.locator, rec.snippet, rec.position, rec.text, rec.vector))
         try:
-            with self.store.lock, db:
-                db.execute("DELETE FROM chunks WHERE file_id = ?", (row.id,))  # triggers clear vec/fts
-                for seq, rec in enumerate(job.records):
-                    cur = db.execute(
-                        "INSERT INTO chunks (file_id, seq, modality, locator, snippet, position) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (row.id, seq, rec.modality, rec.locator, rec.snippet, rec.position),
-                    )
-                    chunk_id = cur.lastrowid
-                    assert rec.vector is not None
-                    db.execute("INSERT INTO vec_chunks (chunk_id, embedding, modality, kind) VALUES (?, ?, ?, ?)",
-                               (chunk_id, np.ascontiguousarray(rec.vector, dtype=np.float32), rec.modality, row.kind))
-                    if rec.text:
-                        db.execute("INSERT INTO fts_chunks (rowid, text) VALUES (?, ?)", (chunk_id, rec.text))
-                # Guarded by size/mtime: if a concurrent scan saw a newer version, it stays pending.
-                db.execute("UPDATE files SET status = 'indexed', error = NULL, indexed_at = ? "
-                           "WHERE id = ? AND size = ? AND mtime = ?", (time.time(), row.id, row.size, row.mtime))
-        except Exception as exc:
-            # Typically the file row was removed by a concurrent scan (FK violation).
-            self._mark_failed(row, f"storing: {_error_text(exc)}")
-            stats.failed += 1
+            ok, stored = self._with_retry(f"storing {row.path}", lambda: self.store.replace_chunks(
+                row.id, row.size, row.mtime, row.kind, records))
+        except Exception as exc:  # a real problem with this file's data (not a busy database)
+            if self._mark_failed(row, f"storing: {_error_text(exc)}"):
+                stats.failed += 1
+            else:
+                stats.deferred += 1
             return
-        stats.indexed += 1
-        stats.chunks += len(job.records)
+        if not ok:
+            stats.deferred += 1
+        elif not stored:
+            stats.skipped += 1  # removed or changed by a concurrent scan; it is pending (or gone)
+        else:
+            stats.indexed += 1
+            stats.chunks += len(job.records)
 
-    def _mark_failed(self, row: FileRow, error: str) -> None:
-        with self.store.lock, self.store.db:
-            self.store.db.execute("UPDATE files SET status = 'failed', error = ?, indexed_at = ? WHERE id = ?",
-                                  (error[:2000], time.time(), row.id))
+    def _mark_failed(self, row: FileRow, error: str) -> bool:
+        """Record a failure. Returns False if even that could not be stored (left pending)."""
+        try:
+            ok, _ = self._with_retry(f"marking {row.path} failed", lambda: self.store.mark_failed(row.id, error))
+        except Exception:
+            log.exception("marking %s failed", row.path)
+            return False
+        return ok
