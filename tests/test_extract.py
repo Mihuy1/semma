@@ -690,3 +690,16 @@ def test_corrupt_image(tmp_path, cfg):
 def test_unknown_kind(tmp_path, cfg):
     with pytest.raises(ExtractionError):
         run(tmp_path / "x", "spreadsheet", cfg)
+
+
+def test_tiny_text_is_not_embedded(tmp_path):
+    from gemmasearch.config import load_config
+    from gemmasearch.extract import extract
+
+    cfg = load_config(path=tmp_path / "none.toml", home=tmp_path)
+    tiny = tmp_path / "CLAUDE.md"
+    tiny.write_text("@AGENTS.md\n")
+    short_note = tmp_path / "note.txt"
+    short_note.write_text("Call the dentist about the appointment on Friday")
+    assert list(extract(tiny, "text", cfg)) == []
+    assert len(list(extract(short_note, "text", cfg))) == 1

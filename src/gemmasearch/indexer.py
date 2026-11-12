@@ -49,7 +49,7 @@ QUEUE_PAGE = 256
 # Bump when chunking, the document prompt format or the FTS layout changes: every file is then
 # re-queued (its old chunks stay searchable until replaced). Stored in meta 'index_format'.
 # 2: schema v3 (fts_chunks recreated with a prefix index), vectors renormalised in float32.
-INDEX_FORMAT_VERSION = 2
+INDEX_FORMAT_VERSION = 3  # 3: tiny text chunks are no longer embedded
 
 FLUSH_AFTER_S = 3.0
 FLUSH_AFTER_FILES = 16

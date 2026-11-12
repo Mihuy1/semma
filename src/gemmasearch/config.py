@@ -66,7 +66,8 @@ DEFAULT_MODEL = "google/embeddinggemma-2"
 # RTX 5070 Ti with ~2,000-character text chunks: text 8 -> 112 chunks/s at 2.7 GiB peak, but
 # 32 -> 71/s at 6.7 GiB (padding and attention memory grow faster than the GPU gains);
 # images run ~21/s at any batch size (preprocessing-bound), so 8 keeps memory low.
-DEFAULT_BATCH_SIZES: dict[str, int] = {"text": 8, "image": 8, "audio": 8, "video": 2}
+# Video is 1: a 32-frame chunk takes ~0.7 s, and a query never waits for more than one batch.
+DEFAULT_BATCH_SIZES: dict[str, int] = {"text": 8, "image": 8, "audio": 8, "video": 1}
 
 # sqlite-vec refuses KNN queries with k above 4096.
 MAX_KNN_K = 4096
