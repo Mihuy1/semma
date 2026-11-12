@@ -58,6 +58,7 @@ log = logging.getLogger("gemmasearch.daemon")
 MIN_QUERY_CHARS = 3
 PROGRESS_LOG_EVERY = 100  # files
 GPU_BUSY_RECHECK_S = 60.0
+GPU_BUSY_UNLOAD_S = 60.0  # unload after 1 min without queries while another app uses the GPU
 # A slice that only skipped/deferred files (changed since the scan, database busy) leaves them
 # pending; don't spin on them, wait for the rescan their change triggers (or this long).
 NO_PROGRESS_RETRY_S = 300.0
@@ -425,12 +426,15 @@ class Daemon:
                 or (self._load_task is not None and not self._load_task.done())):
             return False
         last = max(self._last_query, self._last_work, float(getattr(self.embedder, "last_used", 0.0)))
-        if time.monotonic() - last < idle:
+        # While another application (a game) keeps the GPU busy, give its VRAM back quickly.
+        needed = min(idle, GPU_BUSY_UNLOAD_S) if self._gpu_busy else idle
+        if time.monotonic() - last < needed:
             return False
         loop = asyncio.get_running_loop()
         unloaded = await loop.run_in_executor(self._model_exec, self.embedder.unload)
         if unloaded is not False:
-            log.info("model unloaded after %.0f min without queries or indexing", idle / 60)
+            log.info("model unloaded after %.0f min without queries or indexing%s", needed / 60,
+                     " (GPU busy)" if self._gpu_busy else "")
         return True
 
     # -- control --------------------------------------------------------------------------
