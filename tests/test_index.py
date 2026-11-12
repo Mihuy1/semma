@@ -11,7 +11,7 @@ from fakes import ExtractionError, FakeEmbedder, FakeExtractor
 from gemmasearch.config import Config, load_config
 from gemmasearch.indexer import Indexer
 from gemmasearch.scanner import Scanner
-from gemmasearch.search import Searcher, fts_query
+from gemmasearch.search import Searcher, fts_query, fts_text_query
 from gemmasearch.store import MIGRATIONS, SCHEMA_V1, Store, connect
 
 DOCS = {
@@ -28,6 +28,7 @@ def make_cfg(home: Path) -> Config:
     cfg.roots = [home / "Documents"]
     cfg.min_similarity = 0.2  # bag-of-words vectors of unrelated texts are ~0
     cfg.similarity_margin = 1.0
+    cfg.min_similarity_short, cfg.similarity_margin_short = 0.2, 1.0
     return cfg
 
 
@@ -86,7 +87,7 @@ def test_migration_from_v1_backfills_file_names(tmp_path: Path) -> None:
     db.close()
 
     store = Store(path)
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS) == 2
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS) == 3
     assert store.embedding_dim() == 768
     hits = store.db.execute("SELECT rowid FROM fts_files WHERE fts_files MATCH ?", ['"opinnaytetyo"']).fetchall()
     assert len(hits) == 1
@@ -227,11 +228,13 @@ def test_removed_files_drop_vectors_and_fts(env, tmp_path: Path) -> None:
 def test_model_change_resets_index(env) -> None:
     cfg, store = env
     run(cfg, store)
-    assert store.ensure_model("other-model", 768) is True
+    assert store.model_matches("fake-bow", 768)
+    assert not store.model_matches("other-model", 768)
+    store.set_model("other-model", 768)
     assert set(statuses(store).values()) == {"pending"}
     assert table_counts(store) == (0, 0, 0)
-    assert store.ensure_model("other-model", 768) is False
-    assert store.ensure_model("small-model", 256) is True
+    assert store.model_matches("other-model", 768)
+    store.set_model("small-model", 256)
     assert store.embedding_dim() == 256
     store.db.execute("INSERT INTO vec_chunks (chunk_id, embedding, modality, kind) VALUES (1, ?, 'text', 'text')",
                      (np.zeros(256, dtype=np.float32),))
@@ -304,6 +307,10 @@ def test_fts_escaping_never_errors(env, query: str) -> None:
 def test_fts_query_shape() -> None:
     assert fts_query('rocket-engine "launch" OR x') == '"rocket"* "engine"* "launch"* "OR"* "x"'
     assert fts_query("!!! ---") is None
+    # Chunk text: only the last term is a prefix, and only from 3 characters on.
+    assert fts_text_query('rocket-engine "launch"') == '"rocket" "engine" "launch"*'
+    assert fts_text_query("the re") == '"the" "re"'
+    assert fts_text_query("!!!") is None
 
 
 def test_finnish_diacritics_both_ways(tmp_path: Path) -> None:
