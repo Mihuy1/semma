@@ -55,6 +55,14 @@ DEFAULT_MAX_BYTES: dict[str, int] = {
 # (max age in days, bonus points); the first matching row wins.
 DEFAULT_RECENCY: tuple[tuple[float, float], ...] = ((30, 15), (365, 10), (3 * 365, 5))
 
+DEFAULT_MODEL = "google/embeddinggemma-2"
+
+# Chunks per model call, per modality (a CUDA OOM halves the batch and retries). Measured on an
+# RTX 5070 Ti with ~2,000-character text chunks: text 8 -> 112 chunks/s at 2.7 GiB peak, but
+# 32 -> 71/s at 6.7 GiB (padding and attention memory grow faster than the GPU gains);
+# images run ~21/s at any batch size (preprocessing-bound), so 8 keeps memory low.
+DEFAULT_BATCH_SIZES: dict[str, int] = {"text": 8, "image": 8, "audio": 8, "video": 2}
+
 
 def _env_path(var: str, fallback: Path) -> Path:
     value = os.environ.get(var)
@@ -153,6 +161,21 @@ class Config:
     max_media_seconds: float = 30 * 60
     media_segment_seconds: float = 60
 
+    # Embedding model and indexing.
+    model_name: str = DEFAULT_MODEL
+    device: str | None = None  # None: CUDA (bfloat16) when available, else CPU (float32)
+    batch_sizes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_BATCH_SIZES))
+    prefetch_chunks: int = 8  # extracted chunks buffered ahead of the GPU (bounds memory)
+
+    # Search. EmbeddingGemma similarities are compressed: on a calibration set unrelated
+    # query/file pairs scored 0.43-0.69 (median 0.53, p90 0.60), relevant ones 0.62-0.81.
+    # A vector-only match must clear `min_similarity` AND lie within `similarity_margin` of the
+    # best match of the query (short queries inflate every similarity, which the margin absorbs).
+    min_similarity: float = 0.60
+    similarity_margin: float = 0.10
+    knn_k: int = 200
+    rrf_k: int = 60
+
     def effective_roots(self) -> list[Path]:
         """Configured roots plus detected mounts, de-duplicated and with nested roots removed."""
         roots = list(self.roots)
@@ -203,6 +226,9 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
     scan = data.get("scan", {})
     prio = data.get("priority", {})
     media = data.get("media", {})
+    model = data.get("model", {})
+    index = data.get("index", {})
+    search = data.get("search", {})
 
     if "db_path" in data:
         cfg.db_path = _expand(data["db_path"], home)
@@ -238,3 +264,18 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
         cfg.max_media_seconds = float(media["max_minutes"]) * 60
     if "segment_seconds" in media:
         cfg.media_segment_seconds = float(media["segment_seconds"])
+
+    if "name" in model:
+        cfg.model_name = str(model["name"])
+    if "device" in model:
+        cfg.device = str(model["device"]) or None
+    if "batch_sizes" in index:
+        cfg.batch_sizes.update({k: max(1, int(v)) for k, v in index["batch_sizes"].items()})
+    if "prefetch_chunks" in index:
+        cfg.prefetch_chunks = max(1, int(index["prefetch_chunks"]))
+    for key in ("min_similarity", "similarity_margin"):
+        if key in search:
+            setattr(cfg, key, float(search[key]))
+    for key in ("knn_k", "rrf_k"):
+        if key in search:
+            setattr(cfg, key, int(search[key]))
