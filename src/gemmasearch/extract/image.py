@@ -16,8 +16,11 @@ if TYPE_CHECKING:
 
 MAX_SIDE = 1536  # px; the model's processor resizes anyway, this bounds memory
 MIN_SIDE = 32  # smaller images (icons, spacer gifs) are not worth indexing
-# Pillow raises DecompressionBombError above twice this many pixels (here: 256 MP).
-MAX_IMAGE_PIXELS = 128_000_000
+# Pillow raises DecompressionBombError above twice this many pixels: 100 MP (checked from the
+# header, before decoding). JPEG (draft) and JPEG 2000 (reduce) decode at a reduced size, so
+# their cost stays small; every other format (PNG, WebP, TIFF, GIF, BMP, HEIC, AVIF, ...) is
+# fully decoded before downscaling, i.e. up to ~400 MB for a 100 MP RGBA image.
+MAX_IMAGE_PIXELS = 50_000_000
 
 _initialised = False
 
@@ -72,6 +75,13 @@ def load_image(path: Path) -> PILImage.Image | None:
                 img.seek(0)  # first frame of animations
                 if img.format == "JPEG":
                     img.draft("RGB", (MAX_SIDE, MAX_SIDE))  # DCT-domain downscale: fast, low memory
+                elif img.format == "JPEG2000":
+                    # wavelet-level reduction while decoding (power of two, still >= MAX_SIDE)
+                    factor = 0
+                    while max(img.size) >> (factor + 1) >= MAX_SIDE and factor < 5:
+                        factor += 1
+                    if factor:
+                        img.reduce = factor
                 img.load()
                 img = ImageOps.exif_transpose(img)
                 if max(img.size) > MAX_SIDE:

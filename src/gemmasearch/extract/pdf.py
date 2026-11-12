@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .base import Chunk, ExtractionError
-from .text import chunk_text, make_snippet, normalize_newlines
+from .text import MAX_CHUNKS, chunk_text, make_snippet, normalize_newlines
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -64,25 +64,39 @@ def extract_pdf(path: Path, cfg: Config | None = None) -> Iterator[Chunk]:
         raise ExtractionError(f"cannot read file: {e.strerror or e}") from e
     try:
         n_pages = min(len(doc), MAX_PAGES)
+        failed = 0
+        last_error: Exception | None = None
+        count = 0
         for index in range(n_pages):
             number = index + 1
             locator = f"p. {number}"
+            # One broken page (bad content stream, render failure, ...) must not lose the rest
+            # of the document: every pdfium call for a page is guarded and the page skipped.
+            chunks: list[Chunk] = []
+            page = None
             try:
                 page = doc[index]
-            except pdfium.PdfiumError:
-                continue  # one broken page should not lose the rest of the document
-            try:
                 text = _page_text(page)
                 if sum(not c.isspace() for c in text) >= MIN_TEXT_CHARS:
                     for span in chunk_text(text):
-                        yield Chunk("text", span.text, locator, make_snippet(span.text), float(number))
+                        chunks.append(Chunk("text", span.text, locator, make_snippet(span.text), float(number)))
                 else:
                     image = _render(page)
                     if image is not None:
-                        yield Chunk("image", image, locator, make_snippet(text), float(number))
+                        chunks.append(Chunk("image", image, locator, make_snippet(text), float(number)))
+            except Exception as e:  # pdfium raises PdfiumError, but also ValueError/OSError/...
+                failed += 1
+                last_error = e
+                continue
             finally:
-                page.close()
-    except pdfium.PdfiumError as e:
-        raise ExtractionError(f"PDF error: {e}") from e
+                if page is not None:
+                    page.close()
+            for chunk in chunks:
+                if count >= MAX_CHUNKS:
+                    return
+                count += 1
+                yield chunk
+        if n_pages and failed == n_pages:
+            raise ExtractionError(f"no page could be read: {type(last_error).__name__}: {last_error}"[:300])
     finally:
         doc.close()
