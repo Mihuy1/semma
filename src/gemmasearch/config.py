@@ -182,8 +182,10 @@ class Config:
 
     # Embedding model and indexing.
     model_name: str = DEFAULT_MODEL
-    device: str | None = None  # None: CUDA (bfloat16) when available, else CPU (float32)
-    query_device: str = "auto"  # "auto" (same as indexing), "cpu" or "cuda"
+    device: str | None = None  # None: GPU (Vulkan / CUDA) when available, else CPU
+    query_device: str = "auto"  # "auto" (same as indexing), "cpu", "vulkan", "gpu" or "cuda"
+    llama_lib_dir: Path | None = None
+    model_dir: Path | None = None
     batch_sizes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_BATCH_SIZES))
     prefetch_chunks: int = 8  # extracted chunks buffered ahead of the GPU (bounds memory)
 
@@ -247,6 +249,10 @@ class Config:
         self.roots = [canonical(p) for p in self.roots]
         self.exclude_paths = [canonical(p) for p in self.exclude_paths]
         self.locations = {canonical(p): pts for p, pts in self.locations.items()}
+        if self.llama_lib_dir is not None:
+            self.llama_lib_dir = canonical(self.llama_lib_dir)
+        if self.model_dir is not None:
+            self.model_dir = canonical(self.model_dir)
         self.exclude_dir_names = frozenset(n.casefold() for n in self.exclude_dir_names)
         self.root_system_dir_names = frozenset(n.casefold() for n in self.root_system_dir_names)
         self.project_build_dir_names = frozenset(n.casefold() for n in self.project_build_dir_names)
@@ -302,7 +308,7 @@ KNOWN_KEYS: dict[str, frozenset[str]] = {
                            "depth_penalty_per_level", "depth_penalty_max", "tiny_penalty", "huge_video_penalty",
                            "depth_free_levels", "recency"}),
     "media": frozenset({"max_minutes", "segment_seconds"}),
-    "model": frozenset({"name", "device", "query_device"}),
+    "model": frozenset({"name", "device", "query_device", "llama_lib_dir", "model_dir"}),
     "index": frozenset({"batch_sizes", "prefetch_chunks"}),
     "search": frozenset({"min_similarity", "similarity_margin", "min_similarity_short", "similarity_margin_short",
                          "knn_k", "rrf_k", "location_prior", "duplicate_similarity", "vector_cache_max_chunks"}),
@@ -311,7 +317,7 @@ KNOWN_KEYS: dict[str, frozenset[str]] = {
                          "query_debounce_ms", "query_device"}),
 }
 
-VALID_QUERY_DEVICES = frozenset({"auto", "cpu", "cuda"})
+VALID_QUERY_DEVICES = frozenset({"auto", "cpu", "cuda", "vulkan", "gpu"})
 
 
 def _warn(msg: str) -> None:
@@ -328,12 +334,33 @@ def check_unknown_keys(data: dict[str, Any]) -> list[str]:
     return unknown
 
 
+def _is_valid_device_spec(val: str) -> bool:
+    if val in VALID_QUERY_DEVICES:
+        return True
+    for prefix in ("cuda:", "vulkan:", "gpu:"):
+        if val.startswith(prefix) and val[len(prefix):].isdigit():
+            return True
+    return False
+
+
 def _parse_query_device(raw: Any, key_name: str) -> str:
-    val = str(raw).strip().lower()
-    if val in VALID_QUERY_DEVICES or val.startswith("cuda:"):
-        return val
-    _warn(f"{key_name} must be 'auto', 'cpu' or 'cuda' (got {raw!r}); using 'auto'")
+    if isinstance(raw, str):
+        val = raw.strip().lower()
+        if _is_valid_device_spec(val):
+            return val
+    _warn(f"{key_name} must be 'auto', 'cpu', 'vulkan', 'gpu' or 'cuda' (got {raw!r}); using 'auto'")
     return "auto"
+
+
+def _parse_device(raw: Any, key_name: str) -> str | None:
+    if isinstance(raw, str):
+        val = raw.strip().lower()
+        if val in ("", "auto"):
+            return None
+        if _is_valid_device_spec(val):
+            return val
+    _warn(f"{key_name} must be 'auto', 'cpu', 'vulkan', 'gpu' or 'cuda' (got {raw!r}); using 'auto'")
+    return None
 
 
 def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
@@ -386,9 +413,13 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
     if "name" in model:
         cfg.model_name = str(model["name"])
     if "device" in model:
-        cfg.device = str(model["device"]) or None
+        cfg.device = _parse_device(model["device"], "model.device")
     if "query_device" in model:
         cfg.query_device = _parse_query_device(model["query_device"], "model.query_device")
+    if "llama_lib_dir" in model:
+        cfg.llama_lib_dir = _expand(str(model["llama_lib_dir"]), home) if model["llama_lib_dir"] else None
+    if "model_dir" in model:
+        cfg.model_dir = _expand(str(model["model_dir"]), home) if model["model_dir"] else None
     if "batch_sizes" in index:
         cfg.batch_sizes.update({k: max(1, int(v)) for k, v in index["batch_sizes"].items()})
     if "prefetch_chunks" in index:

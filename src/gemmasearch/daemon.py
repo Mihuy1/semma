@@ -212,7 +212,7 @@ class Daemon:
         self.embedder = embedder
         self.searcher = Searcher(self.store, cfg, embedder)
         self.indexer = Indexer(self.store, cfg, embedder, extract_fn=extract_fn)
-        self.gpu_monitor = _default_gpu_monitor(cfg) if gpu_monitor is _DEFAULT else gpu_monitor
+        self.gpu_monitor = _default_gpu_monitor(cfg, embedder=embedder) if gpu_monitor is _DEFAULT else gpu_monitor
         self._watcher_factory = _default_watcher_factory() if watcher_factory is _DEFAULT else watcher_factory
         self._runner_factory = _default_runner_factory() if runner_factory is _DEFAULT else runner_factory
         self.watcher: WatcherLike | None = None
@@ -459,19 +459,23 @@ class Daemon:
             if (idx_grace > 0 and self._index_model_loaded() and self._phase != "indexing"
                     and not self._queries_in_flight):
                 last_idx = max(self._last_work, float(getattr(self.embedder, "index_last_used", 0.0)))
-                needed_idx = min(idx_grace, GPU_BUSY_UNLOAD_S) if self._gpu_busy else idx_grace
+                idx_dev = str(getattr(self.embedder, "device", "") or "").strip().lower()
+                idx_on_gpu = idx_dev != "cpu"
+                needed_idx = min(idx_grace, GPU_BUSY_UNLOAD_S) if (self._gpu_busy and idx_on_gpu) else idx_grace
                 if now - last_idx >= needed_idx:
                     unloaded = await loop.run_in_executor(self._model_exec, self._unload_index_if_no_work)
                     if unloaded is not False:
                         log.info("index model unloaded after %.0fs without indexing%s", needed_idx,
-                                 " (GPU busy)" if self._gpu_busy else "")
+                                 " (GPU busy)" if (self._gpu_busy and idx_on_gpu) else "")
                         any_unloaded = True
 
             # 2. Text-only query model: unload after model_idle_unload_minutes without queries.
             q_idle = self._idle_seconds()
             if q_idle > 0 and self._query_model_loaded() and not self._queries_in_flight:
                 last_q = max(self._last_query, float(getattr(self.embedder, "query_last_used", 0.0)))
-                q_on_gpu = str(getattr(self.embedder, "query_device", "") or "").startswith("cuda")
+                q_on_gpu = str(getattr(self.embedder, "query_device", "") or "").strip().lower().startswith(
+                    ("cuda", "vulkan", "gpu")
+                )
                 needed_q = min(q_idle, GPU_BUSY_UNLOAD_S) if (self._gpu_busy and q_on_gpu) else q_idle
                 if now - last_q >= needed_q:
                     unloaded = await loop.run_in_executor(self._model_exec, self.embedder.unload_query)
@@ -792,13 +796,20 @@ class Daemon:
                 log.exception("updating the watched directories failed")
 
 
-def _default_gpu_monitor(cfg: Config) -> GpuMonitorLike | None:
+def _default_gpu_monitor(cfg: Config, embedder: Any = None) -> GpuMonitorLike | None:
     try:
         from .gpumon import GpuMonitor
     except ImportError:
         log.warning("gpumon unavailable: indexing will not pause for other GPU users")
         return None
-    return GpuMonitor(threshold=cfg.gpu_busy_threshold)
+
+    def own_pids() -> set[int]:
+        pids = {os.getpid()}
+        if embedder is not None and hasattr(embedder, "worker_pids"):
+            pids |= embedder.worker_pids()
+        return pids
+
+    return GpuMonitor(own_pids=own_pids, threshold=cfg.gpu_busy_threshold)
 
 
 def _default_watcher_factory() -> WatcherFactory | None:

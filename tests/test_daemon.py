@@ -104,7 +104,7 @@ class LifecycleEmbedder(FakeEmbedder):
             self.loads += 1
             self.index_loads += 1
             self._index_loaded = True
-            if self._query_loaded and self.query_device.startswith("cuda"):
+            if self._query_loaded and self.query_device.startswith(("cuda", "vulkan", "gpu")):
                 self._query_loaded = False
             self.loading = False
             now = time.monotonic()
@@ -469,6 +469,81 @@ def test_no_unload_while_queries_keep_coming(home: Path) -> None:
             await d.stop()
 
     asyncio.run(main())
+
+
+@pytest.mark.parametrize(("query_device", "expect_unload"), [
+    ("vulkan", True),
+    ("vulkan:0", True),
+    ("gpu", True),
+    ("cuda", True),
+    ("cpu", False),
+])
+def test_gpu_busy_unloads_gpu_query_device_only(
+    home: Path, monkeypatch: pytest.MonkeyPatch, query_device: str, expect_unload: bool
+) -> None:
+    async def main() -> None:
+        monkeypatch.setattr(daemon_mod, "GPU_BUSY_UNLOAD_S", 0.05)
+        cfg = make_cfg(home)
+        cfg.model_idle_unload_minutes = 10  # long normal idle; only GPU_BUSY_UNLOAD_S fires
+        cfg.index_model_unload_seconds = 0
+        emb = LifecycleEmbedder()
+        emb.query_device = query_device
+        d = make_daemon(cfg, embedder=emb)
+        emb._load_query()
+        d._gpu_busy = True
+        d._last_query = time.monotonic() - 1.0
+        emb.query_last_used = d._last_query
+        unloaded = await d.check_idle()
+        assert unloaded is expect_unload
+        assert emb.query_model_loaded is (not expect_unload)
+
+    asyncio.run(main())
+
+
+def test_config_vulkan_query_device_and_llama_paths(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    link_dir = tmp_path / "link"
+    link_dir.symlink_to(real_dir)
+
+    for dev in ("vulkan", "vulkan:0", "gpu", "gpu:0", "cuda", "cuda:0", "cpu", "auto"):
+        conf = tmp_path / "c.toml"
+        conf.write_text(f'[model]\nquery_device = "{dev}"\n', encoding="utf-8")
+        cfg = load_config(conf, home=tmp_path)
+        assert cfg.query_device == dev
+        assert capsys.readouterr().err == ""
+
+    conf = tmp_path / "paths.toml"
+    conf.write_text(
+        '[model]\n'
+        'device = "vulkan"\n'
+        'llama_lib_dir = "~/llama-libs"\n'
+        'model_dir = "$HOME/link/models"\n'
+        '[daemon]\n'
+        'query_device = "VULKAN:0"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(conf, home=tmp_path)
+    assert capsys.readouterr().err == ""
+    assert cfg.device == "vulkan"
+    assert cfg.query_device == "vulkan:0"
+    assert cfg.llama_lib_dir == (tmp_path / "llama-libs").resolve()
+    assert cfg.model_dir == real_dir.resolve() / "models"
+
+    for bad_spec in ("tpu", "vulkan:", "vulkan:abc", "gpu:-1"):
+        bad = tmp_path / "bad.toml"
+        bad.write_text(f'[model]\ndevice = "{bad_spec}"\n[daemon]\nquery_device = "{bad_spec}"\n', encoding="utf-8")
+        cfg_bad = load_config(bad, home=tmp_path)
+        assert cfg_bad.device is None
+        assert cfg_bad.query_device == "auto"
+        err = capsys.readouterr().err
+        assert "model.device" in err and "query_device" in err
+
+    auto_conf = tmp_path / "auto.toml"
+    auto_conf.write_text('[model]\ndevice = " AUTO "\n', encoding="utf-8")
+    cfg_auto = load_config(auto_conf, home=tmp_path)
+    assert cfg_auto.device is None
+    assert capsys.readouterr().err == ""
 
 
 # -- GPU pause -----------------------------------------------------------------------------
