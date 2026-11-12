@@ -28,6 +28,9 @@ MIN_CHARS = 1000  # never cut before this (except at a heading)
 MIN_HEADING_CUT = 300  # a heading closer than this to the chunk start does not end the chunk
 OVERLAP_CHARS = 250
 SNIPPET_CHARS = 160
+# At most this many chunks per text/office/PDF file (~2 MB of text); the rest is not indexed.
+# Bounds the work and index size for huge logs, dumps and generated files.
+MAX_CHUNKS = 1000
 MAX_HEADING_IN_LOCATOR = 48
 
 _PARAGRAPH = re.compile(r"\n[ \t]*\n\s*")
@@ -171,6 +174,8 @@ def spans_to_chunks(
         yield Chunk("text", first.content(), loc, make_snippet(first.text), pos)
         return
     for i, span in enumerate(_chain(first, second, it)):
+        if i >= MAX_CHUNKS:
+            return
         loc, pos = locate(span, i)
         yield Chunk("text", span.content(), loc, make_snippet(span.text), pos)
 
@@ -282,50 +287,101 @@ def decode_text(data: bytes) -> str:
 
 # ---------------------------------------------------------------------------------- headings
 
-_MD_ATX = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.+?)[ \t#]*$", re.M)
-_MD_SETEXT = re.compile(r"^(?! {0,3}[-=#>*+|]) {0,3}(\S.*?)[ \t]*\n {0,3}(=+|-{3,})[ \t]*$", re.M)
-_MD_FENCE = re.compile(r"^ {0,3}(```|~~~)", re.M)
-_ORG = re.compile(r"^(\*+)[ \t]+(.+?)[ \t]*$", re.M)
-_ADOC = re.compile(r"^(={1,6})[ \t]+(.+?)[ \t]*$", re.M)
-_RST = re.compile(r"^([^\s].*?)[ \t]*\n([=\-~^\"'`#*+:.])\2{2,}[ \t]*$", re.M)
+# Heading detection works line by line: every pattern is matched against one line (or a line and
+# the next one) with forms that cannot backtrack across a long run of spaces, and lines longer
+# than MAX_HEADING_LINE are never headings. That keeps it linear on pathological input (a
+# heading-like line followed by 100k spaces used to take seconds with `(.+?)[ \t]*$`).
+MAX_HEADING_LINE = 300
+
+_MD_ATX = re.compile(r" {0,3}(#{1,6})[ \t]+(\S.*)")
+_MD_SETEXT_EXCLUDE = re.compile(r" {0,3}[-=#>*+|]")
+_MD_SETEXT_UNDER = re.compile(r" {0,3}(?:=+|-{3,})[ \t]*")
+_MD_FENCE = re.compile(r" {0,3}(?:```|~~~)")
+_ORG = re.compile(r"(\*+)[ \t]+(\S.*)")
+_ADOC = re.compile(r"(={1,6})[ \t]+(\S.*)")
+_RST_UNDER = re.compile(r"([=\-~^\"'`#*+:.])\1{2,}[ \t]*")
 _TEX = re.compile(r"^[ \t]*\\(?:part|chapter|section|subsection|subsubsection)\*?\{([^}\n]+)\}", re.M)
 
 
-def _fenced_ranges(text: str) -> list[tuple[int, int]]:
-    ranges, opened = [], None
-    for m in _MD_FENCE.finditer(text):
-        if opened is None:
-            opened = m.start()
-        else:
-            ranges.append((opened, m.end()))
-            opened = None
-    if opened is not None:
-        ranges.append((opened, len(text)))
-    return ranges
+def _lines(text: str) -> list[tuple[int, str]]:
+    """(offset, line) for every line of `text` (without the newline)."""
+    out, pos = [], 0
+    for line in text.split("\n"):
+        out.append((pos, line))
+        pos += len(line) + 1
+    return out
+
+
+def _short_line(line: str) -> bool:
+    return len(line) <= MAX_HEADING_LINE
+
+
+def _markdown_headings(text: str) -> list[tuple[int, str]]:
+    found: list[tuple[int, str]] = []
+    lines = _lines(text)
+    in_fence = False
+    skip_next = False
+    for i, (off, line) in enumerate(lines):
+        if skip_next:  # the underline of a setext heading
+            skip_next = False
+            continue
+        if _MD_FENCE.match(line):  # fence lines (opening and closing) are inside the block
+            in_fence = not in_fence
+            continue
+        if in_fence or not _short_line(line):
+            continue
+        if m := _MD_ATX.match(line):
+            found.append((off, m.group(2).rstrip(" \t#")))
+            continue
+        if i + 1 < len(lines) and not _MD_SETEXT_EXCLUDE.match(line):
+            lead = len(line) - len(line.lstrip(" "))
+            title = line.rstrip(" \t")
+            if lead <= 3 and title[lead : lead + 1].strip():
+                if _MD_SETEXT_UNDER.fullmatch(lines[i + 1][1]):
+                    found.append((off, title[lead:]))
+                    skip_next = True
+    return found
+
+
+def _prefix_headings(text: str, pattern: re.Pattern[str]) -> list[tuple[int, str]]:
+    """Single-line headings like org `* Title` and AsciiDoc `= Title`."""
+    found = []
+    for off, line in _lines(text):
+        if line[:1] in ("*", "=") and _short_line(line) and (m := pattern.match(line)):
+            found.append((off, m.group(2).rstrip(" \t")))
+    return found
+
+
+def _rst_headings(text: str) -> list[tuple[int, str]]:
+    found = []
+    lines = _lines(text)
+    i = 0
+    while i + 1 < len(lines):
+        off, line = lines[i]
+        under = lines[i + 1][1]
+        if line[:1].strip() and _short_line(line) and _RST_UNDER.fullmatch(under):
+            title = line.rstrip(" \t")
+            # the underline must be (about) as long as the title
+            if len(title) <= len(line) - len(title) + 1 + len(under) + 2:
+                found.append((off, title))
+                i += 2
+                continue
+        i += 1
+    return found
 
 
 def find_headings(text: str, suffix: str) -> list[tuple[int, str]]:
-    """(offset, title) of section headings for markup formats; [] for plain text."""
+    """(offset, title) of section headings for markup formats; [] for plain text. Linear time."""
     suffix = suffix.lower().lstrip(".")
     found: list[tuple[int, str]] = []
     if suffix in ("md", "markdown"):
-        fences = _fenced_ranges(text)
-
-        def in_fence(o: int) -> bool:
-            return any(a <= o < b for a, b in fences)
-
-        found = [(m.start(), m.group(2)) for m in _MD_ATX.finditer(text) if not in_fence(m.start())]
-        found += [(m.start(), m.group(1)) for m in _MD_SETEXT.finditer(text) if not in_fence(m.start())]
+        found = _markdown_headings(text)
     elif suffix == "org":
-        found = [(m.start(), m.group(2)) for m in _ORG.finditer(text)]
+        found = _prefix_headings(text, _ORG)
     elif suffix in ("adoc", "asciidoc"):
-        found = [(m.start(), m.group(2)) for m in _ADOC.finditer(text)]
+        found = _prefix_headings(text, _ADOC)
     elif suffix == "rst":
-        found = [
-            (m.start(), m.group(1))
-            for m in _RST.finditer(text)
-            if len(m.group(1)) <= len(m.group(0)) - len(m.group(1)) + 2
-        ]
+        found = _rst_headings(text)
     elif suffix == "tex":
         found = [(m.start(), m.group(1)) for m in _TEX.finditer(text)]
     found = [(o, " ".join(t.split())) for o, t in found if t.strip()]
