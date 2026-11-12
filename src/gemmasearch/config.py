@@ -209,6 +209,18 @@ class Config:
     # many chunks; beyond it, searches use sqlite-vec directly.
     vector_cache_max_chunks: int = 1_000_000
 
+    # Daemon (gemmasearchd). The model is unloaded (VRAM freed) after this long with neither
+    # queries nor indexing work; the next query reloads it (~3.5 s).
+    model_idle_unload_minutes: float = 15
+    rescan_hours: float = 24  # full rescan interval (inotify triggers partial rescans in between)
+    watch_debounce_seconds: float = 5
+    # Indexing pauses while processes other than ours use more than this % of the GPU's SMs
+    # (sampled every gpu_check_seconds while indexing; every 60 s while paused).
+    gpu_busy_threshold: float = 30
+    gpu_check_seconds: float = 30
+    krunner_max_results: int = 10
+    query_debounce_ms: float = 100  # search-as-you-type: only the last keystroke is searched
+
     def effective_roots(self) -> list[Path]:
         """Configured roots plus detected mounts, canonicalised and de-duplicated.
 
@@ -279,7 +291,7 @@ def load_config(path: Path | None = None, home: Path | None = None) -> Config:
 
 
 KNOWN_KEYS: dict[str, frozenset[str]] = {
-    "": frozenset({"db_path", "scan", "priority", "media", "model", "index", "search"}),
+    "": frozenset({"db_path", "scan", "priority", "media", "model", "index", "search", "daemon"}),
     "scan": frozenset({"roots", "include_mounts", "skip_hidden", "skip_app_installs", "exclude_dir_names",
                        "root_system_dir_names", "project_build_dir_names", "project_markers",
                        "extra_exclude_dir_names", "exclude_paths"}),
@@ -291,6 +303,8 @@ KNOWN_KEYS: dict[str, frozenset[str]] = {
     "index": frozenset({"batch_sizes", "prefetch_chunks"}),
     "search": frozenset({"min_similarity", "similarity_margin", "min_similarity_short", "similarity_margin_short",
                          "knn_k", "rrf_k", "location_prior", "duplicate_similarity", "vector_cache_max_chunks"}),
+    "daemon": frozenset({"model_idle_unload_minutes", "rescan_hours", "watch_debounce_seconds",
+                         "gpu_busy_threshold", "gpu_check_seconds", "krunner_max_results", "query_debounce_ms"}),
 }
 
 
@@ -318,6 +332,7 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
     model = data.get("model", {})
     index = data.get("index", {})
     search = data.get("search", {})
+    daemon = data.get("daemon", {})
 
     if "db_path" in data:
         cfg.db_path = _expand(data["db_path"], home)
@@ -377,3 +392,9 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
         cfg.duplicate_similarity.update({k: float(v) for k, v in search["duplicate_similarity"].items()})
     if "vector_cache_max_chunks" in search:
         cfg.vector_cache_max_chunks = max(0, int(search["vector_cache_max_chunks"]))
+    for key in ("model_idle_unload_minutes", "rescan_hours", "watch_debounce_seconds", "gpu_busy_threshold",
+                "gpu_check_seconds", "query_debounce_ms"):
+        if key in daemon:
+            setattr(cfg, key, max(0.0, float(daemon[key])))
+    if "krunner_max_results" in daemon:
+        cfg.krunner_max_results = max(1, int(daemon["krunner_max_results"]))
