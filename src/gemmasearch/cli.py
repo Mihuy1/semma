@@ -239,7 +239,7 @@ def cmd_search(args: argparse.Namespace, cfg: Config) -> int:
         print(f"Index was built with {stored_model}, not {embedder.model_id}; run `gemmasearch index --rebuild` "
               f"to re-embed everything with it, or set model.name back.", file=sys.stderr)
         return 1
-    embedder.load()
+    embedder.load_query()
     searcher = Searcher(store, cfg, embedder)
     results = searcher.search(args.query, limit=args.n, kinds=args.kind)
     t = searcher.last_timings

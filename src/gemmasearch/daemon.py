@@ -385,10 +385,21 @@ class Daemon:
         return self.searcher.search_vector(qvec, query, self.cfg.krunner_max_results)
 
     def _model_ready(self) -> bool:
+        return bool(getattr(self.embedder, "query_ready", getattr(self.embedder, "loaded", True)))
+
+    def _query_model_loaded(self) -> bool:
+        if hasattr(self.embedder, "query_model_loaded"):
+            return bool(self.embedder.query_model_loaded)
+        return bool(getattr(self.embedder, "loaded", True))
+
+    def _index_model_loaded(self) -> bool:
+        if hasattr(self.embedder, "index_model_loaded"):
+            return bool(self.embedder.index_model_loaded)
         return bool(getattr(self.embedder, "loaded", True))
 
     async def ensure_model(self) -> None:
-        """Load the model if needed; concurrent callers share one load."""
+        """Load the query model if needed (reusing the full index model if loaded);
+        concurrent callers share one load."""
         if self._model_ready():
             return
         if self._load_task is None or self._load_task.done():
@@ -399,18 +410,24 @@ class Daemon:
         loop = asyncio.get_running_loop()
         started = time.monotonic()
         log.info("loading the model")
-        await loop.run_in_executor(self._model_exec, self.embedder.load)
+        load_fn = getattr(self.embedder, "load_query", self.embedder.load)
+        await loop.run_in_executor(self._model_exec, load_fn)
         log.info("model ready in %.1fs", time.monotonic() - started)
 
     # -- idle unload ----------------------------------------------------------------------
     def _idle_seconds(self) -> float:
         return self.cfg.model_idle_unload_minutes * 60
 
+    def _index_unload_seconds(self) -> float:
+        return self.cfg.index_model_unload_seconds
+
     async def _idle_loop(self) -> None:
-        idle = self._idle_seconds()
-        if idle <= 0:
+        q_idle = self._idle_seconds()
+        i_idle = self._index_unload_seconds()
+        candidates = [x for x in (q_idle, i_idle) if x > 0]
+        if not candidates:
             return  # 0: never unload
-        interval = min(60.0, max(0.02, idle / 4))
+        interval = min(60.0, max(0.02, min(candidates) / 4))
         while True:
             await asyncio.sleep(interval)
             try:
@@ -419,18 +436,53 @@ class Daemon:
                 log.exception("idle check failed")
 
     async def check_idle(self) -> bool:
-        """Unload the model if it has been idle (no queries, no indexing) long enough."""
+        """Unload the full index model after its grace period once indexing finishes, and unload
+        the query model (or legacy single model) after `model_idle_unload_minutes` without queries."""
+        if self._load_task is not None and not self._load_task.done():
+            return False
+        loop = asyncio.get_running_loop()
+        now = time.monotonic()
+        any_unloaded = False
+
+        has_split = hasattr(self.embedder, "unload_index") and hasattr(self.embedder, "unload_query")
+        if has_split:
+            # 1. Full index model: unload after index_model_unload_seconds once not indexing and no pending work.
+            idx_grace = self._index_unload_seconds()
+            if (idx_grace > 0 and self._index_model_loaded() and self._phase != "indexing"
+                    and not self._queries_in_flight):
+                last_idx = max(self._last_work, float(getattr(self.embedder, "index_last_used", 0.0)))
+                needed_idx = min(idx_grace, GPU_BUSY_UNLOAD_S) if self._gpu_busy else idx_grace
+                if now - last_idx >= needed_idx and self.indexer.count_pending() == 0:
+                    unloaded = await loop.run_in_executor(self._model_exec, self.embedder.unload_index)
+                    if unloaded is not False:
+                        log.info("index model unloaded after %.0fs without indexing%s", needed_idx,
+                                 " (GPU busy)" if self._gpu_busy else "")
+                        any_unloaded = True
+
+            # 2. Text-only query model: unload after model_idle_unload_minutes without queries.
+            q_idle = self._idle_seconds()
+            if q_idle > 0 and self._query_model_loaded() and not self._queries_in_flight:
+                last_q = max(self._last_query, float(getattr(self.embedder, "query_last_used", 0.0)))
+                q_on_gpu = str(getattr(self.embedder, "query_device", "") or "").startswith("cuda")
+                needed_q = min(q_idle, GPU_BUSY_UNLOAD_S) if (self._gpu_busy and q_on_gpu) else q_idle
+                if now - last_q >= needed_q:
+                    unloaded = await loop.run_in_executor(self._model_exec, self.embedder.unload_query)
+                    if unloaded is not False:
+                        log.info("query model unloaded after %.0f min without queries%s", needed_q / 60,
+                                 " (GPU busy)" if (self._gpu_busy and q_on_gpu) else "")
+                        any_unloaded = True
+            return any_unloaded
+
+        # Legacy single-model embedder fallback (e.g. simple test doubles without unload_index/unload_query).
         idle = self._idle_seconds()
         if (idle <= 0 or not self._model_ready() or not hasattr(self.embedder, "unload")
-                or self._queries_in_flight or self._phase == "indexing"
-                or (self._load_task is not None and not self._load_task.done())):
+                or self._queries_in_flight or self._phase == "indexing"):
             return False
         last = max(self._last_query, self._last_work, float(getattr(self.embedder, "last_used", 0.0)))
         # While another application (a game) keeps the GPU busy, give its VRAM back quickly.
         needed = min(idle, GPU_BUSY_UNLOAD_S) if self._gpu_busy else idle
-        if time.monotonic() - last < needed:
+        if now - last < needed:
             return False
-        loop = asyncio.get_running_loop()
         unloaded = await loop.run_in_executor(self._model_exec, self.embedder.unload)
         if unloaded is not False:
             log.info("model unloaded after %.0f min without queries or indexing%s", needed / 60,
@@ -480,9 +532,13 @@ class Daemon:
     async def status(self) -> dict[str, Any]:
         loop = asyncio.get_running_loop()
         counts, chunks = await loop.run_in_executor(self._search_exec, self._counts_sync)
+        q_loaded = self._query_model_loaded()
+        i_loaded = self._index_model_loaded()
         return {
             "state": self.state(),
-            "model_loaded": self._model_ready(),
+            "model_loaded": q_loaded or i_loaded,
+            "query_model_loaded": q_loaded,
+            "index_model_loaded": i_loaded,
             "paused": self._user_paused or self._phase == "paused",
             "pause_reason": self._pause_reason if (self._user_paused or self._phase == "paused") else "",
             "pending": counts.get("pending", 0),
@@ -758,9 +814,9 @@ def _default_runner_factory() -> RunnerFactory | None:
 # -- D-Bus ----------------------------------------------------------------------------------
 
 STATUS_SIGNATURES = {
-    "state": "s", "model_loaded": "b", "paused": "b", "pause_reason": "s", "pending": "x",
-    "indexed": "x", "failed": "x", "chunks": "x", "current_file": "s", "last_scan_at": "d",
-    "uptime": "d", "watched_dirs": "x",
+    "state": "s", "model_loaded": "b", "query_model_loaded": "b", "index_model_loaded": "b",
+    "paused": "b", "pause_reason": "s", "pending": "x", "indexed": "x", "failed": "x",
+    "chunks": "x", "current_file": "s", "last_scan_at": "d", "uptime": "d", "watched_dirs": "x",
 }
 
 
