@@ -62,3 +62,26 @@ def test_semantic_search_end_to_end(tmp_path: Path, embedder: Embedder) -> None:
     assert Path(s.search("server outage")[0].path).name == "b.md"
     assert Path(s.search("thesis about school energy use")[0].path).name == "c.md"
     assert s.search("quantum chromodynamics lecture notes") == []
+
+
+def test_text_only_query_model_matches_full_and_drops_vision_audio(embedder: Embedder) -> None:
+    q_emb = Embedder()
+    q_emb.load_query()
+    try:
+        assert q_emb.query_model_loaded and not q_emb.index_model_loaded
+        st_model = q_emb._query_model
+        assert st_model is not None
+        # Verify vision and audio encoders are absent from the text-only model.
+        mod_names = [name for name, _ in st_model.named_modules()]
+        assert not any("vision" in n or "audio" in n for n in mod_names), mod_names
+        auto_model = st_model[0].auto_model
+        assert getattr(auto_model.config, "vision_config", None) is None
+        assert getattr(auto_model.config, "audio_config", None) is None
+
+        for query in ("my CV", "how do I bake sourdough bread", "koulujen energiankulutus"):
+            v_full = embedder.embed_query(query)
+            v_text = q_emb.embed_query(query)
+            cos = float(v_full @ v_text)
+            assert cos > 0.9999, f"{query!r}: cosine={cos}"
+    finally:
+        q_emb.unload()

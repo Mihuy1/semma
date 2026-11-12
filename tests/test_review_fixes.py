@@ -460,6 +460,117 @@ def test_query_cache_and_float32_normalisation() -> None:
     assert not a.flags.writeable
 
 
+def test_embedder_query_path_loads_text_only_and_reuses_full_model(monkeypatch) -> None:
+    import sentence_transformers
+    import torch
+
+    st_calls: list[dict] = []
+
+    class StubST:
+        def __init__(self, model_name: str, **kwargs):
+            st_calls.append({"model_name": model_name, **kwargs})
+            self.queries = 0
+            self.batches = 0
+
+        def eval(self):
+            return self
+
+        def get_sentence_embedding_dimension(self) -> int:
+            return DIM
+
+        def encode_query(self, inputs, **kw):
+            self.queries += 1
+            return np.stack([bag_of_words(q) for q in inputs])
+
+        def encode(self, inputs, **kw):
+            self.batches += 1
+            return np.stack([bag_of_words(str(x)) for x in inputs])
+
+    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", StubST)
+    cfg = load_config(path=Path("/nonexistent.toml"))
+    cfg.device = "cuda"
+    e = Embedder(cfg)
+
+    # 1. Query path loads the text-only model with vision_config=None, audio_config=None, local_files_only=True.
+    v1 = e.embed_query("hello world")
+    assert v1.shape == (DIM,)
+    assert e.query_model_loaded and not e.index_model_loaded and e.loaded
+    assert len(st_calls) == 1
+    assert st_calls[0]["config_kwargs"] == {"vision_config": None, "audio_config": None}
+    assert st_calls[0]["local_files_only"] is True
+    assert st_calls[0]["device"] == "cuda"
+    assert st_calls[0]["model_kwargs"] == {"dtype": torch.bfloat16}
+
+    # 2. Indexing loads the full multimodal model (no config_kwargs) and drops the GPU query model.
+    st_calls.clear()
+    b = e.embed_batch("text", ["some text"], ["doc.md"])
+    assert b.shape == (1, DIM)
+    assert e.index_model_loaded and not e.query_model_loaded and e.loaded
+    assert len(st_calls) == 1
+    assert "config_kwargs" not in st_calls[0]
+
+    # 3. While the full model is loaded, a new query reuses it without loading the query model.
+    st_calls.clear()
+    full_model = e._model
+    queries_before = full_model.queries
+    e.embed_query("another query")
+    assert st_calls == []
+    assert not e.query_model_loaded and e.index_model_loaded
+    assert full_model.queries == queries_before + 1
+
+    # 4. Unloading the index model leaves nothing loaded; next query loads the text-only model again.
+    assert e.unload_index() is True
+    assert not e.loaded
+    e.embed_query("third query")
+    assert e.query_model_loaded and not e.index_model_loaded
+    assert len(st_calls) == 1
+    assert st_calls[0]["config_kwargs"] == {"vision_config": None, "audio_config": None}
+
+
+def test_query_device_cpu_selects_float32_cpu_and_invalid_warns(tmp_path: Path, monkeypatch, capsys) -> None:
+    import sentence_transformers
+    import torch
+
+    st_calls: list[dict] = []
+
+    class StubST:
+        def __init__(self, model_name: str, **kwargs):
+            st_calls.append({"model_name": model_name, **kwargs})
+
+        def eval(self):
+            return self
+
+        def get_sentence_embedding_dimension(self) -> int:
+            return DIM
+
+        def encode_query(self, inputs, **kw):
+            return np.stack([bag_of_words(q) for q in inputs])
+
+    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", StubST)
+
+    conf = tmp_path / "c.toml"
+    conf.write_text('[daemon]\nquery_device = "cpu"\nindex_model_unload_seconds = 45\n')
+    cfg = load_config(conf, home=tmp_path)
+    assert cfg.query_device == "cpu"
+    assert cfg.index_model_unload_seconds == 45.0
+    cfg.device = "cuda"  # even when indexing uses CUDA, query_device="cpu" uses CPU + float32
+
+    e = Embedder(cfg)
+    e.embed_query("cpu query")
+    assert len(st_calls) == 1
+    assert st_calls[0]["device"] == "cpu"
+    assert st_calls[0]["model_kwargs"] == {"dtype": torch.float32}
+    assert st_calls[0]["config_kwargs"] == {"vision_config": None, "audio_config": None}
+    assert e.query_device == "cpu"
+
+    # Unknown query_device warns and falls back to "auto".
+    conf2 = tmp_path / "c2.toml"
+    conf2.write_text('[daemon]\nquery_device = "tpu"\n')
+    cfg2 = load_config(conf2, home=tmp_path)
+    assert cfg2.query_device == "auto"
+    assert "query_device" in capsys.readouterr().err
+
+
 def test_waiting_query_goes_before_waiting_batches() -> None:
     lock = GpuLock()
     order: list[str] = []

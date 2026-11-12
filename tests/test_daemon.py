@@ -44,56 +44,129 @@ test_bus_name.__test__ = False  # type: ignore[attr-defined]
 
 
 class LifecycleEmbedder(FakeEmbedder):
-    """FakeEmbedder with the real Embedder's lifecycle: lazy load, unload, load/unload counts."""
+    """FakeEmbedder with the real Embedder's lifecycle: separate query (text-only) and index
+    (full) models, reuse of the index model for queries, and load/unload counts."""
 
     def __init__(self, load_seconds: float = 0.0) -> None:
         super().__init__()
         self.load_seconds = load_seconds
         self.load_calls = 0
+        self.query_load_calls = 0
+        self.index_load_calls = 0
         self.loads = 0
+        self.query_loads = 0
+        self.index_loads = 0
         self.unloads = 0
+        self.query_unloads = 0
+        self.index_unloads = 0
         self.queries: list[str] = []
         self.last_used = 0.0
+        self.query_last_used = 0.0
+        self.index_last_used = 0.0
         self.loading = False
-        self._loaded = False
+        self.query_device = "cuda"
+        self._query_loaded = False
+        self._index_loaded = False
         self._lock = threading.Lock()
 
     @property
+    def query_model_loaded(self) -> bool:
+        return self._query_loaded
+
+    @property
+    def index_model_loaded(self) -> bool:
+        return self._index_loaded
+
+    @property
     def loaded(self) -> bool:
-        return self._loaded
+        return self._query_loaded or self._index_loaded
+
+    @property
+    def query_ready(self) -> bool:
+        return self._query_loaded or self._index_loaded
 
     def load(self) -> None:
         self.load_calls += 1
-        self._load()
+        self.index_load_calls += 1
+        self._load_index()
 
-    def _load(self) -> None:
+    def load_query(self) -> None:
+        self.load_calls += 1
+        self.query_load_calls += 1
+        self._load_query()
+
+    def _load_index(self) -> None:
         with self._lock:
-            if self._loaded:
+            if self._index_loaded:
                 return
             self.loading = True
             time.sleep(self.load_seconds)
             self.loads += 1
-            self._loaded = True
+            self.index_loads += 1
+            self._index_loaded = True
+            if self._query_loaded and self.query_device.startswith("cuda"):
+                self._query_loaded = False
             self.loading = False
-            self.last_used = time.monotonic()
+            now = time.monotonic()
+            self.last_used = now
+            self.index_last_used = now
 
-    def unload(self) -> bool:
+    def _load_query(self) -> None:
         with self._lock:
-            if not self._loaded:
+            if self._index_loaded or self._query_loaded:
+                return
+            self.loading = True
+            time.sleep(self.load_seconds)
+            self.loads += 1
+            self.query_loads += 1
+            self._query_loaded = True
+            self.loading = False
+            now = time.monotonic()
+            self.last_used = now
+            self.query_last_used = now
+
+    def unload_index(self) -> bool:
+        with self._lock:
+            if not self._index_loaded:
                 return False
-            self._loaded = False
+            self._index_loaded = False
             self.unloads += 1
+            self.index_unloads += 1
+            now = time.monotonic()
+            self.last_used = now
+            self.index_last_used = now
             return True
 
+    def unload_query(self) -> bool:
+        with self._lock:
+            if not self._query_loaded:
+                return False
+            self._query_loaded = False
+            self.unloads += 1
+            self.query_unloads += 1
+            now = time.monotonic()
+            self.last_used = now
+            self.query_last_used = now
+            return True
+
+    def unload(self) -> bool:
+        u_i = self.unload_index()
+        u_q = self.unload_query()
+        return u_i or u_q
+
     def embed_query(self, query: str):
-        self._load()
+        self._load_query()
         self.queries.append(query)
-        self.last_used = time.monotonic()
+        now = time.monotonic()
+        self.last_used = now
+        self.query_last_used = now
         return super().embed_query(query)
 
     def embed_batch(self, modality, contents, titles):
-        self._load()
-        self.last_used = time.monotonic()
+        self._load_index()
+        now = time.monotonic()
+        self.last_used = now
+        self.index_last_used = now
         return super().embed_batch(modality, contents, titles)
 
 
@@ -139,6 +212,7 @@ def make_cfg(home: Path) -> Config:
     cfg.query_debounce_ms = 0
     cfg.gpu_check_seconds = 0.05
     cfg.model_idle_unload_minutes = 0  # tests that need it set it
+    cfg.index_model_unload_seconds = 0  # tests that need it set it
     cfg.canonicalize()
     return cfg
 
@@ -309,6 +383,7 @@ def test_idle_unload_and_reload(home: Path) -> None:
     async def main() -> None:
         cfg = make_cfg(home)
         cfg.model_idle_unload_minutes = 0.3 / 60  # 0.3 s
+        cfg.index_model_unload_seconds = 0.1  # 0.1 s
         emb = LifecycleEmbedder()
         d = make_daemon(cfg, embedder=emb)
         d.start()
@@ -317,12 +392,56 @@ def test_idle_unload_and_reload(home: Path) -> None:
             assert await d.search("rocket launch")
             assert emb.loaded
             await wait_until(lambda: not emb.loaded, 3, "idle unload")
-            assert emb.unloads == 1
+            assert emb.index_unloads == 1
             st = await d.status()
             assert st["model_loaded"] is False
+            assert st["query_model_loaded"] is False
+            assert st["index_model_loaded"] is False
             res = await d.search("bread oven")
             assert res and Path(res[0].path).name == "bread.txt"
-            assert emb.loaded and emb.loads == 2
+            # After the full index model was unloaded, the query loaded the text-only query model.
+            assert emb.query_model_loaded and not emb.index_model_loaded
+            assert emb.query_loads == 1 and emb.index_loads == 1
+            st2 = await d.status()
+            assert st2["model_loaded"] is True
+            assert st2["query_model_loaded"] is True
+            assert st2["index_model_loaded"] is False
+            await wait_until(lambda: not emb.loaded, 3, "query model idle unload")
+            assert emb.query_unloads == 1
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
+def test_index_model_unloaded_after_grace_period_and_query_reuses_while_loaded(home: Path) -> None:
+    async def main() -> None:
+        cfg = make_cfg(home)
+        cfg.index_model_unload_seconds = 0.25
+        cfg.model_idle_unload_minutes = 10  # long: only index grace period fires
+        emb = LifecycleEmbedder()
+        d = make_daemon(cfg, embedder=emb)
+        d.start()
+        try:
+            await until_idle(d)
+            # Right after indexing finishes, the full model is still loaded (within grace period).
+            assert emb.index_model_loaded and not emb.query_model_loaded
+            # A query arriving while the full model is loaded reuses it instead of loading the query model.
+            res = await d.search("rocket launch")
+            assert res and Path(res[0].path).name == "rockets.md"
+            assert emb.query_loads == 0 and emb.index_loads == 1
+            assert emb.index_model_loaded and not emb.query_model_loaded
+
+            # After the grace period expires, the full index model is unloaded.
+            await wait_until(lambda: not emb.index_model_loaded, 3, "index model grace-period unload")
+            assert emb.index_unloads == 1
+            assert not emb.loaded
+
+            # Now a query loads only the text-only query model, which stays loaded (10 min idle).
+            res2 = await d.search("cats sofa")
+            assert res2 and Path(res2[0].path).name == "cats.md"
+            assert emb.query_model_loaded and not emb.index_model_loaded
+            assert emb.query_loads == 1 and emb.index_loads == 1
         finally:
             await d.stop()
 
@@ -333,15 +452,19 @@ def test_no_unload_while_queries_keep_coming(home: Path) -> None:
     async def main() -> None:
         cfg = make_cfg(home)
         cfg.model_idle_unload_minutes = 0.3 / 60
+        cfg.index_model_unload_seconds = 0.05
         emb = LifecycleEmbedder()
         d = make_daemon(cfg, embedder=emb)
         d.start()
         try:
             await until_idle(d)
+            await wait_until(lambda: not emb.index_model_loaded, 2, "index unload")
+            assert await d.search("rocket launch")
+            assert emb.query_model_loaded and emb.query_unloads == 0
             for _ in range(8):
                 await d.search("rocket launch")
                 await asyncio.sleep(0.1)
-            assert emb.unloads == 0
+            assert emb.query_unloads == 0 and emb.query_model_loaded
         finally:
             await d.stop()
 
@@ -569,8 +692,9 @@ def test_control_interface_over_dbus(home: Path) -> None:
             await until_idle(d)
             st = await control_call("Status", bus_name=name)
             assert st["state"] == "idle" and st["indexed"] == 2 and st["failed"] == 1
-            assert set(st) >= {"state", "model_loaded", "paused", "pause_reason", "pending", "indexed", "failed",
-                               "chunks", "current_file", "last_scan_at", "uptime"}
+            assert set(st) >= {"state", "model_loaded", "query_model_loaded", "index_model_loaded", "paused",
+                               "pause_reason", "pending", "indexed", "failed", "chunks", "current_file",
+                               "last_scan_at", "uptime"}
             assert st["last_scan_at"] > 0 and st["chunks"] == 2
             await control_call("Pause", bus_name=name)
             st = await control_call("Status", bus_name=name)
