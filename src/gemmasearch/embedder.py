@@ -11,9 +11,11 @@ Verified with sentence-transformers 6.3 (see extract/base.py for the content typ
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -155,7 +157,12 @@ def quiet_model_loading() -> None:
 class Embedder:
     """Lazily loaded, thread-safe model wrapper. A daemon can serve queries from one thread
     while another indexes: queries take priority over index batches (GpuLock), so a query waits
-    for at most the batch already running."""
+    for at most the batch already running.
+
+    Loading and unloading also hold the GPU lock, so they never overlap a model call or each
+    other: callers that need the model while it is being (re)loaded wait for that one load and
+    then find it loaded. `unload()` frees the VRAM of an idle daemon; the next call reloads.
+    """
 
     def __init__(self, cfg: Config | None = None, model_name: str | None = None, device: str | None = None):
         self.model_name = model_name or (cfg.model_name if cfg else DEFAULT_MODEL)
@@ -168,6 +175,9 @@ class Embedder:
         self.dim = 768  # replaced with the model's own value on load
         self.device: str | None = None
         self.load_seconds = 0.0
+        self.last_used = 0.0  # time.monotonic() of the last model call, load or unload
+        self._loading = False
+        self._loaded_once = False
         self._model: Any = None
         self._gpu = GpuLock()
         self._load_lock = threading.Lock()
@@ -179,15 +189,26 @@ class Embedder:
     def loaded(self) -> bool:
         return self._model is not None
 
+    @property
+    def loading(self) -> bool:
+        return self._loading
+
     def load(self) -> None:
         with self._gpu.query():
             self._load_locked()
 
     def _load_locked(self) -> None:
+        """Load the model; the caller holds the GPU lock (so at most one load runs at a time)."""
         if self._model is not None:
             return
-        import time
+        self._loading = True
+        try:
+            self._load_model()
+        finally:
+            self._loading = False
+        self.last_used = time.monotonic()
 
+    def _load_model(self) -> None:
         quiet_model_loading()
         import torch
         from sentence_transformers import SentenceTransformer
@@ -196,7 +217,17 @@ class Embedder:
         device = self.requested_device or ("cuda" if torch.cuda.is_available() else "cpu")
         # Never float16: EmbeddingGemma overflows to NaN in it.
         dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
-        model = SentenceTransformer(self.model_name, device=device, model_kwargs={"dtype": dtype})
+        kwargs: dict[str, Any] = {"device": device, "model_kwargs": {"dtype": dtype}}
+        model = None
+        if self._loaded_once:
+            # A reload (after an idle unload) uses the files the first load fetched: no Hub
+            # round-trips (~1 s), works offline, and cannot switch to a newer model revision.
+            try:
+                model = SentenceTransformer(self.model_name, local_files_only=True, **kwargs)
+            except Exception as exc:
+                log.info("loading %s from the local cache failed (%s); trying the Hub", self.model_name, exc)
+        if model is None:
+            model = SentenceTransformer(self.model_name, **kwargs)
         model.eval()
         get_dim = getattr(model, "get_embedding_dimension", None) or model.get_sentence_embedding_dimension
         self.dim = int(get_dim())
@@ -205,13 +236,24 @@ class Embedder:
         model.encode_query(["warm up"], convert_to_numpy=True, show_progress_bar=False)
         self.device = device
         self._model = model
+        self._loaded_once = True
         self.load_seconds = time.monotonic() - started
         log.info("loaded %s on %s (%s) in %.1fs", self.model_name, device, dtype, self.load_seconds)
 
-    def unload(self) -> None:
+    def unload(self) -> bool:
+        """Drop the model and return its VRAM to the driver (the CUDA context itself stays).
+        Waits for a running batch or query; the next model call loads it again.
+        Returns False if it was not loaded."""
         with self._gpu.query():
+            if self._model is None:
+                return False
+            started = time.monotonic()
             self._model = None
+            gc.collect()  # the model's modules hold reference cycles
             self._empty_cache()
+            self.last_used = time.monotonic()
+            log.info("unloaded %s in %.2fs", self.model_name, self.last_used - started)
+            return True
 
     def release_cache(self) -> None:
         """Return cached-but-unused CUDA memory to the driver (e.g. after a run of video batches)."""
@@ -236,6 +278,7 @@ class Embedder:
             self._load_locked()
             vec = self._model.encode_query([query], convert_to_numpy=True, normalize_embeddings=True,
                                            show_progress_bar=False)
+            self.last_used = time.monotonic()
         out = _normalise(vec[0])
         out.flags.writeable = False
         with self._query_cache_lock:
@@ -304,6 +347,7 @@ class Embedder:
             self._load_locked()
             vecs = self._model.encode(inputs, prompt="", batch_size=len(inputs), convert_to_numpy=True,
                                       normalize_embeddings=True, show_progress_bar=False)
+            self.last_used = time.monotonic()
         vecs = np.asarray(vecs, dtype=np.float32)
         if not np.isfinite(vecs).all():
             raise FloatingPointError("model produced non-finite embeddings")
