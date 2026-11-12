@@ -857,6 +857,9 @@ def setup_logging(level: str | int | None = None) -> None:
     logging.basicConfig(level=level, format=fmt, stream=sys.stderr)
     for noisy in ("httpx", "httpx2", "httpcore", "urllib3", "huggingface_hub", "sentence_transformers"):
         logging.getLogger(noisy).setLevel(logging.WARNING)  # one INFO line per Hub request otherwise
+    # The unit sets HF_HUB_OFFLINE=1, so the Hub's "offline mode, using cached commit" warning is
+    # expected on every model load (and huggingface_hub prints it twice via its own handler).
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
 
 def run_daemon(cfg: Config, *, bus_address: str | None = None, bus_name: str = dbus_names.BUS_NAME) -> int:
