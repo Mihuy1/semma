@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import io
+import struct
+import time
 import zipfile
+import zlib
 from pathlib import Path
 
 import pytest
@@ -12,7 +15,14 @@ from PIL import Image
 from gemmasearch.config import Config
 from gemmasearch.extract import ExtractionError, extract
 from gemmasearch.extract.office import rtf_to_text
-from gemmasearch.extract.text import MAX_CHARS, chunk_text, decode_text, find_headings, make_snippet
+from gemmasearch.extract.text import (
+    MAX_CHARS,
+    MAX_CHUNKS,
+    chunk_text,
+    decode_text,
+    find_headings,
+    make_snippet,
+)
 
 FINNISH = "Hyvää päivää! Öljyä, äyriäisiä ja Åland – tämä on söpö testi."
 
@@ -115,6 +125,45 @@ def test_markdown_chunking(tmp_path, cfg):
     assert any("Section" in c.locator for c in chunks)
 
 
+def test_headings_per_format():
+    md = (
+        "# ATX title ##  \n\nSetext title  \n=====\n\n```\n# fenced\nfenced setext\n---\n```\n"
+        "## After fence\n    indented\n---\n" + "#  " + "x" * 400 + "\n"
+    )
+    assert [t for _, t in find_headings(md, ".md")] == ["ATX title", "Setext title", "After fence"]
+    assert find_headings("* Top  \n** Sub\n*bold* text\n", ".org") == [(0, "Top"), (8, "Sub")]
+    assert [t for _, t in find_headings("= Doc\n\n== Part one \ntext\n", ".adoc")] == ["Doc", "Part one"]
+    rst = "Title\n=====\n\ntext\n\nSub  \n---\n\nToo long a title\n~~~\n"
+    assert [t for _, t in find_headings(rst, ".rst")] == ["Title", "Sub"]
+    assert find_headings("intro\n\\section{Intro}\n", ".tex") == [(6, "Intro")]
+
+
+@pytest.mark.parametrize("suffix", ["md", "org", "adoc", "rst", "tex"])
+def test_heading_detection_linear_on_pathological_input(tmp_path, cfg, suffix):
+    """Heading-like lines with huge runs of spaces, and many fences + headings, stay fast."""
+    space_line = {"md": "# x", "org": "* x", "adoc": "= x", "rst": "x", "tex": "\\section{x"}[suffix]
+    under = "\n====" if suffix == "rst" else ""
+    body = (space_line + " " * 200_000 + "y" + under + "\n") * 5
+    body += (space_line + " " * 290 + "y" + under + "\n") * 2_000  # just under the line limit
+    body += "```\n# h\n" * 80_000 if suffix == "md" else "* h\n= h\nh\n===\n" * 80_000
+    p = tmp_path / f"evil.{suffix}"
+    p.write_text(body)
+    assert p.stat().st_size >= 1_900_000
+    t = time.perf_counter()
+    chunks = run(p, "text", cfg)
+    assert time.perf_counter() - t < 2.0
+    assert 0 < len(chunks) <= MAX_CHUNKS
+
+
+def test_chunks_per_file_capped(tmp_path, cfg):
+    p = tmp_path / "huge.log"
+    line = "2026-01-01 12:00:00 INFO service started, handling request number {} for user\n"
+    p.write_text("".join(line.format(i) for i in range(50_000)))  # ~4 MB: ~2,000 chunks uncapped
+    chunks = run(p, "text", cfg)
+    assert len(chunks) == MAX_CHUNKS == 1000
+    assert chunks[0].locator == "line 1"
+
+
 def test_chunker_sizes_and_overlap():
     sentences = [f"Lause numero {i} kertoo jotakin tärkeää aiheesta {i % 7}." for i in range(800)]
     text = " ".join(sentences)
@@ -210,6 +259,37 @@ def test_pdf_scanned_pages_rendered(tmp_path, cfg):
     assert [c.modality for c in chunks] == ["image", "image"]
     assert [c.locator for c in chunks] == ["p. 1", "p. 2"]
     assert max(chunks[0].content.size) == 1600 and chunks[1].content.size[0] > chunks[1].content.size[1]
+
+
+def test_pdf_bad_page_skipped(tmp_path, cfg, monkeypatch):
+    import pypdfium2
+
+    from gemmasearch.extract import pdf as pdf_mod
+
+    p = tmp_path / "doc.pdf"
+    make_text_pdf(p, [[FINNISH, "Sivu yksi."], [FINNISH, "Sivu kaksi."], []])
+    real_text, real_render = pdf_mod._page_text, pdf_mod._render
+    calls = {"n": 0}
+
+    def flaky_text(page):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise ValueError("broken content stream")
+        return real_text(page)
+
+    def broken_render(page):
+        raise pypdfium2.PdfiumError("render failed")
+
+    monkeypatch.setattr(pdf_mod, "_page_text", flaky_text)
+    monkeypatch.setattr(pdf_mod, "_render", broken_render)
+    chunks = run(p, "pdf", cfg)
+    assert [c.locator for c in chunks] == ["p. 1"]  # page 2 text and page 3 render failed
+    monkeypatch.setattr(pdf_mod, "_page_text", lambda page: (_ for _ in ()).throw(ValueError("bad")))
+    with pytest.raises(ExtractionError, match="no page could be read"):
+        run(p, "pdf", cfg)
+    monkeypatch.setattr(pdf_mod, "_page_text", real_text)
+    monkeypatch.setattr(pdf_mod, "_render", real_render)
+    assert len(run(p, "pdf", cfg)) == 3
 
 
 def test_pdf_broken(tmp_path, cfg):
@@ -354,6 +434,40 @@ def test_pptx_numeric_slide_order_and_notes(tmp_path, cfg):
     assert chunks[1].content == "Toinen dia\ntoinen\n\nPuhujan muistiinpano"
 
 
+def test_pptx_presentation_order(tmp_path, cfg):
+    A = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
+    R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+
+    def slide(text):
+        return f'<p:sld {A}><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>'
+
+    pres = (f'<p:presentation {A} {R}><p:sldIdLst><p:sldId id="256" r:id="rId9"/>'
+            '<p:sldId id="257" r:id="rId2"/><p:sldId id="258" r:id="rId3"/></p:sldIdLst></p:presentation>')
+    rels = (
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId2" Type="x/slide" Target="slides/slide1.xml"/>'
+        '<Relationship Id="rId3" Type="x/slide" Target="/ppt/slides/slide2.xml"/>'
+        '<Relationship Id="rId9" Type="x/slide" Target="slides/slide3.xml"/>'
+        '<Relationship Id="rId1" Type="x/slideMaster" Target="slideMasters/slideMaster1.xml"/>'
+        "</Relationships>"
+    )
+    p = tmp_path / "reordered.pptx"
+    write_zip(p, {
+        "ppt/presentation.xml": pres,
+        "ppt/_rels/presentation.xml.rels": rels,
+        "ppt/slides/slide1.xml": slide("Toinen esityksessä"),
+        "ppt/slides/slide2.xml": slide("Kolmas esityksessä"),
+        "ppt/slides/slide3.xml": slide("Ensimmäinen esityksessä"),
+        "ppt/slides/slide4.xml": slide("Ei esityksessä"),  # orphan part: not in sldIdLst
+    })
+    chunks = run(p, "office", cfg)
+    assert [(c.locator, c.content) for c in chunks] == [
+        ("slide 1", "Ensimmäinen esityksessä"),
+        ("slide 2", "Toinen esityksessä"),
+        ("slide 3", "Kolmas esityksessä"),
+    ]
+
+
 RTF = (
     rb"{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0\froman Times New Roman;}}"
     rb"{\colortbl;\red0\green0\blue0;}{\stylesheet{\s0 Normal;}}{\info{\title Salainen otsikko}}"
@@ -380,6 +494,36 @@ def test_rtf_file(tmp_path, cfg):
     assert c.content.startswith("Hyvää päivää!\n\nEuro €")
 
 
+def test_rtf_unicode_escapes():
+    text = rtf_to_text(rb"{\rtf1\ansi Party \u-10179?\u-8518? time \u55357?x \u99999999?y \u8364?}")
+    assert text == "Party \U0001f6ba time \ufffdx \ufffdy €"
+    text.encode("utf-8")
+
+
+def test_rtf_emoji_file_storable(tmp_path, cfg):
+    p = tmp_path / "emoji.rtf"
+    p.write_bytes(rb"{\rtf1\ansi Party \u-10179?\u-8518? time, \u-10179? lone, \u0? nul}")
+    (c,) = run(p, "office", cfg)
+    assert "\U0001f6ba" in c.content and "\x00" not in c.content
+    for s in (c.content, c.snippet, c.locator):
+        s.encode("utf-8")
+
+
+def test_dispatcher_sanitises_text_fields(tmp_path, cfg, monkeypatch):
+    from gemmasearch import extract as extract_mod
+    from gemmasearch.extract import Chunk, clean_str
+
+    def dirty(path, cfg):
+        yield Chunk("text", "a\x00b \ud83d\udeba c\udc00", "line 1 \ud800", "snip\x00\udfff", 1.0)
+        yield Chunk("image", Image.new("RGB", (40, 40)), "p. 2\x00", "", 2.0)
+
+    monkeypatch.setitem(extract_mod.EXTRACTORS, "text", dirty)
+    a, b = run(tmp_path / "x.txt", "text", cfg)
+    assert (a.content, a.locator, a.snippet) == ("ab \U0001f6ba c\ufffd", "line 1 \ufffd", "snip\ufffd")
+    assert b.locator == "p. 2" and isinstance(b.content, Image.Image)
+    assert clean_str("plain") == "plain"
+
+
 @pytest.mark.parametrize("name", ["bad.docx", "bad.odt", "bad.pptx", "bad.rtf"])
 def test_office_corrupt(tmp_path, cfg, name):
     p = tmp_path / name
@@ -397,6 +541,30 @@ def test_office_rejects_dtd_and_missing_parts(tmp_path, cfg):
     write_zip(q, {"mimetype": "x"})
     with pytest.raises(ExtractionError, match="content.xml"):
         run(q, "office", cfg)
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16-le", "utf-16-be"])
+def test_office_rejects_dtd_in_any_encoding(tmp_path, cfg, encoding):
+    import codecs
+
+    from gemmasearch.extract.office import MAX_MEMBER_BYTES, parse_xml
+
+    decl = "UTF-8" if encoding == "utf-8" else "UTF-16"
+    xml = (f'<?xml version="1.0" encoding="{decl}"?>'
+           f'<!DOCTYPE d [<!ENTITY a "{"A" * 1000}">]><w:document {W}>&a;&a;</w:document>')
+    bom = {"utf-16-le": codecs.BOM_UTF16_LE, "utf-16-be": codecs.BOM_UTF16_BE}.get(encoding, b"")
+    data = bom + xml.encode(encoding)
+    assert (b"<!DOCTYPE" in data) == (encoding == "utf-8")
+    with pytest.raises(ExtractionError, match="DTD"):
+        parse_xml(data)
+    p = tmp_path / "evil.docx"
+    write_zip(p, {"word/document.xml": data})
+    with pytest.raises(ExtractionError, match="DTD"):
+        run(p, "office", cfg)
+    # a DTD-free UTF-16 part still parses
+    ok = f'<?xml version="1.0" encoding="UTF-16"?><d>{FINNISH}</d>'.encode("utf-16")
+    assert parse_xml(ok).text == FINNISH
+    assert MAX_MEMBER_BYTES <= 32 * 2**20
 
 
 def test_office_zip_bomb_guard(tmp_path, cfg, monkeypatch):
@@ -481,6 +649,35 @@ def test_decompression_bomb(tmp_path, cfg, monkeypatch):
     monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1_000_000)
     with pytest.raises(ExtractionError, match="too large"):
         run(p, "image", cfg)
+
+
+def _png_header(width: int, height: int) -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(b"\0" * 64)) + chunk(b"IEND", b"")
+
+
+def test_image_pixel_limit_about_100_megapixels(tmp_path, cfg):
+    from gemmasearch.extract import image as image_mod
+
+    image_mod._init()
+    assert Image.MAX_IMAGE_PIXELS * 2 <= 100_000_000
+    p = tmp_path / "huge.png"
+    p.write_bytes(_png_header(11_000, 10_000))  # 110 MP, rejected from the header alone
+    with pytest.raises(ExtractionError, match="too large"):
+        run(p, "image", cfg)
+
+
+def test_jpeg2000_reduced_while_decoding(tmp_path, cfg):
+    p = tmp_path / "big.jp2"
+    try:
+        Image.new("RGB", (4000, 3000), "red").save(p)
+    except (OSError, KeyError) as e:  # pragma: no cover - Pillow without OpenJPEG
+        pytest.skip(f"no JPEG 2000 support: {e}")
+    (c,) = run(p, "image", cfg)
+    assert c.content.size == (1536, 1152)
 
 
 def test_corrupt_image(tmp_path, cfg):

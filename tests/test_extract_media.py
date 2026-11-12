@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -180,3 +182,90 @@ def test_early_close_kills_ffmpeg(media, cfg, kind):
     assert child_pids() - before == set()  # killed and reaped: no zombie left behind
     for pid in running:
         assert not Path(f"/proc/{pid}").exists()
+
+
+# ------------------------------------------------------------------ watchdog / exit status
+
+
+def fake_ffmpeg(tmp_path: Path, monkeypatch, body: str) -> Path:
+    """Replace ffmpeg (not ffprobe) by a Python script; it gets the real ffmpeg's arguments."""
+    from gemmasearch.extract import media as media_mod
+
+    script = tmp_path / "fake-ffmpeg"
+    script.write_text(f"#!{sys.executable} -I\nimport os, sys, time\nout = sys.stdout.buffer\n{body}\n")
+    script.chmod(0o755)
+    real_tool = media_mod.tool
+    monkeypatch.setattr(media_mod, "tool", lambda name: str(script) if name == "ffmpeg" else real_tool(name))
+    return script
+
+
+def assert_no_children_left(before: set[int]) -> None:
+    assert child_pids() - before == set()
+
+
+def test_ffmpeg_stall_is_killed(media, cfg, tmp_path, monkeypatch):
+    from gemmasearch.extract import media as media_mod
+
+    fake_ffmpeg(tmp_path, monkeypatch, "out.write(b'\\0' * 4000); out.flush(); time.sleep(60)")
+    monkeypatch.setattr(media_mod, "STALL_TIMEOUT", 0.5)
+    before = child_pids()
+    t = time.monotonic()
+    with pytest.raises(ExtractionError, match="no output"):
+        list(extract(media["audio"], "audio", cfg))
+    assert time.monotonic() - t < 10
+    assert_no_children_left(before)
+
+
+def test_ffmpeg_too_slow_is_killed(media, cfg, tmp_path, monkeypatch):
+    from gemmasearch.extract import media as media_mod
+
+    # trickles output forever: never stalls, but far slower than the decode budget allows
+    fake_ffmpeg(tmp_path, monkeypatch, "while True:\n    out.write(b'\\0' * 64); out.flush(); time.sleep(0.02)")
+    monkeypatch.setattr(media_mod, "MIN_BUDGET", 1.0)
+    before = child_pids()
+    t = time.monotonic()
+    with pytest.raises(ExtractionError, match="too slow"):
+        list(extract(media["av"], "video", cfg))
+    assert time.monotonic() - t < 10
+    assert_no_children_left(before)
+
+
+def test_ffmpeg_runs_in_own_session(media, cfg):
+    before = child_pids()
+    gen = extract(media["audio"], "audio", cfg)
+    next(gen)
+    (pid,) = child_pids() - before
+    assert os.getsid(pid) == pid != os.getsid(0)  # Ctrl-C to our process group does not reach it
+    gen.close()
+
+
+def test_partial_decode_with_error_exit_fails(media, cfg, tmp_path, monkeypatch):
+    """ffmpeg exiting non-zero after 10 of 121 s (e.g. interrupted) must not look complete."""
+    one_second = AUDIO_SAMPLE_RATE * 4
+    fake_ffmpeg(tmp_path, monkeypatch, f"out.write(b'\\x00\\x00\\x00\\x3f' * {one_second // 4 * 10}); sys.exit(1)")
+    with pytest.raises(ExtractionError, match="after 10 of 121 s"):
+        list(extract(media["audio"], "audio", cfg))
+
+
+def test_corrupt_tail_with_error_exit_accepted(media, cfg, tmp_path, monkeypatch):
+    """A non-zero exit after >= 90 % of the expected duration (a corrupt tail) is accepted."""
+    n = AUDIO_SAMPLE_RATE * 115  # 115 of 121 s
+    fake_ffmpeg(tmp_path, monkeypatch, f"out.write(b'\\x00\\x00\\x00\\x3f' * {n}); sys.exit(1)")
+    chunks = list(extract(media["audio"], "audio", cfg))
+    assert [c.locator for c in chunks] == ["00:00–01:00", "01:00–01:55"]
+
+
+def test_video_truncated_by_error_exit_fails(media, cfg, tmp_path, monkeypatch):
+    frame = 320 * 240 * 3  # 32 frames = one 60 s segment of a 130 s video
+    fake_ffmpeg(tmp_path, monkeypatch, f"out.write(b'\\x80' * {frame * 32}); sys.exit(1)")
+    with pytest.raises(ExtractionError, match="could not decode"):
+        list(extract(media["av"], "video", cfg))
+
+
+def test_playlist_refused(cfg, tmp_path):
+    seg = tmp_path / "a.ts"
+    ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-c:a", "aac", "-f", "mpegts", str(seg))
+    lst = tmp_path / "list.mp4"  # concat demuxer is detected from the content, not the name
+    lst.write_text(f"ffconcat version 1.0\nfile {seg.name}\n")
+    with pytest.raises(ExtractionError, match="playlist/concat"):
+        list(extract(lst, "audio", cfg))
