@@ -183,6 +183,7 @@ class Config:
     # Embedding model and indexing.
     model_name: str = DEFAULT_MODEL
     device: str | None = None  # None: CUDA (bfloat16) when available, else CPU (float32)
+    query_device: str = "auto"  # "auto" (same as indexing), "cpu" or "cuda"
     batch_sizes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_BATCH_SIZES))
     prefetch_chunks: int = 8  # extracted chunks buffered ahead of the GPU (bounds memory)
 
@@ -209,9 +210,11 @@ class Config:
     # many chunks; beyond it, searches use sqlite-vec directly.
     vector_cache_max_chunks: int = 1_000_000
 
-    # Daemon (gemmasearchd). The model is unloaded (VRAM freed) after this long with neither
-    # queries nor indexing work; the next query reloads it (~3.5 s).
+    # Daemon (gemmasearchd). The query model is unloaded (VRAM freed) after this long with no
+    # queries; the next query reloads it (~1.5 s). The full index model is unloaded sooner once
+    # indexing finishes.
     model_idle_unload_minutes: float = 15
+    index_model_unload_seconds: float = 60
     rescan_hours: float = 24  # full rescan interval (inotify triggers partial rescans in between)
     watch_debounce_seconds: float = 5
     # Indexing pauses while processes other than ours use more than this % of the GPU's SMs
@@ -299,13 +302,16 @@ KNOWN_KEYS: dict[str, frozenset[str]] = {
                            "depth_penalty_per_level", "depth_penalty_max", "tiny_penalty", "huge_video_penalty",
                            "depth_free_levels", "recency"}),
     "media": frozenset({"max_minutes", "segment_seconds"}),
-    "model": frozenset({"name", "device"}),
+    "model": frozenset({"name", "device", "query_device"}),
     "index": frozenset({"batch_sizes", "prefetch_chunks"}),
     "search": frozenset({"min_similarity", "similarity_margin", "min_similarity_short", "similarity_margin_short",
                          "knn_k", "rrf_k", "location_prior", "duplicate_similarity", "vector_cache_max_chunks"}),
-    "daemon": frozenset({"model_idle_unload_minutes", "rescan_hours", "watch_debounce_seconds",
-                         "gpu_busy_threshold", "gpu_check_seconds", "krunner_max_results", "query_debounce_ms"}),
+    "daemon": frozenset({"model_idle_unload_minutes", "index_model_unload_seconds", "rescan_hours",
+                         "watch_debounce_seconds", "gpu_busy_threshold", "gpu_check_seconds", "krunner_max_results",
+                         "query_debounce_ms", "query_device"}),
 }
+
+VALID_QUERY_DEVICES = frozenset({"auto", "cpu", "cuda"})
 
 
 def _warn(msg: str) -> None:
@@ -320,6 +326,14 @@ def check_unknown_keys(data: dict[str, Any]) -> list[str]:
         if isinstance(value, dict):
             unknown += [f"{section}.{k}" for k in value if k not in keys]
     return unknown
+
+
+def _parse_query_device(raw: Any, key_name: str) -> str:
+    val = str(raw).strip().lower()
+    if val in VALID_QUERY_DEVICES or val.startswith("cuda:"):
+        return val
+    _warn(f"{key_name} must be 'auto', 'cpu' or 'cuda' (got {raw!r}); using 'auto'")
+    return "auto"
 
 
 def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
@@ -373,6 +387,8 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
         cfg.model_name = str(model["name"])
     if "device" in model:
         cfg.device = str(model["device"]) or None
+    if "query_device" in model:
+        cfg.query_device = _parse_query_device(model["query_device"], "model.query_device")
     if "batch_sizes" in index:
         cfg.batch_sizes.update({k: max(1, int(v)) for k, v in index["batch_sizes"].items()})
     if "prefetch_chunks" in index:
@@ -392,9 +408,11 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
         cfg.duplicate_similarity.update({k: float(v) for k, v in search["duplicate_similarity"].items()})
     if "vector_cache_max_chunks" in search:
         cfg.vector_cache_max_chunks = max(0, int(search["vector_cache_max_chunks"]))
-    for key in ("model_idle_unload_minutes", "rescan_hours", "watch_debounce_seconds", "gpu_busy_threshold",
-                "gpu_check_seconds", "query_debounce_ms"):
+    for key in ("model_idle_unload_minutes", "index_model_unload_seconds", "rescan_hours", "watch_debounce_seconds",
+                "gpu_busy_threshold", "gpu_check_seconds", "query_debounce_ms"):
         if key in daemon:
             setattr(cfg, key, max(0.0, float(daemon[key])))
+    if "query_device" in daemon:
+        cfg.query_device = _parse_query_device(daemon["query_device"], "daemon.query_device")
     if "krunner_max_results" in daemon:
         cfg.krunner_max_results = max(1, int(daemon["krunner_max_results"]))

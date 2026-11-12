@@ -159,69 +159,151 @@ class Embedder:
     while another indexes: queries take priority over index batches (GpuLock), so a query waits
     for at most the batch already running.
 
-    Loading and unloading also hold the GPU lock, so they never overlap a model call or each
-    other: callers that need the model while it is being (re)loaded wait for that one load and
-    then find it loaded. `unload()` frees the VRAM of an idle daemon; the next call reloads.
+    Queries are always text, so `embed_query` / `load_query` load a text-only model
+    (`vision_config=None, audio_config=None`, ~271M params) unless the full multimodal index
+    model (`_model`, ~740M params) is already loaded, in which case queries reuse it.
+
+    Loading and unloading also hold the lock (GPU lock when on CUDA, CPU query lock when
+    `query_device == "cpu"`), so concurrent callers share a single load.
     """
 
-    def __init__(self, cfg: Config | None = None, model_name: str | None = None, device: str | None = None):
+    def __init__(self, cfg: Config | None = None, model_name: str | None = None, device: str | None = None,
+                 query_device: str | None = None):
         self.model_name = model_name or (cfg.model_name if cfg else DEFAULT_MODEL)
         self.model_id = self.model_name
         self.requested_device = device or (cfg.device if cfg else None)
+        self.requested_query_device = query_device or (cfg.query_device if cfg else "auto")
         self.batch_sizes = dict(cfg.batch_sizes if cfg else DEFAULT_BATCH_SIZES)
         # Current batch size per modality: reduced after a CUDA OOM, regrown slowly.
         self._limits: dict[str, int] = {}
         self._ok_batches: dict[str, int] = {}
         self.dim = 768  # replaced with the model's own value on load
         self.device: str | None = None
+        self.query_device: str | None = None
         self.load_seconds = 0.0
+        self.query_load_seconds = 0.0
+        self.index_load_seconds = 0.0
         self.last_used = 0.0  # time.monotonic() of the last model call, load or unload
+        self.query_last_used = 0.0
+        self.index_last_used = 0.0
         self._loading = False
+        self._query_loading = False
+        self._index_loading = False
         self._loaded_once = False
-        self._model: Any = None
+        self._model: Any = None  # full multimodal index model
+        self._query_model: Any = None  # text-only query model
         self._gpu = GpuLock()
+        self._cpu_query_lock = threading.Lock()
         self._load_lock = threading.Lock()
         self._query_cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self._query_cache_lock = threading.Lock()
 
     # -- lifecycle --------------------------------------------------------------
     @property
-    def loaded(self) -> bool:
+    def index_model_loaded(self) -> bool:
         return self._model is not None
 
     @property
+    def query_model_loaded(self) -> bool:
+        return self._query_model is not None
+
+    @property
+    def loaded(self) -> bool:
+        return self._model is not None or self._query_model is not None
+
+    @property
+    def query_ready(self) -> bool:
+        return self._model is not None or self._query_model is not None
+
+    @property
     def loading(self) -> bool:
-        return self._loading
+        return self._loading or self._query_loading or self._index_loading
+
+    def _resolve_index_device(self) -> str:
+        if self.requested_device:
+            return self.requested_device
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+    def _resolve_query_device(self) -> str:
+        req = (self.requested_query_device or "auto").strip().lower()
+        if req not in ("", "auto"):
+            return req
+        return self._resolve_index_device()
+
+    @contextmanager
+    def _query_lock(self, device: str | None = None) -> Iterator[None]:
+        dev = device or self.query_device or self._resolve_query_device()
+        if dev == "cpu":
+            with self._cpu_query_lock:
+                yield
+        else:
+            with self._gpu.query():
+                yield
 
     def load(self) -> None:
+        """Load the full multimodal index model."""
         with self._gpu.query():
             self._load_locked()
 
+    def load_query(self) -> None:
+        """Load the text-only query model (unless the full index model is already loaded)."""
+        if self._model is not None or self._query_model is not None:
+            return
+        dev = self._resolve_query_device()
+        with self._query_lock(dev):
+            self._load_query_locked(dev)
+
     def _load_locked(self) -> None:
-        """Load the model; the caller holds the GPU lock (so at most one load runs at a time)."""
+        """Load the full model; the caller holds the GPU lock."""
         if self._model is not None:
             return
         self._loading = True
+        self._index_loading = True
         try:
             self._load_model()
+            # If a GPU text-only query model was loaded, drop it so we don't hold both in VRAM.
+            if self._query_model is not None and (self.query_device or "").startswith("cuda"):
+                self._query_model = None
+                gc.collect()
+                self._empty_cache()
         finally:
             self._loading = False
-        self.last_used = time.monotonic()
+            self._index_loading = False
+        now = time.monotonic()
+        self.last_used = now
+        self.index_last_used = now
 
-    def _load_model(self) -> None:
+    def _load_query_locked(self, device: str | None = None) -> None:
+        """Load the text-only query model; the caller holds the appropriate query lock."""
+        if self._model is not None or self._query_model is not None:
+            return
+        self._loading = True
+        self._query_loading = True
+        try:
+            self._load_query_model(device)
+        finally:
+            self._loading = False
+            self._query_loading = False
+        now = time.monotonic()
+        self.last_used = now
+        self.query_last_used = now
+
+    def _instantiate_st(self, device: str, text_only: bool) -> tuple[Any, Any]:
         quiet_model_loading()
         import torch
         from sentence_transformers import SentenceTransformer
 
-        started = time.monotonic()
-        device = self.requested_device or ("cuda" if torch.cuda.is_available() else "cpu")
         # Never float16: EmbeddingGemma overflows to NaN in it.
         dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
         kwargs: dict[str, Any] = {"device": device, "model_kwargs": {"dtype": dtype}}
+        if text_only:
+            kwargs["config_kwargs"] = {"vision_config": None, "audio_config": None}
         model = None
-        if self._loaded_once:
-            # A reload (after an idle unload) uses the files the first load fetched: no Hub
-            # round-trips (~1 s), works offline, and cannot switch to a newer model revision.
+        if self._loaded_once or text_only:
+            # Try local cache first: no Hub round-trips (~1 s), works offline, and cannot
+            # switch to a newer model revision. Falls back to the Hub if not cached yet.
             try:
                 model = SentenceTransformer(self.model_name, local_files_only=True, **kwargs)
             except Exception as exc:
@@ -231,18 +313,36 @@ class Embedder:
         model.eval()
         get_dim = getattr(model, "get_embedding_dimension", None) or model.get_sentence_embedding_dimension
         self.dim = int(get_dim())
-        # Warm up: the first CUDA call compiles/loads kernels (~0.5 s), which would otherwise
+        # Warm up: the first call compiles/loads kernels (~0.5 s on CUDA), which would otherwise
         # land on the first user query.
         model.encode_query(["warm up"], convert_to_numpy=True, show_progress_bar=False)
+        self._loaded_once = True
+        return model, dtype
+
+    def _load_model(self) -> None:
+        started = time.monotonic()
+        device = self._resolve_index_device()
+        model, dtype = self._instantiate_st(device, text_only=False)
         self.device = device
         self._model = model
-        self._loaded_once = True
-        self.load_seconds = time.monotonic() - started
-        log.info("loaded %s on %s (%s) in %.1fs", self.model_name, device, dtype, self.load_seconds)
+        self.index_load_seconds = time.monotonic() - started
+        self.load_seconds = self.index_load_seconds
+        log.info("loaded %s (full) on %s (%s) in %.1fs", self.model_name, device, dtype, self.index_load_seconds)
 
-    def unload(self) -> bool:
-        """Drop the model and return its VRAM to the driver (the CUDA context itself stays).
-        Waits for a running batch or query; the next model call loads it again.
+    def _load_query_model(self, device: str | None = None) -> None:
+        started = time.monotonic()
+        device = device or self._resolve_query_device()
+        model, dtype = self._instantiate_st(device, text_only=True)
+        self.query_device = device
+        if self.device is None:
+            self.device = device
+        self._query_model = model
+        self.query_load_seconds = time.monotonic() - started
+        self.load_seconds = self.query_load_seconds
+        log.info("loaded %s (text-only) on %s (%s) in %.1fs", self.model_name, device, dtype, self.query_load_seconds)
+
+    def unload_index(self) -> bool:
+        """Drop the full index model and return its VRAM to the driver.
         Returns False if it was not loaded."""
         with self._gpu.query():
             if self._model is None:
@@ -251,17 +351,46 @@ class Embedder:
             self._model = None
             gc.collect()  # the model's modules hold reference cycles
             self._empty_cache()
-            self.last_used = time.monotonic()
-            log.info("unloaded %s in %.2fs", self.model_name, self.last_used - started)
+            now = time.monotonic()
+            self.index_last_used = now
+            self.last_used = now
+            log.info("unloaded %s (full) in %.2fs", self.model_name, now - started)
             return True
+
+    def unload_query(self) -> bool:
+        """Drop the text-only query model and free its memory/VRAM.
+        Returns False if it was not loaded."""
+        dev = self.query_device or self._resolve_query_device()
+        with self._query_lock(dev):
+            if self._query_model is None:
+                return False
+            started = time.monotonic()
+            self._query_model = None
+            gc.collect()
+            if dev.startswith("cuda"):
+                self._empty_cache(dev)
+            now = time.monotonic()
+            self.query_last_used = now
+            self.last_used = now
+            log.info("unloaded %s (text-only) in %.2fs", self.model_name, now - started)
+            return True
+
+    def unload(self) -> bool:
+        """Drop any loaded models (index and/or query) and return VRAM to the driver.
+        Waits for a running batch or query; the next model call loads again.
+        Returns False if nothing was loaded."""
+        u_idx = self.unload_index()
+        u_qry = self.unload_query()
+        return u_idx or u_qry
 
     def release_cache(self) -> None:
         """Return cached-but-unused CUDA memory to the driver (e.g. after a run of video batches)."""
         with self._gpu.query():
             self._empty_cache()
 
-    def _empty_cache(self) -> None:
-        if self.device and self.device.startswith("cuda"):
+    def _empty_cache(self, device: str | None = None) -> None:
+        dev = device or self.device or self.query_device
+        if dev and dev.startswith("cuda"):
             import torch
 
             torch.cuda.empty_cache()
@@ -274,11 +403,30 @@ class Embedder:
             if hit is not None:
                 self._query_cache.move_to_end(query)
                 return hit
-        with self._gpu.query():
-            self._load_locked()
-            vec = self._model.encode_query([query], convert_to_numpy=True, normalize_embeddings=True,
-                                           show_progress_bar=False)
-            self.last_used = time.monotonic()
+        # Reuse the full model if it is already loaded (and we don't already have a CPU query model).
+        if self._query_model is None and self._model is not None:
+            with self._gpu.query():
+                model = self._model or self._query_model
+                if model is None:
+                    dev = self._resolve_query_device()
+                    self._load_query_locked(dev)
+                    model = self._query_model or self._model
+                vec = model.encode_query([query], convert_to_numpy=True, normalize_embeddings=True,
+                                         show_progress_bar=False)
+                now = time.monotonic()
+                self.last_used = now
+                self.query_last_used = now
+        else:
+            dev = self.query_device or self._resolve_query_device()
+            with self._query_lock(dev):
+                if self._query_model is None and self._model is None:
+                    self._load_query_locked(dev)
+                model = self._query_model if self._query_model is not None else self._model
+                vec = model.encode_query([query], convert_to_numpy=True, normalize_embeddings=True,
+                                         show_progress_bar=False)
+                now = time.monotonic()
+                self.last_used = now
+                self.query_last_used = now
         out = _normalise(vec[0])
         out.flags.writeable = False
         with self._query_cache_lock:
@@ -347,7 +495,9 @@ class Embedder:
             self._load_locked()
             vecs = self._model.encode(inputs, prompt="", batch_size=len(inputs), convert_to_numpy=True,
                                       normalize_embeddings=True, show_progress_bar=False)
-            self.last_used = time.monotonic()
+            now = time.monotonic()
+            self.last_used = now
+            self.index_last_used = now
         vecs = np.asarray(vecs, dtype=np.float32)
         if not np.isfinite(vecs).all():
             raise FloatingPointError("model produced non-finite embeddings")
