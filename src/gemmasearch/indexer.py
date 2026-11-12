@@ -310,6 +310,8 @@ class Indexer:
             except BaseException as exc:  # e.g. the extract module failing to import
                 put((_CRASH, exc))
                 return
+            finally:
+                self.store.release_thread()  # the queue reader's connection (one per run)
             put((_DONE,))
 
         thread = threading.Thread(target=work, name="gemmasearch-extract", daemon=True)

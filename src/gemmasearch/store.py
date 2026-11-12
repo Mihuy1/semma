@@ -258,6 +258,24 @@ class Store:
         """This thread's read-only connection (PRAGMA query_only), for searches."""
         return self._thread_conn("ro", True)
 
+    def release_thread(self) -> None:
+        """Close the calling thread's connections (a thread that is about to exit; otherwise
+        they would stay open until `close()`, one per short-lived thread in a daemon)."""
+        if self._shared is not None:
+            return
+        for attr in ("rw", "ro"):
+            conn = getattr(self._local, attr, None)
+            if conn is None:
+                continue
+            delattr(self._local, attr)
+            with self._conns_lock:
+                if conn in self._conns:
+                    self._conns.remove(conn)
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
     def close(self) -> None:
         with self._conns_lock:
             conns, self._conns = self._conns, []
