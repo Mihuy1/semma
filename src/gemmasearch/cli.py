@@ -295,6 +295,73 @@ def _positive_int(value: str) -> int:
     return n
 
 
+def cmd_daemon(args: argparse.Namespace, cfg: Config) -> int:
+    from .daemon import run_daemon
+
+    return run_daemon(cfg)
+
+
+def _quiet_runner(cmd: list[str]) -> int:
+    import subprocess
+
+    return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode
+
+
+def cmd_ctl(args: argparse.Namespace, cfg: Config) -> int:
+    from .daemon import DaemonNotRunning, daemon_call, daemon_status
+
+    if args.action == "status":
+        st = daemon_status()
+        if st is None:
+            print("The daemon is not running (systemctl --user start gemmasearch).")
+            return 1
+        width = max(map(len, st))
+        for key, value in st.items():
+            if key == "last_scan_at" and value:
+                value = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(value)))
+            elif key == "uptime":
+                value = f"{float(value) / 60:.0f} min"
+            print(f"{key:<{width}}  {value}")
+        return 0
+    method = {"pause": "Pause", "resume": "Resume", "rescan": "Rescan", "retry-failed": "RetryFailed"}[args.action]
+    try:
+        result = daemon_call(method)
+    except DaemonNotRunning:
+        print("The daemon is not running (systemctl --user start gemmasearch).")
+        return 1
+    print(f"{method}: ok" + (f" ({result} files queued)" if method == "RetryFailed" else ""))
+    return 0
+
+
+def cmd_install_kde(args: argparse.Namespace, cfg: Config) -> int:
+    from .install import install_kde
+
+    for path in install_kde(enable=not args.no_enable, restart_krunner=not args.no_restart):
+        print(f"wrote {_short(str(path), cfg.home)}")
+    if not args.no_enable:
+        print("Service enabled and started; KRunner restarted. Try typing a query in KRunner (Alt+Space).")
+    return 0
+
+
+def cmd_uninstall_kde(args: argparse.Namespace, cfg: Config) -> int:
+    from .install import uninstall_kde
+
+    for path in uninstall_kde():
+        print(f"removed {_short(str(path), cfg.home)}")
+    print("The index database is kept; delete it with `gemmasearch reset --all --yes`.")
+    return 0
+
+
+def cmd_kde_status(args: argparse.Namespace, cfg: Config) -> int:
+    from .install import status_kde
+
+    st = status_kde(runner=_quiet_runner)
+    for name, path in st["paths"].items():
+        print(f"{name:<13} {'present' if st['files'][name] else 'missing':<8} {_short(str(path), cfg.home)}")
+    print(f"service       {'enabled' if st['enabled'] else 'disabled'}, {'active' if st['active'] else 'inactive'}")
+    return 0 if st["installed"] else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="gemmasearch", description="Semantic desktop search")
     p.add_argument("--config", type=Path, help="config file (default ~/.config/gemmasearch/config.toml)")
@@ -333,6 +400,24 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("--all", action="store_true", help="delete the whole database file instead")
     rs.add_argument("--force", action="store_true", help="even if another process has the database open")
     rs.set_defaults(func=cmd_reset)
+
+    dm = sub.add_parser("daemon", help="run the background service in the foreground (used by systemd)")
+    dm.set_defaults(func=cmd_daemon)
+
+    ct = sub.add_parser("ctl", help="talk to the running daemon")
+    ct.add_argument("action", choices=["status", "pause", "resume", "rescan", "retry-failed"])
+    ct.set_defaults(func=cmd_ctl)
+
+    ik = sub.add_parser("install-kde", help="install the KRunner plugin and the systemd user service")
+    ik.add_argument("--no-enable", action="store_true", help="write the files but do not start the service")
+    ik.add_argument("--no-restart", action="store_true", help="do not restart KRunner")
+    ik.set_defaults(func=cmd_install_kde)
+
+    uk = sub.add_parser("uninstall-kde", help="stop the service and remove the KRunner plugin")
+    uk.set_defaults(func=cmd_uninstall_kde)
+
+    ks = sub.add_parser("kde-status", help="show whether the KDE integration is installed and running")
+    ks.set_defaults(func=cmd_kde_status)
     return p
 
 
