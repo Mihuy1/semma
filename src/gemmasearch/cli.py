@@ -339,7 +339,11 @@ def cmd_ctl(args: argparse.Namespace, cfg: Config) -> int:
 def cmd_install_kde(args: argparse.Namespace, cfg: Config) -> int:
     from .install import install_kde
 
-    for path in install_kde(enable=not args.no_enable, restart_krunner=not args.no_restart):
+    for path in install_kde(
+        python=getattr(args, "python", None),
+        enable=not args.no_enable,
+        restart_krunner=not args.no_restart,
+    ):
         print(f"wrote {_short(str(path), cfg.home)}")
     if not args.no_enable:
         print("Service enabled and started; KRunner restarted. Try typing a query in KRunner (Alt+Space).")
@@ -347,10 +351,15 @@ def cmd_install_kde(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_uninstall_kde(args: argparse.Namespace, cfg: Config) -> int:
-    from .install import uninstall_kde
+    from .install import shared_service_kept_for_kde, uninstall_kde
 
     for path in uninstall_kde():
         print(f"removed {_short(str(path), cfg.home)}")
+    if shared_service_kept_for_kde():
+        print(
+            "The gemmasearch service was kept because the GNOME search provider is still installed; "
+            "run `gemmasearch uninstall-gnome` to remove it."
+        )
     print("The index database is kept; delete it with `gemmasearch reset --all --yes`.")
     return 0
 
@@ -374,9 +383,15 @@ def _print_integration_status(st: dict[str, object], home: Path) -> int:
 def cmd_install_gnome(args: argparse.Namespace, cfg: Config) -> int:
     from .install import install_gnome
 
-    res = install_gnome(enable=not args.no_enable)
+    res = install_gnome(python=getattr(args, "python", None), enable=not args.no_enable)
     for path in res.written:
         print(f"wrote {_short(str(path), cfg.home)}")
+    if res.service_files_kept:
+        target = res.kept_service_python or "another Python"
+        print(
+            f"Note: kept existing service files that point to {target}; "
+            "pass --python to replace them."
+        )
     if res.sudo_command:
         print("\nRun this once to let GNOME Shell find the provider:")
         print(f"  {res.sudo_command}")
@@ -399,6 +414,11 @@ def cmd_uninstall_gnome(args: argparse.Namespace, cfg: Config) -> int:
     if res.sudo_command:
         print("\nRun this once to remove the system search provider file:")
         print(f"  {res.sudo_command}")
+    if res.service_kept:
+        print(
+            "The gemmasearch service was kept because the KDE KRunner integration is still installed; "
+            "run `gemmasearch uninstall-kde` to remove it."
+        )
     print("The index database is kept; delete it with `gemmasearch reset --all --yes`.")
     return 0
 
@@ -499,6 +519,7 @@ def build_parser() -> argparse.ArgumentParser:
     ks.set_defaults(func=cmd_kde_status)
 
     ig = sub.add_parser("install-gnome", help="install the GNOME Shell search provider and the systemd user service")
+    ig.add_argument("--python", metavar="PATH", help="Python interpreter for the generated service files")
     ig.add_argument("--no-enable", action="store_true", help="write the files but do not start the service")
     ig.set_defaults(func=cmd_install_gnome)
 
@@ -510,6 +531,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     inst = sub.add_parser("install", help="install desktop search integration (auto-detects KDE or GNOME)")
     inst.add_argument("--desktop", choices=["kde", "gnome"], help="desktop environment (default: auto-detect)")
+    inst.add_argument("--python", metavar="PATH", help="Python interpreter for the generated service files")
     inst.add_argument("--no-enable", action="store_true", help="write the files but do not start the service")
     inst.add_argument("--no-restart", action="store_true", help="do not restart KRunner (KDE only)")
     inst.set_defaults(func=cmd_install)

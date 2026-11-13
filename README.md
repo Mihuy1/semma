@@ -6,9 +6,9 @@ Semantic file search for KDE KRunner and GNOME Shell overview search, powered by
 
 `uv run gemmasearch install` auto-detects the desktop from `XDG_CURRENT_DESKTOP` (falling back to `XDG_SESSION_DESKTOP` and `DESKTOP_SESSION`); pass `--desktop kde|gnome` to override. On other desktops it exits without making changes.
 
-- Auto-detected: `uv run gemmasearch install [--desktop kde|gnome] [--no-enable] [--no-restart]` (`--no-restart` is KDE only), `uv run gemmasearch uninstall [--desktop kde|gnome]`
+- Auto-detected: `uv run gemmasearch install [--desktop kde|gnome] [--python PATH] [--no-enable] [--no-restart]` (`--no-restart` is KDE only; `--python PATH` overrides existing service files on GNOME), `uv run gemmasearch uninstall [--desktop kde|gnome]`
 - Explicit KDE: `uv run gemmasearch install-kde [--no-enable] [--no-restart]`, `uv run gemmasearch uninstall-kde`
-- Explicit GNOME: `uv run gemmasearch install-gnome [--no-enable]`, `uv run gemmasearch uninstall-gnome`
+- Explicit GNOME: `uv run gemmasearch install-gnome [--python PATH] [--no-enable]`, `uv run gemmasearch uninstall-gnome`
 - Status: `uv run gemmasearch kde-status`, `uv run gemmasearch gnome-status`
 
 ## CLI
@@ -26,14 +26,15 @@ Semantic file search for KDE KRunner and GNOME Shell overview search, powered by
 
 ## Both desktops
 
-The daemon serves KRunner (`org.kde.krunner1`) at `/runner` and GNOME (`org.gnome.Shell.SearchProvider2`) at `/gnome` on `io.github.GemmaSearch` at the same time. Uninstalling one desktop's integration keeps the shared D-Bus service and `gemmasearch.service` systemd user unit active while the other desktop is still installed.
+The daemon serves KRunner (`org.kde.krunner1`) at `/runner` and GNOME (`org.gnome.Shell.SearchProvider2`) at `/io/github/GemmaSearch/SearchProvider` on `io.github.GemmaSearch` at the same time. Uninstalling one desktop's integration keeps the shared D-Bus service and `gemmasearch.service` systemd user unit active while the other desktop is still installed.
 
 ## Testing GNOME from KDE
 
 Run `./scripts/gnome_devkit.sh` (requires `sudo dnf install mutter-devkit` along with `gnome-shell`, and the `gemmasearch` daemon running on your session bus):
 
 - Starts `gnome-shell --devkit --wayland` in a private `dbus-run-session` so it cannot take over Plasma's notifications, status tray, or `xdg-desktop-portal` backends.
-- Runs `scripts/gnome_bridge.py` to forward only the search provider (`org.gnome.Shell.SearchProvider2` at `/gnome` on `io.github.GemmaSearch`) back to the real host session bus.
+- Isolates the nested shell with `AutoStart=false` (preventing D-Bus activation of a second daemon) and `GSETTINGS_BACKEND=memory` (preventing changes to your real dconf settings).
+- Runs `scripts/gnome_bridge.py` to forward only the search provider (`org.gnome.Shell.SearchProvider2` at `/io/github/GemmaSearch/SearchProvider` on `io.github.GemmaSearch`) back to the real host session bus.
 - Close the devkit window (or press `Ctrl+C`) to stop both GNOME Shell and the bridge.
 
 ## Development

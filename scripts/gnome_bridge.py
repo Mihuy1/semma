@@ -1,8 +1,9 @@
 """D-Bus bridge forwarding org.gnome.Shell.SearchProvider2 to the real session bus.
 
 Runs on the nested private session bus (default DBUS_SESSION_BUS_ADDRESS), owns
-``io.github.GemmaSearch``, exports ``org.gnome.Shell.SearchProvider2`` at ``/gnome``,
-and forwards all 5 SearchProvider2 calls to the upstream session bus daemon.
+``io.github.GemmaSearch``, exports ``org.gnome.Shell.SearchProvider2`` at
+``/io/github/GemmaSearch/SearchProvider``, and forwards all 5 SearchProvider2 calls
+to the upstream session bus daemon.
 
 Usage:
     GEMMASEARCH_UPSTREAM_BUS="$DBUS_SESSION_BUS_ADDRESS" \\
@@ -31,29 +32,6 @@ UPSTREAM_ENV_VAR = "GEMMASEARCH_UPSTREAM_BUS"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 
 
-def _wrap_variant(value: Any) -> Variant:
-    """Return ``value`` as a dbus_fast Variant if it is not already one."""
-    if isinstance(value, Variant):
-        return value
-    if isinstance(value, bool):
-        return Variant("b", value)
-    if isinstance(value, int):
-        return Variant("i", value)
-    if isinstance(value, float):
-        return Variant("d", value)
-    if isinstance(value, str):
-        return Variant("s", value)
-    if isinstance(value, bytes | bytearray):
-        return Variant("ay", bytes(value))
-    if isinstance(value, list):
-        if all(isinstance(item, str) for item in value):
-            return Variant("as", value)
-        return Variant("av", [_wrap_variant(item) for item in value])
-    if isinstance(value, dict):
-        return Variant("a{sv}", {str(k): _wrap_variant(v) for k, v in value.items()})
-    raise TypeError(f"Cannot wrap value of type {type(value).__name__} as D-Bus Variant")
-
-
 def _ensure_metas_variants(metas: Any) -> list[dict[str, Variant]]:
     """Ensure GetResultMetas payload is ``list[dict[str, Variant]]``."""
     if not isinstance(metas, list):
@@ -62,7 +40,7 @@ def _ensure_metas_variants(metas: Any) -> list[dict[str, Variant]]:
     for item in metas:
         if not isinstance(item, dict):
             continue
-        out.append({str(k): _wrap_variant(v) for k, v in item.items()})
+        out.append({str(k): v for k, v in item.items() if isinstance(v, Variant)})
     return out
 
 

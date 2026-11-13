@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import configparser
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -10,11 +11,14 @@ import pytest
 from gemmasearch import dbus_names
 from gemmasearch.cli import main as cli_main
 from gemmasearch.install import (
+    _atomic_write,
     detect_desktop,
     install_gnome,
     install_kde,
     render_gnome_desktop_file,
     render_gnome_search_provider_ini,
+    shared_service_kept_for_gnome,
+    shared_service_kept_for_kde,
     status_gnome,
     status_kde,
     uninstall_gnome,
@@ -227,7 +231,8 @@ def test_gnome_renderers_contents() -> None:
     sec = ini_cp["Shell Search Provider"]
     assert sec["DesktopId"] == "io.github.GemmaSearch.desktop"
     assert sec["BusName"] == "io.github.GemmaSearch"
-    assert sec["ObjectPath"] == "/gnome"
+    assert dbus_names.GNOME_PATH == "/io/github/GemmaSearch/SearchProvider"
+    assert sec["ObjectPath"] == "/io/github/GemmaSearch/SearchProvider"
     assert sec["Version"] == "2"
 
 
@@ -241,6 +246,8 @@ def test_install_gnome_writable_system_dir(
 
     def fake_runner(cmd: list[str]) -> int:
         commands.append(cmd)
+        if cmd[:3] == ["systemctl", "--user", "is-active"]:
+            return 3
         return 0
 
     res = install_gnome(
@@ -257,12 +264,15 @@ def test_install_gnome_writable_system_dir(
     assert res.written == [expected_desktop, expected_dbus, expected_unit, expected_ini]
     assert res.pending_ini is None
     assert res.sudo_command is None
+    assert res.service_files_kept is False
+    assert res.kept_service_python is None
     for p in res.written:
         assert p.is_file()
     assert not (config_home / "environment.d").exists()
 
     assert commands == [
         ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "is-active", dbus_names.SYSTEMD_UNIT],
         ["systemctl", "--user", "enable", "--now", dbus_names.SYSTEMD_UNIT],
     ]
 
@@ -329,6 +339,7 @@ def test_uninstall_gnome_keeps_shared_service_when_kde_present(
     unit_path = config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT
 
     assert res.sudo_command is None
+    assert res.service_kept is True
     assert res.removed == [gnome_desktop, gnome_ini]
     assert not gnome_desktop.exists()
     assert not gnome_ini.exists()
@@ -367,6 +378,7 @@ def test_uninstall_gnome_removes_shared_service_when_kde_absent_and_handles_ro_i
         assert dbus_path in res.removed
         assert unit_path in res.removed
         assert res.sudo_command == f"sudo rm -f {ini_path}"
+        assert res.service_kept is False
         assert commands == [
             ["systemctl", "--user", "disable", "--now", dbus_names.SYSTEMD_UNIT],
             ["systemctl", "--user", "daemon-reload"],
@@ -383,7 +395,13 @@ def test_uninstall_gnome_removes_shared_service_when_kde_absent_and_handles_ro_i
         ({"XDG_CURRENT_DESKTOP": "GNOME"}, "gnome"),
         ({"XDG_CURRENT_DESKTOP": "ubuntu:GNOME"}, "gnome"),
         ({"XDG_CURRENT_DESKTOP": "GNOME-Classic"}, "gnome"),
-        ({"XDG_CURRENT_DESKTOP": "GNOME-Flashback:GNOME"}, "gnome"),
+        ({"XDG_CURRENT_DESKTOP": "GNOME-Flashback:GNOME"}, None),
+        ({"XDG_CURRENT_DESKTOP": "GNOME-Flashback"}, None),
+        ({"XDG_CURRENT_DESKTOP": "GNOME-Flashback:GNOME", "XDG_SESSION_DESKTOP": "gnome"}, None),
+        ({"DESKTOP_SESSION": "gnome-flashback-metacity"}, None),
+        ({"DESKTOP_SESSION": "/usr/share/xsessions/plasma"}, "kde"),
+        ({"DESKTOP_SESSION": "/usr/share/wayland-sessions/gnome"}, "gnome"),
+        ({"DESKTOP_SESSION": "/usr/share/xsessions/gnome-flashback"}, None),
         ({"XDG_CURRENT_DESKTOP": "XFCE"}, None),
         ({"XDG_CURRENT_DESKTOP": "", "XDG_SESSION_DESKTOP": "plasma"}, "kde"),
         ({"XDG_SESSION_DESKTOP": "gnome"}, "gnome"),
@@ -448,6 +466,7 @@ def test_cli_install_gnome_prints_sudo_and_restart_note(
         assert "Run this once to let GNOME Shell find the provider:" in out
         assert "sudo install -Dm644" in out
         assert "GNOME Shell" in out
+        assert "started" not in out.lower()
     finally:
         sys_data.chmod(0o755)
 
@@ -461,6 +480,9 @@ def test_uninstall_kde_keeps_shared_service_when_gnome_present(
     install_kde(python="/usr/bin/python3", runner=lambda cmd: 0)
     install_gnome(python="/usr/bin/python3", system_data_dir=sys_data, runner=lambda cmd: 0)
 
+    assert shared_service_kept_for_kde() is True
+    assert shared_service_kept_for_gnome() is True
+
     commands: list[list[str]] = []
     removed = uninstall_kde(runner=lambda cmd: commands.append(cmd) or 0)
 
@@ -471,3 +493,204 @@ def test_uninstall_kde_keeps_shared_service_when_gnome_present(
     assert (data_home / "dbus-1" / "services" / f"{dbus_names.BUS_NAME}.service").is_file()
     assert (config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT).is_file()
     assert commands == [["kquitapp6", "krunner"]]
+    assert shared_service_kept_for_gnome() is False
+
+
+def test_atomic_write_sets_mode_0644(tmp_path: Path) -> None:
+    target = tmp_path / "sub" / "test.ini"
+    _atomic_write(target, "[Test]\nKey=1\n")
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_install_gnome_try_restarts_when_already_active(
+    isolated_xdg: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    sys_data = tmp_path / "sys_share"
+    commands: list[list[str]] = []
+
+    res = install_gnome(
+        python="/opt/gemma/venv/bin/python",
+        system_data_dir=sys_data,
+        runner=lambda cmd: commands.append(cmd) or 0,
+    )
+    assert res.service_files_kept is False
+    assert commands == [
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "is-active", dbus_names.SYSTEMD_UNIT],
+        ["systemctl", "--user", "enable", "--now", dbus_names.SYSTEMD_UNIT],
+        ["systemctl", "--user", "try-restart", dbus_names.SYSTEMD_UNIT],
+    ]
+
+
+def test_install_gnome_keeps_different_service_files_unless_python_passed(
+    isolated_xdg: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    data_home, config_home = isolated_xdg
+    sys_data = tmp_path / "sys_share"
+    old_py = "/opt/old/venv/bin/python"
+    new_py = "/opt/new/venv/bin/python"
+
+    install_kde(python=old_py, runner=lambda cmd: 0)
+    dbus_path = data_home / "dbus-1" / "services" / f"{dbus_names.BUS_NAME}.service"
+    unit_path = config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT
+    old_dbus_text = dbus_path.read_text(encoding="utf-8")
+    old_unit_text = unit_path.read_text(encoding="utf-8")
+
+    commands: list[list[str]] = []
+    res_kept = install_gnome(
+        python=None,
+        system_data_dir=sys_data,
+        runner=lambda cmd: commands.append(cmd) or 0,
+    )
+    assert res_kept.service_files_kept is True
+    assert res_kept.kept_service_python == old_py
+    assert dbus_path not in res_kept.written
+    assert unit_path not in res_kept.written
+    assert dbus_path.read_text(encoding="utf-8") == old_dbus_text
+    assert unit_path.read_text(encoding="utf-8") == old_unit_text
+    # Service files were not rewritten, so try-restart must not run.
+    assert commands == [
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "enable", "--now", dbus_names.SYSTEMD_UNIT],
+    ]
+
+    commands.clear()
+    res_replaced = install_gnome(
+        python=new_py,
+        system_data_dir=sys_data,
+        runner=lambda cmd: commands.append(cmd) or 0,
+    )
+    assert res_replaced.service_files_kept is False
+    assert res_replaced.kept_service_python is None
+    assert dbus_path in res_replaced.written
+    assert unit_path in res_replaced.written
+    assert new_py in dbus_path.read_text(encoding="utf-8")
+    assert new_py in unit_path.read_text(encoding="utf-8")
+    assert commands == [
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "is-active", dbus_names.SYSTEMD_UNIT],
+        ["systemctl", "--user", "enable", "--now", dbus_names.SYSTEMD_UNIT],
+        ["systemctl", "--user", "try-restart", dbus_names.SYSTEMD_UNIT],
+    ]
+
+
+def test_install_gnome_rerun_skips_staging_when_system_ini_identical(
+    isolated_xdg: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    data_home, _ = isolated_xdg
+    sys_data = tmp_path / "ro_sys_share"
+    providers_dir = sys_data / "gnome-shell" / "search-providers"
+    providers_dir.mkdir(parents=True)
+    ini_path = providers_dir / f"{dbus_names.BUS_NAME}.search-provider.ini"
+    ini_path.write_text(render_gnome_search_provider_ini(), encoding="utf-8")
+
+    staged_path = data_home / "gemmasearch" / f"{dbus_names.BUS_NAME}.search-provider.ini"
+    staged_path.parent.mkdir(parents=True)
+    staged_path.write_text("stale staged content", encoding="utf-8")
+
+    providers_dir.chmod(0o555)
+    try:
+        res = install_gnome(
+            python="/usr/bin/python3",
+            enable=False,
+            system_data_dir=sys_data,
+            runner=lambda cmd: 0,
+        )
+        assert res.pending_ini is None
+        assert res.sudo_command is None
+        assert ini_path not in res.written
+        assert not staged_path.exists()
+        st = status_gnome(system_data_dir=sys_data, runner=lambda cmd: 0)
+        assert st["installed"] is True
+    finally:
+        providers_dir.chmod(0o755)
+
+
+def test_cli_uninstall_reports_kept_shared_service(
+    isolated_xdg: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from gemmasearch import install as install_mod
+
+    sys_data = tmp_path / "sys_share"
+    monkeypatch.setattr(install_mod, "_default_runner", lambda cmd: 0)
+
+    orig_uninstall_gnome = install_mod.uninstall_gnome
+    monkeypatch.setattr(
+        install_mod,
+        "uninstall_gnome",
+        lambda *, system_data_dir=sys_data, runner=None: orig_uninstall_gnome(
+            system_data_dir=sys_data,
+            runner=lambda cmd: 0,
+        ),
+    )
+
+    install_kde(python="/usr/bin/python3", runner=lambda cmd: 0)
+    install_gnome(python="/usr/bin/python3", system_data_dir=sys_data, runner=lambda cmd: 0)
+
+    rc_kde = cli_main(["uninstall-kde"])
+    out_kde = capsys.readouterr().out
+    assert rc_kde == 0
+    assert (
+        "The gemmasearch service was kept because the GNOME search provider is still installed; "
+        "run `gemmasearch uninstall-gnome` to remove it."
+    ) in out_kde
+
+    install_kde(python="/usr/bin/python3", runner=lambda cmd: 0)
+    rc_gnome = cli_main(["uninstall-gnome"])
+    out_gnome = capsys.readouterr().out
+    assert rc_gnome == 0
+    assert (
+        "The gemmasearch service was kept because the KDE KRunner integration is still installed; "
+        "run `gemmasearch uninstall-kde` to remove it."
+    ) in out_gnome
+
+
+def test_cli_install_gnome_kept_service_notice_and_python_flag(
+    isolated_xdg: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from gemmasearch import install as install_mod
+
+    data_home, config_home = isolated_xdg
+    sys_data = tmp_path / "sys_share"
+    old_py = "/opt/old/venv/bin/python"
+    new_py = "/opt/new/venv/bin/python"
+    install_kde(python=old_py, runner=lambda cmd: 0)
+
+    orig_install_gnome = install_mod.install_gnome
+    monkeypatch.setattr(
+        install_mod,
+        "install_gnome",
+        lambda *, python=None, enable=True, system_data_dir=sys_data, runner=None: orig_install_gnome(
+            python=python,
+            enable=enable,
+            system_data_dir=sys_data,
+            runner=lambda cmd: 0,
+        ),
+    )
+
+    rc1 = cli_main(["install-gnome", "--no-enable"])
+    out1 = capsys.readouterr().out
+    assert rc1 == 0
+    assert f"kept existing service files that point to {old_py}; pass --python to replace them" in out1
+    assert "started" not in out1.lower()
+
+    rc2 = cli_main(["install", "--desktop", "gnome", "--python", new_py])
+    out2 = capsys.readouterr().out
+    assert rc2 == 0
+    assert "kept existing service files" not in out2
+    assert "Service enabled and started." in out2
+    assert new_py in (data_home / "dbus-1" / "services" / f"{dbus_names.BUS_NAME}.service").read_text(
+        encoding="utf-8"
+    )
+    assert new_py in (config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT).read_text(
+        encoding="utf-8"
+    )

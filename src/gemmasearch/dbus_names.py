@@ -15,7 +15,7 @@ RUNNER_ID = "gemmasearch"
 SYSTEMD_UNIT = "gemmasearch.service"
 
 # org.gnome.Shell.SearchProvider2 implementation (GNOME Shell overview search).
-GNOME_PATH = "/gnome"
+GNOME_PATH = "/io/github/GemmaSearch/SearchProvider"
 GNOME_INTERFACE = "org.gnome.Shell.SearchProvider2"
 # GNOME search-provider .ini and the DesktopId .desktop file it points to.
 GNOME_DESKTOP_ID = "io.github.GemmaSearch.desktop"
