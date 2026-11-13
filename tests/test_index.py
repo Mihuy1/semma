@@ -27,8 +27,9 @@ def make_cfg(home: Path) -> Config:
     cfg.db_path = home / "db" / "index.db"
     cfg.roots = [home / "Documents"]
     # Tiny indexes: with n vectors no z-score can exceed sqrt(n - 1), so the default gate (2.0)
-    # is out of reach for 3-5 files.
+    # and floor (4.5) are out of reach for 3-5 files.
     cfg.z_gate = 1.0
+    cfg.z_floor = 0.0
     return cfg
 
 

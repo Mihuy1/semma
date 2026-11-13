@@ -54,8 +54,9 @@ def test_query_and_mixed_modalities(embedder: Embedder) -> None:
 
 def test_semantic_search_end_to_end(tmp_path: Path, embedder: Embedder) -> None:
     cfg = make_cfg(tmp_path)
-    # Three files: no z-score can exceed sqrt(2), so the shipped gate (2.0) is out of reach.
+    # Three files: no z-score can exceed sqrt(2), so the shipped gate (2.0) and floor are out of reach.
     cfg.z_gate = 1.0
+    cfg.z_floor = 0.0
     write_docs(tmp_path, {
         "a.md": "Feed the sourdough starter, knead the dough and bake the loaf in a hot oven.",
         "b.md": "The Kubernetes cluster lost quorum when an etcd node ran out of disk space.",

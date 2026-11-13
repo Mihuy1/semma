@@ -207,8 +207,9 @@ def make_cfg(home: Path) -> Config:
     cfg.roots = [home / "Documents"]
     cfg.locations = {home / "Documents": 40}
     # Tiny indexes: with n vectors no z-score can exceed sqrt(n - 1), so the default gate (2.0)
-    # is out of reach for 3-5 files.
+    # and floor (4.5) are out of reach for 3-5 files.
     cfg.z_gate = 1.0
+    cfg.z_floor = 0.0
     cfg.query_debounce_ms = 0
     cfg.gpu_check_seconds = 0.05
     cfg.model_idle_unload_minutes = 0  # tests that need it set it

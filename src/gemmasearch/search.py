@@ -1,13 +1,16 @@
 """Hybrid search: how far each file's best chunk stands out in meaning for this query (a z-score
 over every stored vector), plus how many of the query's words the file contains.
 
-1. query words: `query_terms` minus stopwords and type words ("screenshot", "pdf", "video",
-   "kuva", ...); type words give a bonus instead (step 4), they are not filters. A query made only
-   of type words or stopwords keeps them as words. Words matching too many chunks are dropped from
-   the chunk-text queries and from word coverage (`_selective`); in chunk text only the last word
-   gets a prefix wildcard from TEXT_PREFIX_MIN characters while it is in no chunk as typed, while
-   file names and folders prefix every term from FILE_PREFIX_MIN characters (FILE_LAST_PREFIX_MIN
-   for the last term).
+1. query words: `query_terms` minus stopwords and type words used as kind hints. Unambiguous type
+   words ("screenshot", "photo", "pdf", "video", "kuvakaappaus", "valokuva", ...) are always
+   hints; the others ("image", "paper", "notes", "music", "sound", ...) only where the phrasing
+   says so ("image of a dog", "notes about X", "... in a recording"); elsewhere they are ordinary
+   words and ask for no kind ("image segmentation", "music theory"). Hints give a bonus (step 4),
+   they are not filters. A query made only of type words or stopwords keeps them as words. Words
+   matching too many chunks are dropped from the chunk-text queries and from word coverage
+   (`_selective`); in chunk text only the last word gets a prefix wildcard from TEXT_PREFIX_MIN
+   characters while it is in no chunk as typed, while file names and folders prefix every term
+   from FILE_PREFIX_MIN characters (FILE_LAST_PREFIX_MIN for the last term).
 2. lexical candidates (all filtered by kind): an OR query over chunk text (bm25 order, its best
    chunk per file is the file's text match), over file names and over folder names, and a name
    query requiring every word.
@@ -19,16 +22,25 @@ over every stored vector), plus how many of the query's words the file contains.
    their mean. That is a z-score: how many standard deviations a chunk stands out from the whole
    index for this query. The scale always comes from all vectors; `kinds` only restricts which
    files are candidates. A file's meaning is its best chunk's z (its cosine is reported as
-   `similarity`). Without the cache (sqlite-vec fallback, rare) the scale comes from a fixed
-   sample of SCALE_SAMPLE vectors and only the KNN top-k (cfg.knn_k) is scored.
-4. candidates: z >= cfg.z_gate, or at least half the words in the file's chunk text or name
-   (folder words alone are too weak: one folder word matches every file inside), or every query
-   word in the file name. score = max(z, 0) + W_WORDS * coverage**1.5 (coverage counts chunk text
-   and name matches as 1, folder-only matches as 0.5) + NAME_BONUS for matching every query word
-   in the file name + TYPE_BONUS for the kind a type word asks for (+ SCREENSHOT_BONUS for
-   screenshots when asked for) + the location prior: cfg.location_prior is a z-unit bonus at
-   priority 100, so it only reorders near-ties (~/Documents beats a dataset folder when equally
-   relevant).
+   `similarity`). Without the cache (sqlite-vec fallback, rare) the scale comes from a sample of
+   about SCALE_SAMPLE vectors (stratified by modality, weighted back to the index's proportions),
+   the KNN top-k (cfg.knn_k) is scored, and so is one chunk of each of the first
+   SQLITE_LEXICAL_VECTORS lexical candidates outside it.
+4. candidates: a file with at least half the words in its chunk text or name (folder words alone
+   are too weak: one folder word matches every file inside), or every query word in its name.
+   A file without them (a vector-only match) needs z >= cfg.z_gate, and z within Z_MARGIN
+   (SINGLE_WORD_MARGIN for one word) of the query's best match, and that best match must reach
+   cfg.z_floor; the kind bonus counts in both comparisons. z is relative, so every query has a
+   tail of ~2-5% of the index above the gate; the margin cuts that tail and the floor makes a
+   query whose best match stands out no further than noise ("asdfgh qwerty") find nothing.
+   score = w_m * max(z, 0) + w_w * coverage**1.5 (coverage counts chunk text and name matches as
+   1, folder-only matches as 0.5; w_m = 1 and w_w = W_WORDS, but lookups (is_lookup: every term
+   a code like "b0bbce05d5") weigh meaning 0.5 and words 2 * W_WORDS, and one non-lookup word
+   found outside the file's name counts w_w * SINGLE_TEXT_FACTOR) + NAME_BONUS for matching every
+   query word in the file name + TYPE_BONUS for the kind a type word asks for (+
+   SCREENSHOT_BONUS for screenshots when asked for) + the location prior: cfg.location_prior is
+   a z-unit bonus at priority 100, so it only reorders near-ties (~/Documents beats a dataset
+   folder when equally relevant).
    (Ported from DigUp's Searcher, where it beat reciprocal rank fusion: R@1 0.88 vs 0.73 on a
    synthetic eval and 0.86 vs 0.82 on a real one. RRF erased similarity gaps: the best vector
    match ranked 13th behind files that merely also contained the words.)
@@ -86,9 +98,25 @@ W_WORDS = 2.0
 # coverage it also gets (+2) it beats any file whose z is less than ~5 above its own, and z > 5
 # over the name file's is rare (the best match of a query usually sits at z 4-7).
 NAME_BONUS = 3.0
+# Lookups (is_lookup: "b0bbce05d5", "0xff32:0x0074"): meaning counts half, words double (DigUp).
+LOOKUP_MEANING_WEIGHT = 0.5
+LOOKUP_WORDS_FACTOR = 2.0
+# One (non-lookup) query word found only in a file's text adds W_WORDS * 0.5: "dog" mentioned in a
+# thesis (z 3.6 + 1) no longer beats the dog photo (z 5.2), while a file named after the word
+# keeps the full weight.
+SINGLE_TEXT_FACTOR = 0.5
+# A file without the query's words (a vector-only match) must come within this many z of the
+# query's best meaning match. Its tail is otherwise ~2-5% of the index for every query (z is
+# relative): on the local eval the tails behind a z 9-11 top sat at z 2-4.5. One word gets a
+# tighter margin (like the old 0.04 cosine margin for short queries): its meaning is vaguer and
+# its tail longer ("firefox": the Firefox screenshot at z 5.2, then console.txt at 3.5).
+Z_MARGIN = 3.0
+SINGLE_WORD_MARGIN = 1.5
 TYPE_BONUS = 1.0  # the file's kind is what a type word asks for ("screenshot of ...", "pdf")
 SCREENSHOT_BONUS = 0.5  # ... and "screenshot" asks for images that are screenshots in particular
 SCALE_SAMPLE = 2048  # sqlite-vec fallback: vectors sampled to estimate the scale
+MODALITY_SAMPLE_MIN = 64  # ... at least this many of each modality with MODALITY_MIN chunks
+SQLITE_LEXICAL_VECTORS = 50  # ... lexical files outside the KNN top-k scored by one chunk each
 SCALE_SAMPLE_MAX_AGE = 300.0  # seconds a sample is reused after the index changed
 
 STOPWORDS = frozenset({
@@ -124,6 +152,18 @@ TYPE_WORDS: dict[str, tuple[str, ...]] = {
 }
 SCREENSHOT_WORDS = frozenset({"screenshot", "screenshots", "kuvakaappaus", "kuvakaappaukset",
                               "kuvakaappauksen", "kuvakaappauksia", "kuvakaappauksessa"})
+# Type words that hardly mean anything else: always a kind hint, never searched as words. The
+# rest ("image segmentation", "music theory", "sound card", "paper towel", "voice notes") are also
+# ordinary words: they stay content words and ask for their kind only where the phrasing says so
+# (HINT_AFTER/HINT_BEFORE). Finnish locatives ("kuvassa", "videolla": in a picture/video) are hints.
+UNAMBIGUOUS_TYPE_WORDS = SCREENSHOT_WORDS | frozenset({
+    "photo", "photos", "pdf", "pdfs", "video", "videos",
+    "valokuva", "valokuvat", "valokuvan", "valokuvia", "valokuvassa", "kuvassa",
+    "videot", "videon", "videoita", "videolla", "videossa",
+})
+HINT_AFTER = frozenset({"of", "about"})  # "image of a dog", "paper about attention"
+HINT_BEFORE = frozenset({"in", "on", "from"})  # "... in a recording", "... from the paper"
+ARTICLES = frozenset({"a", "an", "the", "my", "some", "this", "that"})
 
 
 @dataclass(slots=True)
@@ -140,6 +180,7 @@ class SearchResult:
     matched: list[str] = field(default_factory=list)  # signals that found it: vector/name/text/folder
     duplicates: int = 0  # near-identical files collapsed into this result
     duplicate_paths: list[str] = field(default_factory=list)
+    z: float | None = None  # meaning z of the best chunk (None: not scored, lexical-only)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -162,27 +203,52 @@ def query_terms(text: str) -> list[str]:
     return _TERM.findall(text)[:MAX_QUERY_TERMS]
 
 
+def _is_hint(folded: list[str], i: int) -> bool:
+    """Whether type word folded[i] asks for a kind: always for an unambiguous one, else only when
+    followed by "of"/"about" or preceded (articles skipped) by "in"/"on"/"from"."""
+    w = folded[i]
+    if w in UNAMBIGUOUS_TYPE_WORDS:
+        return True
+    if i + 1 < len(folded) and folded[i + 1] in HINT_AFTER:
+        return True
+    j = i - 1
+    while j >= 0 and folded[j] in ARTICLES:
+        j -= 1
+    return j >= 0 and folded[j] in HINT_BEFORE
+
+
 def query_words(text: str) -> QueryWords:
-    """Content words, and the kinds the type words ask for. Content words of one character are
-    dropped (except digits); a query of nothing but type words/stopwords keeps them as words."""
+    """Content words, and the kinds the type words ask for. A type word used as a hint is not a
+    content word; an ambiguous one used otherwise is only a content word (no kind bonus). Content
+    words of one character are dropped (except digits); a query of nothing but type words or
+    stopwords keeps them as words."""
     words = query_terms(text)
     folded = [w.casefold() for w in words]
-    kinds = {k for w in folded for k in TYPE_WORDS.get(w, ())}
-    screenshot = any(w in SCREENSHOT_WORDS for w in folded)
+    hints = {i for i, f in enumerate(folded) if f in TYPE_WORDS and _is_hint(folded, i)}
+    kinds = {k for i in hints for k in TYPE_WORDS[folded[i]]}
+    screenshot = any(folded[i] in SCREENSHOT_WORDS for i in hints)
     seen: set[str] = set()
 
-    def pick(pred: Callable[[str], bool]) -> list[str]:
+    def pick(pred: Callable[[int, str], bool]) -> list[str]:
         out = []
-        for w, f in zip(words, folded, strict=True):
-            if pred(f) and f not in seen and (len(f) > 1 or f.isdigit()):
+        for i, (w, f) in enumerate(zip(words, folded, strict=True)):
+            if pred(i, f) and f not in seen and (len(f) > 1 or f.isdigit()):
                 seen.add(f)
                 out.append(w)
         return out
 
-    terms = pick(lambda f: f not in STOPWORDS and f not in TYPE_WORDS)
+    terms = pick(lambda i, f: f not in STOPWORDS and i not in hints)
     if not terms:
-        terms = pick(lambda f: f not in STOPWORDS) or pick(lambda f: True)
+        terms = pick(lambda i, f: f not in STOPWORDS) or pick(lambda i, f: True)
     return QueryWords(terms, kinds, screenshot)
+
+
+def is_lookup(terms: Sequence[str]) -> bool:
+    """Codes, IDs and long numbers ("b0bbce05d5", "0xff32", "TRX50", "4815162342"): every term has
+    a digit and a letter or 4+ characters. They mean little to an embedding and everything to
+    word search (DigUp's `isLookup`)."""
+    return bool(terms) and all(any(c.isdigit() for c in t) and (any(c.isalpha() for c in t) or len(t) >= 4)
+                               for t in terms)
 
 
 def _patterns(terms: list[str]) -> list[str]:
@@ -221,20 +287,33 @@ class Scale:
         return (cos - self.offset(modality)) / self.std
 
 
-def meaning_scale(sims: np.ndarray, modality: np.ndarray, names: Sequence[str]) -> Scale:
-    """The scale from cosines `sims` of vectors with modality codes `modality` (names[code])."""
+def meaning_scale(sims: np.ndarray, modality: np.ndarray, names: Sequence[str],
+                  weights: np.ndarray | None = None, counts: Sequence[int] | None = None) -> Scale:
+    """The scale from cosines `sims` of vectors with modality codes `modality` (names[code]).
+    A sample passes `weights` (how many index vectors each sampled one stands for) and the
+    index's per-modality `counts` (which decide MODALITY_MIN). Everything comes from per-modality
+    sums of w, w*cos and w*cos^2 (no full-length temporaries besides the squares)."""
     if not len(sims):
         return Scale({}, 0.0, 0.0, 1.0)
-    codes = modality.astype(np.int64, copy=False)
-    counts = np.bincount(codes, minlength=len(names))
-    sums = np.bincount(codes, weights=sims, minlength=len(names))
-    overall = float(sums.sum() / len(sims))
-    means = np.where(counts >= MODALITY_MIN, sums / np.maximum(counts, 1), overall)
-    centered = sims - means[codes].astype(np.float32)
-    center = float(centered.mean(dtype=np.float64))
-    std = max(float(centered.std(dtype=np.float64)), STD_FLOOR)
-    return Scale({names[i]: float(means[i]) for i in range(len(names)) if counts[i] >= MODALITY_MIN},
-                 overall, center, std)
+    codes = modality.astype(np.intp, copy=False)
+    k = len(names)
+    if weights is None:
+        w0 = np.bincount(codes, minlength=k).astype(np.float64)
+        s1 = np.bincount(codes, weights=sims, minlength=k)
+        s2 = np.bincount(codes, weights=sims * sims, minlength=k)
+    else:
+        w0 = np.bincount(codes, weights=weights, minlength=k)
+        s1 = np.bincount(codes, weights=weights * sims, minlength=k)
+        s2 = np.bincount(codes, weights=weights * sims * sims, minlength=k)
+    have = (np.asarray(counts if counts is not None else w0, dtype=np.float64) >= MODALITY_MIN) & (w0 > 0)
+    total = float(w0.sum())
+    overall = float(s1.sum() / total)
+    means = np.where(have, s1 / np.maximum(w0, 1e-12), overall)
+    # Centred values c = cos - means[modality]: sum c = s1 - w0*m, sum c^2 = s2 - 2*m*s1 + w0*m^2.
+    center = float((s1 - w0 * means).sum() / total)
+    var = float((s2 - 2 * means * s1 + w0 * means * means).sum() / total) - center * center
+    std = max(float(np.sqrt(max(var, 0.0))), STD_FLOOR)
+    return Scale({names[i]: float(means[i]) for i in range(k) if have[i]}, overall, center, std)
 
 
 def _exists(path: str) -> bool:
@@ -260,6 +339,27 @@ class _Meaning:
 
 
 @dataclass
+class _Sample:
+    """sqlite-vec fallback: a weighted sample of the index's vectors for the meaning scale."""
+
+    version: int  # chunks version it was taken at
+    time: float  # time.monotonic() when taken
+    mat: np.ndarray  # unit vectors (rows)
+    codes: np.ndarray  # modality code per row (names[code])
+    weights: np.ndarray  # chunks of its modality in the index each row stands for
+    names: list[str]
+    counts: list[int]  # chunks per modality in the index
+    full: bool  # the sample is the whole index (so any growth reloads it at once)
+
+
+def _vector_min(z_max: float, gate: float, margin: float, bonus: float, floor: float) -> float:
+    """The lowest z at which a chunk without the query's words can still pass (see
+    `Searcher._search`), given the best gated chunk's z: within `margin` plus the kind `bonus`
+    a file may get of it, and only if that best chunk plus the bonus reaches the floor."""
+    return max(gate, z_max - margin - bonus) if z_max + bonus >= floor else float("inf")
+
+
+@dataclass
 class _WordCoverage:
     named: set[int]             # file_id -> every query word matched in the file name
     coverage: dict[int, float]  # weighted coverage (text/name = 1.0, folder-only = 0.5)
@@ -275,8 +375,7 @@ class Searcher:
         self.cfg = cfg
         self.embedder = embedder
         self.last_timings = SearchTimings()
-        # sqlite-vec fallback: (chunks version, time, unit vectors, modality names) of the sample
-        self._sample: tuple[int, float, np.ndarray, list[str]] | None = None
+        self._sample: _Sample | None = None  # sqlite-vec fallback
 
     def search(self, query: str, limit: int = 10, kinds: Sequence[str] | None = None) -> list[SearchResult]:
         query = query.strip()
@@ -344,17 +443,24 @@ class Searcher:
                 db, f"SELECT fts_files.rowid FROM fts_files{kind_join} WHERE fts_files MATCH ? "
                     f"ORDER BY rank LIMIT {lim}", [*kind_args, match])]
 
-        lexical: set[int] = set(text_best)
+        # file id -> its best text chunk (None: matched by name/folder), in lexical rank order
+        lexical: dict[int, int | None] = dict(text_best)
         if file_patterns:
-            lexical.update(files_matching(f"{{name}} : ({' '.join(file_patterns)})", FTS_LIMIT * 4))
-            if len(file_patterns) > 1:
-                lexical.update(files_matching(f"{{name}} : ({' OR '.join(file_patterns)})", FTS_LIMIT * 2))
-            lexical.update(files_matching(f"{{dirs}} : ({' OR '.join(file_patterns)})", FTS_LIMIT * 2))
+            for f in itertools.chain(
+                    files_matching(f"{{name}} : ({' '.join(file_patterns)})", FTS_LIMIT * 4),
+                    files_matching(f"{{name}} : ({' OR '.join(file_patterns)})", FTS_LIMIT * 2)
+                    if len(file_patterns) > 1 else (),
+                    files_matching(f"{{dirs}} : ({' OR '.join(file_patterns)})", FTS_LIMIT * 2)):
+                lexical.setdefault(f, None)
 
         # 3. Meaning.
-        meaning = self._meaning(db, qvec, kinds, gate, lexical)
+        lookup = is_lookup(terms)
+        single = len(terms) == 1 and not lookup
+        margin = SINGLE_WORD_MARGIN if single else Z_MARGIN
+        bonus = TYPE_BONUS if words.kinds else 0.0
+        meaning = self._meaning(db, qvec, kinds, gate, lexical, margin, bonus, cfg.z_floor)
         best = meaning.best
-        pool = lexical | set(best)
+        pool = set(lexical) | set(best)
         if not pool:
             return []
 
@@ -362,6 +468,16 @@ class Searcher:
         files = self._files(db, pool)
 
         # 4. Candidates and score.
+        w_meaning, w_words = (LOOKUP_MEANING_WEIGHT, W_WORDS * LOOKUP_WORDS_FACTOR) if lookup else (1.0, W_WORDS)
+        # A file without the words must stand out absolutely (the query's best meaning match
+        # reaches cfg.z_floor) and relatively (within `margin` of that best match). Both count
+        # the kind bonus: "image of a dog" asks for images, whose z run lower.
+        def z_kind(f: int) -> float:
+            row = files.get(f)
+            return best[f][0] + (bonus if row is not None and row["kind"] in words.kinds else 0.0)
+
+        z_top = max(map(z_kind, best), default=0.0)
+        z_min = z_top - margin if z_top >= cfg.z_floor else float("inf")
         scores: dict[int, float] = {}
         matched: dict[int, list[str]] = {}
         for f in pool:
@@ -371,10 +487,13 @@ class Searcher:
             z = best[f][0] if f in best else None
             coverage = cov.coverage.get(f, 0.0)
             # Folder words count for the score, but alone they don't make a file a candidate.
-            strong = cov.strong.get(f, 0.0)
-            if not ((z is not None and z >= gate) or strong >= 0.5 or f in cov.named):
+            lexical_ok = cov.strong.get(f, 0.0) >= 0.5 or f in cov.named
+            if not (lexical_ok or (z is not None and z >= gate and z_kind(f) >= z_min)):
                 continue
-            score = max(z or 0.0, 0.0) + W_WORDS * coverage ** 1.5
+            # One word found only in a file's text is weak evidence ("dog" mentioned once in a
+            # thesis): half the word weight, unless the file is named after it.
+            ww = w_words * SINGLE_TEXT_FACTOR if single and f not in cov.name_hit else w_words
+            score = w_meaning * max(z or 0.0, 0.0) + ww * coverage ** 1.5
             if f in cov.named:
                 score += NAME_BONUS
             if row["kind"] in words.kinds:
@@ -434,6 +553,7 @@ class Searcher:
                 snippet=c["snippet"] if c else "", position=c["position"] if c else None,
                 mtime=row["mtime"], matched=labels,
                 duplicates=len(others), duplicate_paths=[files[g]["path"] for g in others[:20]],
+                z=round(best[f][0], 4) if f in best else None,
             ))
         return out
 
@@ -494,18 +614,21 @@ class Searcher:
         return _WordCoverage(named, coverage, strong, text_hit, name_hit, dir_hit)
 
     def _meaning(self, db: sqlite3.Connection, qvec: np.ndarray, kinds: list[str] | None, gate: float,
-                 lexical: set[int]) -> _Meaning:
-        """Each candidate file's best chunk (z, cosine, chunk id): files with a chunk at
-        z >= gate (at most MAX_MEANING_ROWS chunks, best first) and the `lexical` files."""
+                 lexical: dict[int, int | None], margin: float, bonus: float, floor: float) -> _Meaning:
+        """Each candidate file's best chunk (z, cosine, chunk id): the `lexical` files (file id ->
+        its best text chunk or None, in lexical rank order), and the files with a chunk at
+        z >= gate that can still pass the margin and floor (`_vector_min`; at most
+        MAX_MEANING_ROWS chunks, best first). Pruning here keeps the per-file work (file rows,
+        word coverage) small on big indexes."""
         cache = self.store.vectors
         if cache is not None:
             with cache.lock:
                 if not cache.too_big:
-                    return self._meaning_cached(db, qvec, kinds, gate, lexical)
-        return self._meaning_sqlite(db, qvec, kinds, gate, lexical)
+                    return self._meaning_cached(db, qvec, kinds, gate, lexical, margin, bonus, floor)
+        return self._meaning_sqlite(db, qvec, kinds, gate, lexical, margin, bonus, floor)
 
     def _meaning_cached(self, db: sqlite3.Connection, qvec: np.ndarray, kinds: list[str] | None,
-                        gate: float, lexical: set[int]) -> _Meaning:
+                        gate: float, lexical: dict[int, int | None], margin: float, bonus: float, floor: float) -> _Meaning:
         cache = self.store.vectors
         assert cache is not None
         sc = cache.scores(qvec)
@@ -517,37 +640,43 @@ class Searcher:
         best: dict[int, tuple[float, float, int]] = {}
         if not len(sims):
             return _Meaning(best, scale)
-        # z for every row (float32): (cos - mean[modality] - center) / std
+        # The gate as one cosine threshold per modality: z >= gate <=> cos >= offset + gate * std.
         offset = scale.offsets(sc.names)
-        z = (sims - offset[mods]) * np.float32(1.0 / scale.std)
-        ok = z >= gate
+        ok = sims >= (offset + np.float32(gate * scale.std))[mods]
         if sc.valid is not None:
             ok &= sc.valid
         if kinds is not None:
             ok &= np.isin(sc.kind, cache.codes(kinds))
         rows = np.flatnonzero(ok)
-        if len(rows) > MAX_MEANING_ROWS:
-            rows = rows[np.argpartition(-z[rows], MAX_MEANING_ROWS - 1)[:MAX_MEANING_ROWS]]
-        rows = rows[np.argsort(-z[rows], kind="stable")]
+        z = (sims[rows] - offset[mods[rows]]) * np.float32(1.0 / scale.std)
+        if len(rows):
+            z_min = _vector_min(float(z.max()), gate, margin, bonus, floor)
+            keep = np.flatnonzero(z >= z_min)
+            if len(keep) > MAX_MEANING_ROWS:
+                keep = keep[np.argpartition(-z[keep], MAX_MEANING_ROWS - 1)[:MAX_MEANING_ROWS]]
+            rows, z = rows[keep], z[keep]
 
-        def take(rows: np.ndarray) -> None:
+        def take(rows: np.ndarray, z: np.ndarray) -> None:
             for r, f, c, zz, cos in zip(rows.tolist(), sc.file_ids[rows].tolist(), sc.chunk_ids[rows].tolist(),
-                                       z[rows].tolist(), sims[rows].tolist(), strict=True):
+                                       z.tolist(), sims[rows].tolist(), strict=True):
                 if f not in best or zz > best[f][0]:
                     best[f] = (zz, cos, c)
 
-        take(rows)
+        take(rows, z)
         extra = [f for f in lexical if f not in best]
         if extra:
-            take(cache.rows(self._file_chunks(db, extra)))
+            rows = cache.rows(self._file_chunks(db, extra))
+            take(rows, (sims[rows] - offset[mods[rows]]) * np.float32(1.0 / scale.std))
         return _Meaning(best, scale)
 
     def _meaning_sqlite(self, db: sqlite3.Connection, qvec: np.ndarray, kinds: list[str] | None,
-                        gate: float, lexical: set[int]) -> _Meaning:
-        """Fallback without the vector cache (index above vector_cache_max_chunks): only the KNN
-        top-k (cfg.knn_k) is scored, on a scale estimated from a fixed sample of the index; a
-        lexical candidate outside the top-k counts as z = 0 (fetching its vectors from vec0 costs
-        ~0.15 ms each). Selecting the embedding column in the KNN adds ~50 ms at 100k chunks."""
+                        gate: float, lexical: dict[int, int | None], margin: float, bonus: float, floor: float) -> _Meaning:
+        """Fallback without the vector cache (index above vector_cache_max_chunks): the KNN
+        top-k (cfg.knn_k) is scored on a scale estimated from a sample of the index. A lexical
+        candidate outside the top-k is scored by one chunk (its best text match, else its first
+        chunk), for the first SQLITE_LEXICAL_VECTORS of them in lexical order (~0.15 ms each
+        from vec0; the rest count as z = 0). Selecting the embedding column in the KNN would add
+        ~50 ms at 100k chunks."""
         scale = self._sample_scale(db, qvec)
         q = np.asarray(qvec, dtype=np.float32)
         q = q / (np.linalg.norm(q) or 1.0)
@@ -561,41 +690,72 @@ class Searcher:
         best: dict[int, tuple[float, float, int]] = {}
         if cos:
             ids = list(cos)
-            for cid, fid, mod in db.execute(f"SELECT id, file_id, modality FROM chunks WHERE id IN "
-                                            f"({','.join('?' * len(ids))})", ids):
-                zz = scale.z(cos[cid], mod)
-                if (zz >= gate or fid in lexical) and (fid not in best or zz > best[fid][0]):
-                    best[fid] = (zz, cos[cid], cid)
+            rows = [(cid, fid, scale.z(cos[cid], mod), cos[cid]) for cid, fid, mod in db.execute(
+                f"SELECT id, file_id, modality FROM chunks WHERE id IN ({','.join('?' * len(ids))})", ids)]
+            z_max = max((zz for _, _, zz, _ in rows if zz >= gate), default=None)
+            z_min = _vector_min(z_max, gate, margin, bonus, floor) if z_max is not None else float("inf")
+            for cid, fid, zz, c in rows:
+                if (zz >= z_min or fid in lexical) and (fid not in best or zz > best[fid][0]):
+                    best[fid] = (zz, c, cid)
+        extra = list(itertools.islice((f for f in lexical if f not in best), SQLITE_LEXICAL_VECTORS))
+        if extra:
+            first = {r[0]: r[1] for r in db.execute(
+                f"SELECT file_id, id FROM chunks WHERE file_id IN ({','.join('?' * len(extra))}) AND seq = 0", extra)}
+            chunk_of = {f: c for f in extra if (c := lexical[f] or first.get(f)) is not None}
+            mods = {r[0]: r[1] for r in db.execute(
+                f"SELECT id, modality FROM chunks WHERE id IN ({','.join('?' * len(chunk_of))})",
+                list(chunk_of.values()))} if chunk_of else {}
+            vecs = self._vectors(db, list(chunk_of.values())) if chunk_of else {}
+            for f, c in chunk_of.items():
+                v = vecs.get(c)
+                if v is not None:
+                    cc = float(v @ q / (np.linalg.norm(v) or 1.0))
+                    best[f] = (scale.z(cc, mods.get(c)), cc, c)
         return _Meaning(best, scale)
 
     def _sample_scale(self, db: sqlite3.Connection, qvec: np.ndarray) -> Scale:
-        """The scale from SCALE_SAMPLE vectors spread evenly in chunk-id order (reloaded when the
-        index changed and the sample is older than SCALE_SAMPLE_MAX_AGE, or at once when the
-        index grew while small enough for the sample to cover all of it)."""
+        """The scale from a sample of about SCALE_SAMPLE vectors, spread evenly in chunk-id order
+        within each modality and weighted by how many chunks each stands for; every modality
+        with MODALITY_MIN chunks in the index gets at least MODALITY_SAMPLE_MIN of them, so a
+        rare modality is still centred on its own mean (reloaded when the index changed and the
+        sample is older than SCALE_SAMPLE_MAX_AGE, or at once while the sample is the whole
+        index)."""
         version = chunks_version(db)
         now = time.monotonic()
         s = self._sample
-        if s is None or s[0] != version:
-            count = db.execute("SELECT count(*) FROM chunks").fetchone()[0]
-            if s is None or now - s[1] > SCALE_SAMPLE_MAX_AGE or len(s[2]) < min(SCALE_SAMPLE, count):
-                step = max(1, count // SCALE_SAMPLE)
-                rows = list(itertools.islice(
-                    db.execute("SELECT id, modality FROM chunks ORDER BY id"),
-                    0, step * SCALE_SAMPLE, step,
-                ))
-                mod = {r[0]: r[1] for r in rows}
-                vecs = self._vectors(db, list(mod)) if mod else {}
-                ids = [c for c in mod if c in vecs]
-                mat = np.stack([vecs[c] for c in ids]).astype(np.float32) if ids else np.zeros((0, len(qvec)), np.float32)
-                if len(mat):
-                    mat /= np.maximum(np.linalg.norm(mat, axis=1, keepdims=True), 1e-12)
-                s = self._sample = (version, now, mat, [mod[c] for c in ids])
-        _, _, mat, mods = s
+        if s is None or s.version != version:
+            if s is None or now - s.time > SCALE_SAMPLE_MAX_AGE or s.full:
+                s = self._sample = self._load_sample(db, version, now, len(qvec))
+        names = s.names
         q = np.asarray(qvec, dtype=np.float32)
-        names = sorted(set(mods))
-        code = {n: i for i, n in enumerate(names)}
-        return meaning_scale(mat @ (q / (np.linalg.norm(q) or 1.0)), np.array([code[m] for m in mods], np.int64),
-                             names)
+        sims = s.mat @ (q / (np.linalg.norm(q) or 1.0))
+        return meaning_scale(sims, s.codes, names, s.weights, s.counts)
+
+    def _load_sample(self, db: sqlite3.Connection, version: int, now: float, dim: int) -> _Sample:
+        per_mod = dict(db.execute("SELECT modality, count(*) FROM chunks GROUP BY modality").fetchall())
+        names = sorted(per_mod)
+        total = max(sum(per_mod.values()), 1)
+        target = {m: min(n, max(round(SCALE_SAMPLE * n / total), MODALITY_SAMPLE_MIN if n >= MODALITY_MIN else 1))
+                  for m, n in per_mod.items()}
+        # Positions (within each modality, in chunk-id order) spread evenly over all of it.
+        wanted = {m: {per_mod[m] * j // target[m] for j in range(target[m])} for m in names}
+        seen = dict.fromkeys(names, 0)
+        picked: list[tuple[int, str]] = []
+        for cid, mod in db.execute("SELECT id, modality FROM chunks ORDER BY id"):
+            if seen[mod] in wanted[mod]:
+                picked.append((cid, mod))
+            seen[mod] += 1
+        vecs = self._vectors(db, [c for c, _ in picked]) if picked else {}
+        picked = [(c, m) for c, m in picked if c in vecs]
+        mat = np.stack([vecs[c] for c, _ in picked]).astype(np.float32) if picked else np.zeros((0, dim), np.float32)
+        if len(mat):
+            mat /= np.maximum(np.linalg.norm(mat, axis=1, keepdims=True), 1e-12)
+        code = {m: i for i, m in enumerate(names)}
+        codes = np.array([code[m] for _, m in picked], dtype=np.intp)
+        got = np.bincount(codes, minlength=len(names)) if len(codes) else np.zeros(len(names), np.int64)
+        weights = np.array([per_mod[m] / got[code[m]] for _, m in picked], dtype=np.float64)
+        return _Sample(version, now, mat, codes, weights, names, [per_mod[m] for m in names],
+                       all(target[m] >= n for m, n in per_mod.items()))
 
     def _group_duplicates(self, db: sqlite3.Connection, candidates: list[int], files: dict[int, sqlite3.Row],
                           hit: dict[int, int]) -> list[list[int]]:

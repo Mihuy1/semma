@@ -111,17 +111,26 @@ def format_subtext(result: SearchResult, home: Path | None = None) -> str:
 # A result scoring at least this (z of 4, or z 2 + every query word, or a file-name match) is a
 # strong match and gets KRunner's "Moderate" category relevance; the rest get "Low".
 STRONG_SCORE = 4.0
+# ... but only with lexical evidence (the query's words in its name or text) or a meaning match
+# that stands far out: z is relative, so every query has a z 3-4.5 tail; real vector-only tops
+# sit at z 5-11 (a lone "dog" photo 5.2, "firefox" screenshot 5.2), noise below 4.5.
+MODERATE_Z = 5.0
 RELEVANCE_STEP = 1e-4  # relevances strictly decrease by at least this, so ties never reorder
 
 
+def is_strong(r: SearchResult) -> bool:
+    lexical = "name" in r.matched or "text" in r.matched
+    return r.score >= STRONG_SCORE and (lexical or (r.z is not None and r.z >= MODERATE_Z))
+
+
 def category_relevances(results: list[SearchResult]) -> list[int]:
-    """50 (Moderate) for the leading results that are strong matches (score >= STRONG_SCORE),
-    30 (Low) from the first weaker one on. KRunner sorts by category relevance before relevance,
-    so this must never increase down our ranking."""
+    """50 (Moderate) for the leading results that are strong matches (is_strong), 30 (Low) from
+    the first weaker one on. KRunner sorts by category relevance before relevance, so this must
+    never increase down our ranking."""
     out: list[int] = []
     strong = True
     for r in results:
-        strong = strong and r.score >= STRONG_SCORE
+        strong = strong and is_strong(r)
         out.append(50 if strong else 30)
     return out
 

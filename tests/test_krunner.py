@@ -22,6 +22,7 @@ from gemmasearch.krunner import (
     CATEGORY_LABEL,
     KRunnerService,
     Launcher,
+    MODERATE_Z,
     STRONG_SCORE,
     category_relevances,
     compute_monotonic_relevances,
@@ -96,6 +97,7 @@ def _sample_result(
     mtime: float = 1700000000.0,
     matched: list[str] | None = None,
     duplicates: int = 0,
+    z: float | None = None,
 ) -> SearchResult:
     return SearchResult(
         path=path,
@@ -110,6 +112,7 @@ def _sample_result(
         matched=matched if matched is not None else ["vector"],
         duplicates=duplicates,
         duplicate_paths=[],
+        z=z,
     )
 
 
@@ -259,7 +262,7 @@ def test_mapping_helpers_subtext_icons_and_monotonic_relevance() -> None:
     # Similarity no longer matters: the score already ranks the results.
     results = [
         _sample_result(path="/a", score=4.0, similarity=None, matched=["name"]),
-        _sample_result(path="/b", score=4.0, similarity=0.80, matched=["vector"]),  # a tie
+        _sample_result(path="/b", score=4.0, similarity=0.80, matched=["vector"], z=6.0),  # a tie
         _sample_result(path="/c", score=0.0, similarity=0.55, matched=["vector"]),
         _sample_result(path="/d", score=2.0, similarity=0.90, matched=["vector"]),  # out of order
     ]
@@ -275,7 +278,21 @@ def test_mapping_helpers_subtext_icons_and_monotonic_relevance() -> None:
     # Category relevance never increases down the list: 50 while results are strong, then 30.
     assert category_relevances(results) == [50, 50, 30, 30]
     assert category_relevances([_sample_result(score=1.0), _sample_result(score=9.0)]) == [30, 30]
-    assert category_relevances([_sample_result(score=STRONG_SCORE)]) == [50]
+    assert category_relevances([_sample_result(score=STRONG_SCORE, matched=["text"])]) == [50]
+
+
+def test_moderate_needs_words_or_a_meaning_match_that_stands_far_out() -> None:
+    """z is relative: every query has a z 3-4.5 tail, so a vector-only result is "Moderate" only
+    from MODERATE_Z; one with the query's words in its name or text needs just STRONG_SCORE."""
+    assert category_relevances([_sample_result(score=4.7, matched=["vector"], z=4.5)]) == [30]
+    assert category_relevances([_sample_result(score=5.5, matched=["vector"], z=MODERATE_Z)]) == [50]
+    assert category_relevances([_sample_result(score=4.6, matched=["vector", "text"], z=3.6)]) == [50]
+    assert category_relevances([_sample_result(score=5.0, matched=["name"], z=None)]) == [50]
+    assert category_relevances([_sample_result(score=3.0, matched=["vector", "text"], z=2.0)]) == [30]
+    assert category_relevances([_sample_result(score=4.2, matched=["vector", "folder"], z=3.9)]) == [30]
+    # Strong after weak is still Low: category relevance never increases down the ranking.
+    assert category_relevances([_sample_result(score=6.0, matched=["vector"], z=4.0),
+                                _sample_result(score=5.0, matched=["text"])]) == [30, 30]
 
 
 def test_relevances_never_reorder_results() -> None:
@@ -310,6 +327,7 @@ def test_match_properties_urls_thumbnails_and_actions(tmp_path: Path) -> None:
             snippet="Johdanto kappale.",
             matched=["vector"],
             duplicates=3,
+            z=6.0,
         ),
         _sample_result(
             path=str(img_path),

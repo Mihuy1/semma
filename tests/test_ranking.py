@@ -13,7 +13,7 @@ from test_review_fixes import make_env, names, put_background, put_vectors, unit
 from gemmasearch import filetypes as ft
 from gemmasearch import search as search_mod
 from gemmasearch.config import load_config
-from gemmasearch.search import STD_FLOOR, Searcher, meaning_scale, query_words
+from gemmasearch.search import STD_FLOOR, Searcher, is_lookup, meaning_scale, query_words
 from gemmasearch.store import Store
 
 
@@ -105,14 +105,6 @@ def test_words_keep_a_file_with_weak_meaning(realistic) -> None:
     assert "minutes.md" not in names(s.search_vector(q, "quarterly forecast approval", limit=10))
 
 
-def test_nothing_stands_out_means_nothing_found(realistic) -> None:
-    # A realistic background still has a ~2% tail above z_gate; returning empty when nothing stands
-    # out is handled by the later trimming task. Today we guarantee no lexical matches sneak in.
-    cfg, store, q, _ = realistic
-    res = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "zebra", limit=10)
-    assert all(r.matched == ["vector"] for r in res)
-
-
 def test_kinds_filter_candidates_but_not_the_scale(realistic) -> None:
     cfg, store, q, root = realistic
     put_vectors(store, [(str(root / "Pictures/a.jpg"), 30, with_cos(q, 0.75, 2))])
@@ -179,6 +171,17 @@ def test_invalid_z_gate_warns_and_keeps_the_default(tmp_path: Path, capsys, valu
     cfg = load_config(path=cfg_path, home=tmp_path)
     assert "search.z_gate must be a number" in capsys.readouterr().err
     assert cfg.z_gate == 2.0
+
+
+@pytest.mark.parametrize("value", ["high", -1, 21, True])
+def test_invalid_z_floor_warns_and_keeps_the_default(tmp_path: Path, capsys, value) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(f"[search]\nz_floor = {value!r}\n".replace("'", '"').replace("True", "true"))
+    cfg = load_config(path=cfg_path, home=tmp_path)
+    assert "search.z_floor must be a number" in capsys.readouterr().err
+    assert cfg.z_floor == 4.5
+    cfg_path.write_text("[search]\nz_floor = 0\n")
+    assert load_config(path=cfg_path, home=tmp_path).z_floor == 0.0
 
 
 @pytest.mark.parametrize("value", ["high", -0.1, 2.1, True])
@@ -276,12 +279,14 @@ def test_folder_only_word_counts_half_in_coverage(realistic) -> None:
     by_name = {Path(r.path).name: r for r in res}
     assert by_name["in_text.md"].matched == ["vector", "text"]
     assert by_name["in_folder.md"].matched == ["vector", "folder"]
+    # One word found outside the file name counts with half the word weight (SINGLE_TEXT_FACTOR).
     assert by_name["in_text.md"].score - by_name["in_folder.md"].score == pytest.approx(
-        2.0 * (1.0 - 0.5**1.5), abs=1e-4)
+        2.0 * 0.5 * (1.0 - 0.5**1.5), abs=1e-4)
 
 
 def test_sqlite_vec_fallback_sample_handles_gaps_and_reuses(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(search_mod, "SCALE_SAMPLE", 8)
+    monkeypatch.setattr(search_mod, "MODALITY_SAMPLE_MIN", 4)
     cfg = make_cfg(tmp_path)
     cfg.z_gate = 2.0
     cfg.knn_k = 5
@@ -298,7 +303,7 @@ def test_sqlite_vec_fallback_sample_handles_gaps_and_reuses(tmp_path: Path, monk
     res = s.search_vector(q, "", limit=5)
     assert names(res)[0] == "target.jpg"
     first_sample = s._sample
-    assert first_sample is not None and len(first_sample[2]) == 8
+    assert first_sample is not None and len(first_sample.mat) == 8
 
     # Index changes within SCALE_SAMPLE_MAX_AGE: the full-size sample must be reused without refetching.
     orig_vectors = s._vectors
@@ -321,4 +326,222 @@ def test_sqlite_vec_fallback_sample_handles_gaps_and_reuses(tmp_path: Path, monk
     assert names(s.search_vector(q, "", limit=5))[0] == "target.jpg"
     assert vector_calls == 1
     assert s._sample is not first_sample
+    store.close()
+
+
+# -- lookups, single words, trimming, ambiguous type words, sqlite-vec fallback --------------------
+
+def cos_at(store: Store, q: np.ndarray, z: float, modality: str) -> float:
+    """The cosine that sits at this z for q on the store's current vectors (planting a few more
+    vectors moves the scale only slightly, so tests keep gaps of >= 0.5 z)."""
+    db = store.reader()
+    rows = db.execute("SELECT embedding, modality FROM vec_chunks").fetchall()
+    vecs = np.stack([np.frombuffer(r[0], dtype=np.float32) for r in rows])
+    names_ = sorted({r[1] for r in rows})
+    sc = meaning_scale(vecs @ q, np.array([names_.index(r[1]) for r in rows]), names_)
+    return sc.offset(modality) + z * sc.std
+
+
+def test_is_lookup() -> None:
+    for q in ("b0bbce05d5", "0xff32:0x0074", "4815162342", "TRX50 K7Q2LM"):
+        assert is_lookup(query_words(q).terms), q
+    for q in ("123", "apollo 11", "ASTRO_A50_EXTRA_FEATURES", "vision transformer", "console.txt", ""):
+        assert not is_lookup(query_words(q).terms), q
+
+
+def test_lookup_ranks_the_file_containing_the_code_first(realistic) -> None:
+    """A code means little to the embedding: the file containing it (meaning z ~1) must beat a
+    vector-only match at z 4 (lookups weigh meaning 0.5 and words x2)."""
+    cfg, store, q, root = realistic
+    put_vectors(store, [(str(root / "Pictures/noise.jpg"), 10, with_cos(q, cos_at(store, q, 4.0, "image"), 2))])
+    put_vectors(store, [(str(root / "Documents/console.txt"), 10, with_cos(q, cos_at(store, q, 1.0, "text"), 3))],
+                kind="text", modality="text")
+    add_text(store, "console.txt", "build id b0bbce05d5 finished")
+    res = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "b0bbce05d5", limit=10)
+    assert names(res)[0] == "console.txt" and "text" in res[0].matched
+    noise = next((r for r in res if r.path.endswith("noise.jpg")), None)
+    assert noise is None or noise.score < res[0].score - 1.0
+
+
+def test_single_word_mention_ranks_after_a_photo_that_stands_out(realistic) -> None:
+    """The real "dog" case: the thesis mentions dogs (z ~3.6, the word in its text, location
+    prior 0.9 * 0.3) and the dog photo has no text (z ~5.2). With the full word weight the thesis
+    won (3.6 + 2 + 0.27 > 5.2); one word found only in text now adds half."""
+    cfg, store, q, root = realistic
+    photo, thesis = cos_at(store, q, 5.2, "image"), cos_at(store, q, 3.6, "text")
+    put_vectors(store, [(str(root / "Pictures/random_image.jpg"), 10, with_cos(q, photo, 2))])
+    put_vectors(store, [(str(root / "Documents/thesis.md"), 90, with_cos(q, thesis, 3))], kind="text", modality="text")
+    add_text(store, "thesis.md", "figure 3 shows a dog next to the dataset samples")
+    res = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "dog", limit=10)
+    assert names(res)[:2] == ["random_image.jpg", "thesis.md"]
+    assert res[0].matched == ["vector"] and "text" in res[1].matched
+    by = {Path(r.path).name: r for r in res}
+    # Without the discount the thesis would have won by ~0.6.
+    assert by["thesis.md"].score - 2.0 * 0.5 + 2.0 > by["random_image.jpg"].score
+
+
+def test_nothing_stands_out_finds_nothing(realistic) -> None:
+    """Gibberish: z is relative, so ~2% of any index passes the gate, but no match reaches
+    z_floor and the query's words are in no file."""
+    cfg, store, q, _ = realistic
+    cfg.z_floor = 4.5
+    s = Searcher(store, cfg, FakeEmbedder())
+    assert s.search_vector(q, "asdfgh qwerty zxcv", limit=10) == []
+    cfg.z_floor = 0.0
+    assert s.search_vector(q, "asdfgh qwerty zxcv", limit=10)  # the tail the floor removes
+
+
+def test_vector_only_tail_is_trimmed_relative_to_the_best_match(realistic) -> None:
+    cfg, store, q, root = realistic
+    cfg.z_floor = 4.5
+    put_vectors(store, [(str(root / f"Pictures/{name}.jpg"), 10, with_cos(q, cos_at(store, q, z, "image"), seed))
+                        for name, z, seed in (("best", 8.0, 2), ("close", 6.0, 3), ("far", 4.0, 4))])
+    put_vectors(store, [(str(root / "Documents/maintenance.md"), 10, with_cos(q, cos_at(store, q, 0.5, "text"), 5))],
+                kind="text", modality="text")
+    add_text(store, "maintenance.md", "the car needs new tyres")
+    s = Searcher(store, cfg, FakeEmbedder())
+    # Several words: vector-only results within Z_MARGIN (3) of the best one.
+    many = names(s.search_vector(q, "red sports racing", limit=10))
+    assert many[:2] == ["best.jpg", "close.jpg"] and "far.jpg" not in many
+    # One word: within SINGLE_WORD_MARGIN (1.5); files containing the word are always kept.
+    one = s.search_vector(q, "car", limit=10)
+    assert names(one) == ["best.jpg", "maintenance.md"]
+    assert one[1].matched == ["text"]
+    # `limit` still caps the list.
+    assert len(s.search_vector(q, "red sports racing", limit=1)) == 1
+
+
+def test_type_word_bonus_counts_towards_the_floor(realistic) -> None:
+    """"photo of a car": images run lower in z, so the kind asked for counts towards z_floor."""
+    cfg, store, q, root = realistic
+    cfg.z_floor = 4.5
+    put_vectors(store, [(str(root / "Pictures/audi.jpg"), 10, with_cos(q, cos_at(store, q, 4.0, "image"), 2))])
+    s = Searcher(store, cfg, FakeEmbedder())
+    assert names(s.search_vector(q, "photo of a car", limit=10)) == ["audi.jpg"]
+    assert s.search_vector(q, "red car", limit=10) == []
+
+
+def test_ambiguous_type_words_are_content_words_unless_used_as_hints() -> None:
+    cases = {
+        "image segmentation": (["image", "segmentation"], set()),
+        "music theory": (["music", "theory"], set()),
+        "voice notes": (["voice", "notes"], set()),
+        "sound card driver": (["sound", "card", "driver"], set()),
+        "image of a dog": (["dog"], {ft.IMAGE}),
+        "notes about kubernetes": (["kubernetes"], {ft.TEXT, ft.OFFICE}),
+        "attention in the paper": (["attention"], {ft.PDF}),
+        "moon landing from a recording": (["moon", "landing"], {ft.AUDIO}),
+        "screenshot firefox": (["firefox"], {ft.IMAGE}),
+        "firefox photos": (["firefox"], {ft.IMAGE}),
+        "moon landing video": (["moon", "landing"], {ft.VIDEO}),
+        "kuvat lomalta": (["kuvat", "lomalta"], set()),
+        "koira kuvassa": (["koira"], {ft.IMAGE}),
+        "music": (["music"], set()),
+    }
+    for text, (terms, kinds) in cases.items():
+        w = query_words(text)
+        assert (w.terms, w.kinds) == (terms, kinds), text
+    assert query_words("screenshot of x").screenshot and not query_words("image of x").screenshot
+
+
+def test_ambiguous_type_word_gives_no_kind_bonus_or_partial_name_bonus(realistic) -> None:
+    cfg, store, q, root = realistic
+    put_vectors(store, [(str(root / "Pictures/Screenshots/Screenshot_1.png"), 30,
+                         with_cos(q, cos_at(store, q, 3.0, "image"), 2))])
+    put_vectors(store, [(str(root / "Documents/segmentation.md"), 30, with_cos(q, cos_at(store, q, 3.2, "text"), 3)),
+                        (str(root / "Documents/string_theory.md"), 30, with_cos(q, cos_at(store, q, 0.5, "text"), 4))],
+                kind="text", modality="text")
+    add_text(store, "segmentation.md", "image segmentation with masks")
+    s = Searcher(store, cfg, FakeEmbedder())
+    res = s.search_vector(q, "image segmentation", limit=10)
+    assert names(res)[0] == "segmentation.md"
+    shot = next(r for r in res if r.path.endswith("Screenshot_1.png"))
+    assert shot.score == pytest.approx(shot.z + 0.3 * 0.3, abs=1e-3)  # no +1 for being an image
+    # "music theory": "theory" in a name is half the words, not the whole query: no NAME_BONUS.
+    theory = next(r for r in s.search_vector(q, "music theory", limit=10) if r.path.endswith("string_theory.md"))
+    assert theory.score < search_mod.NAME_BONUS
+
+
+def test_sqlite_vec_fallback_scores_lexical_files_outside_the_knn(tmp_path: Path) -> None:
+    """With a small knn_k a file holding the query's words but outside the KNN top-k used to
+    count as z = 0 and lose to any vector-only match; its best text chunk is now scored."""
+    results = {}
+    for cache in (False, True):
+        root = tmp_path / str(cache)
+        cfg = make_cfg(root)
+        cfg.z_gate, cfg.z_floor, cfg.knn_k = 2.0, 0.0, 3
+        cfg.duplicate_similarity = {}
+        store = Store(cfg.db_path, vector_cache=cache)
+        q = unit(1)
+        put_background(store, root, q, n=100, mean=0.55)
+        put_background(store, root, q, n=100, mean=0.59, kind="text", modality="text", seed=5000)
+        put_vectors(store, [(str(root / f"Pictures/top{i}.jpg"), 10, with_cos(q, cos_at(store, q, 6.0 - i * 0.2, "image"), 10 + i))
+                            for i in range(3)])
+        put_vectors(store, [(str(root / "Documents/notes.md"), 10, with_cos(q, cos_at(store, q, 3.5, "text"), 30))],
+                    kind="text", modality="text")
+        add_text(store, "notes.md", "kubernetes cluster upgrade notes")
+        res = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "kubernetes cluster", limit=10)
+        results[cache] = res
+        notes = next(r for r in res if r.path.endswith("notes.md"))
+        # Outside the KNN top-3 (the sqlite-vec path) it used to count as z = 0 (score ~2).
+        assert notes.z == pytest.approx(3.5, abs=0.4)
+        assert notes.score > 5.0
+        store.close()
+    assert [r.z for r in results[False] if r.path.endswith("notes.md")] == pytest.approx(
+        [r.z for r in results[True] if r.path.endswith("notes.md")], abs=0.3)
+
+
+def test_sqlite_vec_sample_centres_a_rare_modality_on_its_own_mean(tmp_path: Path, monkeypatch) -> None:
+    """A modality with too few vectors in an index-proportional sample (30 images among 2000
+    text chunks: 1 in a 64-vector sample) is still sampled enough to get its own mean."""
+    monkeypatch.setattr(search_mod, "SCALE_SAMPLE", 64)
+    monkeypatch.setattr(search_mod, "MODALITY_SAMPLE_MIN", 24)
+    cfg = make_cfg(tmp_path)
+    store = Store(cfg.db_path, vector_cache=False)
+    q = unit(1)
+    put_background(store, tmp_path, q, n=2000, mean=0.60, kind="text", modality="text", seed=5000)
+    put_background(store, tmp_path, q, n=30, mean=0.50)
+    s = Searcher(store, cfg, FakeEmbedder())
+    sc = s._sample_scale(store.reader(), q)
+    assert set(sc.means) == {"text", "image"}
+    assert sc.means["image"] == pytest.approx(0.50, abs=0.02)
+    assert sc.means["text"] == pytest.approx(0.60, abs=0.02)
+    exact = meaning_scale(*(lambda rows: (
+        np.stack([np.frombuffer(r[0], dtype=np.float32) for r in rows]) @ q,
+        np.array([0 if r[1] == "image" else 1 for r in rows]), ["image", "text"]))(
+        store.reader().execute("SELECT embedding, modality FROM vec_chunks").fetchall()))
+    assert sc.std == pytest.approx(exact.std, rel=0.2) and sc.center == pytest.approx(exact.center, abs=0.01)
+    store.close()
+
+
+def test_meaning_scale_matches_a_direct_computation_and_weights_act_as_copies() -> None:
+    rng = np.random.default_rng(3)
+    sims = rng.normal(0.55, 0.05, 500).astype(np.float32)
+    mods = (rng.random(500) < 0.3).astype(np.int64)
+    sc = meaning_scale(sims, mods, ["text", "image"])
+    means = np.array([sims[mods == 0].mean(), sims[mods == 1].mean()])
+    centred = sims - means[mods]
+    assert sc.center == pytest.approx(float(centred.mean()), abs=1e-6)
+    assert sc.std == pytest.approx(float(centred.std()), rel=1e-4)
+    # A weight of 2 is the same as the vector appearing twice.
+    w = np.where(np.arange(500) < 100, 2.0, 1.0)
+    dup = meaning_scale(np.concatenate([sims, sims[:100]]), np.concatenate([mods, mods[:100]]), ["text", "image"])
+    weighted = meaning_scale(sims, mods, ["text", "image"], weights=w)
+    assert weighted.std == pytest.approx(dup.std, rel=1e-5) and weighted.means == pytest.approx(dup.means)
+    # `counts` decides MODALITY_MIN: 5 sampled images standing for 50 still get their own mean.
+    few = meaning_scale(sims[:25], np.array([1] * 5 + [0] * 20), ["text", "image"], counts=[20, 50])
+    assert set(few.means) == {"text", "image"}
+
+
+def test_sqlite_vec_sample_spreads_over_the_whole_index(tmp_path: Path, monkeypatch) -> None:
+    """Older chunks (low ids) can differ from newer ones: the sample must span every id, not
+    take the first SCALE_SAMPLE (it did whenever the index had < 2 * SCALE_SAMPLE chunks)."""
+    monkeypatch.setattr(search_mod, "SCALE_SAMPLE", 64)
+    cfg = make_cfg(tmp_path)
+    store = Store(cfg.db_path, vector_cache=False)
+    q = unit(1)
+    put_background(store, tmp_path, q, n=60, mean=0.50, std=0.01, kind="text", modality="text", seed=5000)
+    put_background(store, tmp_path / "new", q, n=60, mean=0.60, std=0.01, kind="text", modality="text", seed=7000)
+    sc = Searcher(store, cfg, FakeEmbedder())._sample_scale(store.reader(), q)
+    assert sc.means["text"] == pytest.approx(0.55, abs=0.01)
     store.close()

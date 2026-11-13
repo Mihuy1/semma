@@ -197,6 +197,14 @@ class Config:
     # meaning match; below it a file needs half the query's words (or its name) to be shown.
     # 2.0 keeps roughly the top 2-3% of chunks for a query (DigUp's value).
     z_gate: float = 2.0
+    # A file without the query's words is shown only if the query's best meaning match reaches
+    # `z_floor` (the kind bonus of a type word counts: "photo of ..."); else nothing stands out
+    # and the query finds only files containing its words, or nothing. Gibberish tops out at
+    # z 2.8-4.5 (median 3.9, 35 strings, all text chunks) on a 2.9k-chunk index; real one-concept
+    # queries at 4.4-7 ("dog" 5.2, "firefox" 5.2, "zebra" 6.9), so 4.5 trades the weakest
+    # (bare "car": its photo at z 4.4) for "nothing found" on noise. Noise tops grow slowly
+    # with the index (the maximum of more draws): a much larger index may want ~5. 0 disables.
+    z_floor: float = 4.5
     knn_k: int = 200  # only used without the vector cache (sqlite-vec KNN)
     # Score bonus in z units for priority 100 (scaled linearly; 0 disables). Only meant to break
     # near-ties in favour of files in the user's own folders.
@@ -304,7 +312,7 @@ KNOWN_KEYS: dict[str, frozenset[str]] = {
     "media": frozenset({"max_minutes", "segment_seconds"}),
     "model": frozenset({"name", "device", "query_device", "llama_lib_dir", "model_dir"}),
     "index": frozenset({"batch_sizes", "prefetch_chunks"}),
-    "search": frozenset({"z_gate", "knn_k", "location_prior", "duplicate_similarity", "vector_cache_max_chunks"}),
+    "search": frozenset({"z_gate", "z_floor", "knn_k", "location_prior", "duplicate_similarity", "vector_cache_max_chunks"}),
     "daemon": frozenset({"model_idle_unload_minutes", "index_model_unload_seconds", "rescan_hours",
                          "watch_debounce_seconds", "gpu_busy_threshold", "gpu_check_seconds", "krunner_max_results",
                          "query_debounce_ms", "query_device"}),
@@ -443,6 +451,8 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
                                             cfg.location_prior)
     if "z_gate" in search:
         cfg.z_gate = _bounded_float(search["z_gate"], "search.z_gate", 0.0, 10.0, cfg.z_gate)
+    if "z_floor" in search:
+        cfg.z_floor = _bounded_float(search["z_floor"], "search.z_floor", 0.0, 20.0, cfg.z_floor)
     if "knn_k" in search:
         k = int(search["knn_k"])
         if not 1 <= k <= MAX_KNN_K:
