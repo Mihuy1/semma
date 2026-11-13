@@ -2,6 +2,10 @@
 
 Usage:
     uv run python scripts/eval_search.py [QUERIES.json] [--json OUT.json] [--compare OLD.json]
+
+Limitation:
+    SearchResult.duplicate_paths is capped at 20 paths in search.py, so an expected file folded
+    as the 21st+ duplicate of a returned representative will not be credited in rank lookup.
 """
 
 from __future__ import annotations
@@ -54,33 +58,55 @@ def _best_and_first_ranks(expect_ranks: list[int | None], any_first: bool = Fals
 
 def _summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     n = len(records)
+    positive = [r for r in records if r["expect"]]
+    np_ = len(positive)
+    constrained = [r for r in records if r.get("max_results") is not None]
+    nc = len(constrained)
     if n == 0:
         return {
             "queries": 0,
+            "positive_queries": 0,
+            "noise_queries": 0,
             "r_at_1": 0.0,
             "r_at_3": 0.0,
             "r_at_10": 0.0,
+            "found_at_10": 0.0,
             "mrr": 0.0,
+            "noise": 0.0,
+            "noise_violations": 0,
             "mean_results": 0.0,
             "mean_embed_ms": 0.0,
             "mean_search_ms": 0.0,
+            "cold_embed_ms": 0.0,
+            "cold_search_ms": 0.0,
         }
-    r1 = sum(1 for r in records if r["first_rank"] == 1) / n
-    r3 = sum(1 for r in records if r["best_rank"] is not None and r["best_rank"] <= 3) / n
-    r10 = sum(1 for r in records if r["best_rank"] is not None and r["best_rank"] <= 10) / n
-    mrr = sum(r["reciprocal_rank"] for r in records) / n
+    r1 = (sum(1 for r in positive if r["first_rank"] == 1) / np_) if np_ else 0.0
+    r3 = (sum(1 for r in positive if r["first_rank"] is not None and r["first_rank"] <= 3) / np_) if np_ else 0.0
+    r10 = (sum(1 for r in positive if r["first_rank"] is not None and r["first_rank"] <= 10) / np_) if np_ else 0.0
+    found10 = (sum(1 for r in positive if r["best_rank"] is not None and r["best_rank"] <= 10) / np_) if np_ else 0.0
+    mrr = (sum(r["reciprocal_rank"] for r in positive) / np_) if np_ else 0.0
+    noise = (sum(max(0, r["num_results"] - r["max_results"]) for r in constrained) / nc) if nc else 0.0
+    noise_violations = sum(1 for r in constrained if r["num_results"] > r["max_results"])
     mean_results = sum(r["num_results"] for r in records) / n
-    mean_embed_ms = sum(r["embed_ms"] for r in records) / n
-    mean_search_ms = sum(r["search_ms"] for r in records) / n
+    warm = records[1:] if n > 1 else records
+    mean_embed_ms = sum(r["embed_ms"] for r in warm) / len(warm)
+    mean_search_ms = sum(r["search_ms"] for r in warm) / len(warm)
     return {
         "queries": n,
+        "positive_queries": np_,
+        "noise_queries": nc,
         "r_at_1": round(r1, 4),
         "r_at_3": round(r3, 4),
         "r_at_10": round(r10, 4),
+        "found_at_10": round(found10, 4),
         "mrr": round(mrr, 4),
+        "noise": round(noise, 4),
+        "noise_violations": noise_violations,
         "mean_results": round(mean_results, 2),
         "mean_embed_ms": round(mean_embed_ms, 2),
         "mean_search_ms": round(mean_search_ms, 2),
+        "cold_embed_ms": round(records[0]["embed_ms"], 2),
+        "cold_search_ms": round(records[0]["search_ms"], 2),
     }
 
 
@@ -90,8 +116,14 @@ def _fmt_rank(rank: int | None) -> str:
 
 def _print_query_report(idx: int, total: int, rec: dict[str, Any], home: Path) -> None:
     kinds_label = f"  kinds={rec['kinds']}" if rec["kinds"] else ""
+    max_res = rec.get("max_results")
+    limit_label = ""
+    if max_res is not None:
+        excess = max(0, rec["num_results"] - max_res)
+        status = f"EXCEEDED (+{excess})" if excess else "ok"
+        limit_label = f"  [results={rec['num_results']}/{max_res} {status}]"
     note_label = f"  ({rec['note']})" if rec["note"] else ""
-    print(f"[{idx}/{total}] {rec['query']!r}{kinds_label}{note_label}")
+    print(f"[{idx}/{total}] {rec['query']!r}{kinds_label}{limit_label}{note_label}")
     for exp, rank in zip(rec["expect"], rec["expect_ranks"], strict=True):
         print(f"  expect [{_fmt_rank(rank):>2}]  {_short(_normalize_path(exp, home), home)}")
     top = rec["results"][:TOP_DISPLAY]
@@ -107,13 +139,22 @@ def _print_query_report(idx: int, total: int, rec: dict[str, Any], home: Path) -
 
 def _print_summary(summary: dict[str, Any], load_ms: float | None = None) -> None:
     n = summary["queries"]
+    pos = summary["positive_queries"]
     print("\n=== Summary ===")
     print(
-        f"Queries: {n}  |  R@1: {summary['r_at_1']:.3f}  R@3: {summary['r_at_3']:.3f}  "
-        f"R@10: {summary['r_at_10']:.3f}  MRR: {summary['mrr']:.3f}  "
+        f"Queries: {n} ({pos} ranked)  |  R@1: {summary['r_at_1']:.3f}  R@3: {summary['r_at_3']:.3f}  "
+        f"R@10: {summary['r_at_10']:.3f}  found@10: {summary['found_at_10']:.3f}  MRR: {summary['mrr']:.3f}  "
         f"mean_results: {summary['mean_results']:.2f}"
     )
-    timing = f"embed {summary['mean_embed_ms']:.1f} ms/q, search {summary['mean_search_ms']:.1f} ms/q"
+    if summary["noise_queries"]:
+        print(
+            f"Noise ({summary['noise_queries']} max_results queries): "
+            f"mean excess {summary['noise']:.2f}  |  violated: {summary['noise_violations']}/{summary['noise_queries']}"
+        )
+    timing = (
+        f"embed {summary['mean_embed_ms']:.1f} ms/q, search {summary['mean_search_ms']:.1f} ms/q"
+        f" (warm; cold #1: embed {summary['cold_embed_ms']:.1f} ms, search {summary['cold_search_ms']:.1f} ms)"
+    )
     if load_ms is not None:
         timing = f"model load {load_ms:.0f} ms, " + timing
     print(f"Timings: {timing}")
@@ -121,9 +162,9 @@ def _print_summary(summary: dict[str, Any], load_ms: float | None = None) -> Non
 
 def _rank_key(rec: dict[str, Any]) -> tuple[int, int]:
     inf = SEARCH_LIMIT + 1000
-    best = rec["best_rank"] if rec["best_rank"] is not None else inf
     first = rec["first_rank"] if rec["first_rank"] is not None else inf
-    return (best, first)
+    best = rec["best_rank"] if rec["best_rank"] is not None else inf
+    return (first, best)
 
 
 def _fmt_ranks(ranks: list[int | None]) -> str:
@@ -138,9 +179,13 @@ def _compare_runs(old_data: dict[str, Any], new_data: dict[str, Any], home: Path
         ("r_at_1", "R@1"),
         ("r_at_3", "R@3"),
         ("r_at_10", "R@10"),
+        ("found_at_10", "found@10"),
         ("mrr", "MRR"),
+        ("noise", "noise"),
         ("mean_results", "mean_results"),
     ):
+        if key not in old_sum or key not in new_sum:
+            continue
         ov = old_sum[key]
         nv = new_sum[key]
         delta = nv - ov
@@ -204,12 +249,16 @@ def _load_queries(path: Path) -> list[dict[str, Any]]:
         kinds = item.get("kinds")
         if kinds is not None and (not isinstance(kinds, list) or not all(isinstance(k, str) for k in kinds)):
             raise ValueError(f"{path}[{i}].kinds must be a list of strings or null")
+        max_results = item.get("max_results")
+        if max_results is not None and (not isinstance(max_results, int) or isinstance(max_results, bool) or max_results < 0):
+            raise ValueError(f"{path}[{i}].max_results must be a non-negative integer or null")
         queries.append(
             {
                 "query": item["query"],
                 "expect": expect,
                 "kinds": kinds,
                 "any": bool(item.get("any", False)),
+                "max_results": max_results,
                 "note": item.get("note") or "",
             }
         )
@@ -217,7 +266,11 @@ def _load_queries(path: Path) -> list[dict[str, Any]]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Evaluate gemmasearch ranking on a query set.")
+    p = argparse.ArgumentParser(
+        description="Evaluate gemmasearch ranking on a query set.",
+        epilog="Note: SearchResult.duplicate_paths is capped at 20 paths in search.py; "
+               "expected files folded past the 20th duplicate are not visible to rank lookup.",
+    )
     p.add_argument(
         "queries_file",
         nargs="?",
@@ -262,7 +315,9 @@ def main(argv: list[str] | None = None) -> int:
 
         embedder.load_query()
         # Rank like the daemon: all vectors in memory (older Stores without the cache use sqlite-vec).
-        if hasattr(store, "enable_vector_cache"):
+        if hasattr(store, "warm_vector_cache"):
+            store.warm_vector_cache(cfg.vector_cache_max_chunks)
+        elif hasattr(store, "enable_vector_cache"):
             cache = store.enable_vector_cache(cfg.vector_cache_max_chunks)
             with cache.lock:
                 cache.ensure_fresh(store.reader())
@@ -275,7 +330,8 @@ def main(argv: list[str] | None = None) -> int:
             t = searcher.last_timings
             expect_ranks = _rank_expected(entry["expect"], results, cfg.home)
             best_rank, first_rank = _best_and_first_ranks(expect_ranks, entry["any"])
-            rr = (1.0 / best_rank) if best_rank is not None else 0.0
+            rr = (1.0 / first_rank) if first_rank is not None else 0.0
+            max_results = entry["max_results"]
             rec = {
                 "query": entry["query"],
                 "kinds": entry["kinds"],
@@ -285,6 +341,8 @@ def main(argv: list[str] | None = None) -> int:
                 "best_rank": best_rank,
                 "first_rank": first_rank,
                 "reciprocal_rank": round(rr, 6),
+                "max_results": max_results,
+                "excess_results": max(0, len(results) - max_results) if max_results is not None else None,
                 "num_results": len(results),
                 "embed_ms": round(t.embed_ms, 2),
                 "search_ms": round(t.search_ms, 2),
