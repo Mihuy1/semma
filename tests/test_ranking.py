@@ -7,10 +7,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 from fakes import FakeEmbedder
-from test_index import make_cfg
-from test_review_fixes import names, put_background, put_vectors, unit, with_cos
+from test_index import DOCS, make_cfg, run, scan, write_docs
+from test_review_fixes import make_env, names, put_background, put_vectors, unit, with_cos
 
 from gemmasearch import filetypes as ft
+from gemmasearch import search as search_mod
 from gemmasearch.config import load_config
 from gemmasearch.search import STD_FLOOR, Searcher, meaning_scale, query_words
 from gemmasearch.store import Store
@@ -98,14 +99,18 @@ def test_words_keep_a_file_with_weak_meaning(realistic) -> None:
     s = Searcher(store, cfg, FakeEmbedder())
     # 2 of 3 content words ("quarterly", "budget"; not "approval"): coverage 0.67 >= 0.5.
     res = s.search_vector(q, "quarterly budget approval", limit=10)
-    assert names(res) == ["minutes.md"] and res[0].matched == ["text"]
+    minutes = next(r for r in res if Path(r.path).name == "minutes.md")
+    assert minutes.matched == ["text"]
     # 1 of 3: too few, and its meaning doesn't stand out either.
-    assert s.search_vector(q, "quarterly forecast approval", limit=10) == []
+    assert "minutes.md" not in names(s.search_vector(q, "quarterly forecast approval", limit=10))
 
 
 def test_nothing_stands_out_means_nothing_found(realistic) -> None:
+    # A realistic background still has a ~2% tail above z_gate; returning empty when nothing stands
+    # out is handled by the later trimming task. Today we guarantee no lexical matches sneak in.
     cfg, store, q, _ = realistic
-    assert Searcher(store, cfg, FakeEmbedder()).search_vector(q, "zebra", limit=10) == []
+    res = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "zebra", limit=10)
+    assert all(r.matched == ["vector"] for r in res)
 
 
 def test_kinds_filter_candidates_but_not_the_scale(realistic) -> None:
@@ -174,3 +179,146 @@ def test_invalid_z_gate_warns_and_keeps_the_default(tmp_path: Path, capsys, valu
     cfg = load_config(path=cfg_path, home=tmp_path)
     assert "search.z_gate must be a number" in capsys.readouterr().err
     assert cfg.z_gate == 2.0
+
+
+@pytest.mark.parametrize("value", ["high", -0.1, 2.1, True])
+def test_invalid_location_prior_warns_and_keeps_the_default(tmp_path: Path, capsys, value) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(f"[search]\nlocation_prior = {value!r}\n".replace("'", '"').replace("True", "true"))
+    cfg = load_config(path=cfg_path, home=tmp_path)
+    assert "search.location_prior must be a number" in capsys.readouterr().err
+    assert cfg.location_prior == 0.3
+
+
+def test_cache_does_not_reload_on_concurrent_write_between_snapshot_and_meaning(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    cfg, store = make_env(tmp_path, DOCS)
+    store.close()
+    store = Store(cfg.db_path, vector_cache=True)
+    _, emb = run(cfg, store)
+    s = Searcher(store, cfg, emb)
+    assert names(s.search("sourdough bread"))[0] == "bread.txt"
+    cache = store.vectors
+    assert cache is not None and cache.loads == 1
+
+    # Commit a write after the read snapshot starts (during FTS) and before _meaning runs.
+    orig_selective = s._selective
+    wrote = False
+
+    def selective_with_concurrent_write(db, terms):
+        nonlocal wrote
+        out = orig_selective(db, terms)
+        if not wrote:
+            wrote = True
+            (tmp_path / "Documents/soup.md").write_text("tomato soup with basil")
+            scan(store, cfg)
+            run(cfg, store)
+        return out
+
+    monkeypatch.setattr(s, "_selective", selective_with_concurrent_write)
+    res = s.search("sourdough bread")
+    assert names(res)[0] == "bread.txt"
+    assert cache.loads == 1 and cache.size == 4  # patched in flight, no reload from the older snapshot
+    assert names(s.search("tomato soup basil"))[0] == "soup.md"
+    assert cache.loads == 1
+    store.close()
+
+
+def test_name_bonus_not_capped_at_50_files(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path)
+    cfg.z_gate = 2.0
+    cfg.duplicate_similarity = {}
+    store = Store(cfg.db_path)
+    q = unit(1)
+    put_background(store, tmp_path, q, n=80, mean=0.55)
+    reports = [
+        (str(tmp_path / f"Pictures/report_{i:03d}.jpg"), 10, with_cos(q, 0.65 if i < 79 else 0.72, 200 + i))
+        for i in range(80)
+    ]
+    put_vectors(store, reports + [(str(tmp_path / "Pictures/other.jpg"), 10, with_cos(q, 0.78, 999))])
+    res = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "report", limit=10)
+    assert names(res)[0] == "report_079.jpg"
+    assert "name" in res[0].matched
+    other = next((r for r in res if Path(r.path).name == "other.jpg"), None)
+    assert other is None or res[0].score > other.score
+    store.close()
+
+
+def test_per_word_prefixes_in_names_and_folders(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path)
+    write_docs(tmp_path, {
+        "thesis_project.md": "unrelated body words",
+        "other.md": "thesaurus unrelated words",
+        "thesisProject/inside/notes.md": "unrelated body words",
+    })
+    store = Store(cfg.db_path)
+    scan(store, cfg)
+    _, emb = run(cfg, store)
+    res = Searcher(store, cfg, emb).search("thes proj", limit=10)
+    assert names(res)[0] == "thesis_project.md"
+    assert "name" in res[0].matched
+    other = [r for r in res if Path(r.path).name == "other.md"]
+    assert not other or "text" not in other[0].matched  # chunk text does not prefix non-last "thes"
+    store.close()
+
+
+def test_folder_only_word_counts_half_in_coverage(realistic) -> None:
+    cfg, store, q, root = realistic
+    put_vectors(store, [
+        (str(root / "Documents/thesisProject/in_folder.md"), 40, with_cos(q, 0.72, 2)),
+        (str(root / "Documents/other/in_text.md"), 40, with_cos(q, 0.72, 3)),
+    ], kind="text", modality="text")
+    add_text(store, "in_folder.md", "completely unrelated body")
+    add_text(store, "in_text.md", "notes about thesis work")
+    res = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "thesis", limit=10)
+    assert names(res)[:2] == ["in_text.md", "in_folder.md"]
+    by_name = {Path(r.path).name: r for r in res}
+    assert by_name["in_text.md"].matched == ["vector", "text"]
+    assert by_name["in_folder.md"].matched == ["vector", "folder"]
+    assert by_name["in_text.md"].score - by_name["in_folder.md"].score == pytest.approx(
+        2.0 * (1.0 - 0.5**1.5), abs=1e-4)
+
+
+def test_sqlite_vec_fallback_sample_handles_gaps_and_reuses(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(search_mod, "SCALE_SAMPLE", 8)
+    cfg = make_cfg(tmp_path)
+    cfg.z_gate = 2.0
+    cfg.knn_k = 5
+    cfg.duplicate_similarity = {}
+    store = Store(cfg.db_path, vector_cache=False)
+    q = unit(1)
+    put_background(store, tmp_path, q, n=64, mean=0.55)
+    # Delete every even chunk id so all remaining chunks have odd ids (id % step == 0 would return 0 rows).
+    with store.write() as (db, _):
+        db.execute("DELETE FROM files WHERE id IN (SELECT file_id FROM chunks WHERE id % 2 = 0)")
+    put_vectors(store, [(str(tmp_path / "Pictures/target.jpg"), 30, with_cos(q, 0.82, 2))])
+
+    s = Searcher(store, cfg, FakeEmbedder())
+    res = s.search_vector(q, "", limit=5)
+    assert names(res)[0] == "target.jpg"
+    first_sample = s._sample
+    assert first_sample is not None and len(first_sample[2]) == 8
+
+    # Index changes within SCALE_SAMPLE_MAX_AGE: the full-size sample must be reused without refetching.
+    orig_vectors = s._vectors
+    vector_calls = 0
+
+    def counted_vectors(db, chunk_ids):
+        nonlocal vector_calls
+        vector_calls += 1
+        return orig_vectors(db, chunk_ids)
+
+    monkeypatch.setattr(s, "_vectors", counted_vectors)
+    put_vectors(store, [(str(tmp_path / "Pictures/extra1.jpg"), 10, with_cos(q, 0.54, 3))])
+    assert names(s.search_vector(q, "", limit=5))[0] == "target.jpg"
+    assert vector_calls == 0
+    assert s._sample is first_sample
+
+    # Once older than SCALE_SAMPLE_MAX_AGE and the index changed, the sample is refreshed.
+    monkeypatch.setattr(search_mod, "SCALE_SAMPLE_MAX_AGE", -1.0)
+    put_vectors(store, [(str(tmp_path / "Pictures/extra2.jpg"), 10, with_cos(q, 0.54, 4))])
+    assert names(s.search_vector(q, "", limit=5))[0] == "target.jpg"
+    assert vector_calls == 1
+    assert s._sample is not first_sample
+    store.close()

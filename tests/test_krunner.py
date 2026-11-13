@@ -23,7 +23,6 @@ from gemmasearch.krunner import (
     KRunnerService,
     Launcher,
     STRONG_SCORE,
-    category_relevance_for,
     category_relevances,
     compute_monotonic_relevances,
     format_subtext,
@@ -276,7 +275,7 @@ def test_mapping_helpers_subtext_icons_and_monotonic_relevance() -> None:
     # Category relevance never increases down the list: 50 while results are strong, then 30.
     assert category_relevances(results) == [50, 50, 30, 30]
     assert category_relevances([_sample_result(score=1.0), _sample_result(score=9.0)]) == [30, 30]
-    assert category_relevance_for(_sample_result(score=STRONG_SCORE)) == 50
+    assert category_relevances([_sample_result(score=STRONG_SCORE)]) == [50]
 
 
 def test_relevances_never_reorder_results() -> None:
@@ -284,7 +283,7 @@ def test_relevances_never_reorder_results() -> None:
     rng = np.random.default_rng(7)
     for _ in range(200):
         n = int(rng.integers(1, 30))
-        scores = rng.choice([rng.uniform(-1, 12), 4.0, 0.0], size=n)
+        scores = np.where(rng.random(n) < 0.2, rng.choice([4.0, 0.0], size=n), rng.uniform(-1, 12, size=n))
         results = [_sample_result(path=f"/{i}", score=float(sc)) for i, sc in enumerate(scores)]
         rels = compute_monotonic_relevances(results)
         cats = category_relevances(results)

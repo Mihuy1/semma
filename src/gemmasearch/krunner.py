@@ -126,11 +126,6 @@ def category_relevances(results: list[SearchResult]) -> list[int]:
     return out
 
 
-def category_relevance_for(result: SearchResult) -> int:
-    """The category relevance of a lone result (see `category_relevances`)."""
-    return category_relevances([result])[0]
-
-
 def raw_relevance(score: float) -> float:
     """Map the search score linearly from [0, 8] to [0.3, 0.9] (clamped)."""
     t = max(0.0, min(1.0, score / 8.0))

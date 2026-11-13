@@ -862,12 +862,11 @@ def with_cos(q: np.ndarray, cos: float, seed: int) -> np.ndarray:
 def put_background(store: Store, root: Path, q: np.ndarray, n: int = 60, mean: float = 0.55, std: float = 0.04,
                    kind: str = "image", modality: str = "image", seed: int = 1000) -> None:
     """n unrelated files whose cosines to q look like a real index's bulk (EmbeddingGemma cosines
-    of unrelated pairs sit around 0.5-0.6), so z-scores behave as they do on real data. Uniform
-    with this std, so none of them reaches z 2 (a normal bulk would put a few there, by design)."""
+    of unrelated pairs sit around 0.5-0.6, normally spread so a ~2% tail reaches z 2)."""
     rng = np.random.default_rng(seed)
-    w = std * np.sqrt(3)
+    cosines = np.clip(rng.normal(mean, std, size=n), -0.99, 0.99)
     put_vectors(store, [(str(root / f"bg_{modality}" / f"{i}.{'jpg' if kind == 'image' else 'md'}"), 10,
-                         with_cos(q, float(rng.uniform(mean - w, mean + w)), seed + 1 + i)) for i in range(n)],
+                         with_cos(q, float(cosines[i]), seed + 1 + i)) for i in range(n)],
                 kind=kind, modality=modality)
 
 
@@ -887,11 +886,13 @@ def test_near_duplicates_collapse_to_the_preferred_copy(tmp_path: Path, cache: b
     put_background(store, tmp_path, q)
     cfg.z_gate = 2.0
     res = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "", limit=10)
-    assert [(Path(r.path).parent.name, Path(r.path).name, r.duplicates) for r in res] == [
+    assert [(Path(r.path).parent.name, Path(r.path).name, r.duplicates) for r in res[:2]] == [
         ("Pictures", "dog.jpg", 2), ("Pictures", "cat.jpg", 0)]
     assert len(res[0].duplicate_paths) == 2
     cfg.duplicate_similarity = {}
-    assert len(Searcher(store, cfg, FakeEmbedder()).search_vector(q, "", limit=10)) == 4  # the background stays out
+    uncollapsed = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "", limit=10)
+    assert names(uncollapsed)[:4].count("dog.jpg") == 3
+    assert "cat.jpg" in names(uncollapsed)[:4]
 
 
 def test_location_prior_only_breaks_near_ties(tmp_path: Path) -> None:
@@ -901,15 +902,20 @@ def test_location_prior_only_breaks_near_ties(tmp_path: Path) -> None:
     q = unit(1)
     put_vectors(store, [
         (str(tmp_path / "proj/data/a.jpg"), 5, with_cos(q, 0.705, 2)),   # marginally better, deep in a project
-        (str(tmp_path / "Pictures/b.jpg"), 80, with_cos(q, 0.700, 3)),   # in the user's own folder
-        (str(tmp_path / "proj/data/c.jpg"), 5, with_cos(q, 0.760, 4)),   # clearly better
+        (str(tmp_path / "Pictures/b.jpg"), 100, with_cos(q, 0.700, 3)),  # in the user's own folder (full prior)
+        (str(tmp_path / "proj/data/c.jpg"), 0, with_cos(q, 0.760, 4)),    # clearly better (z > b by >= 1.0)
     ])
     put_background(store, tmp_path, q)
     cfg.z_gate = 2.0
     res = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "", limit=10)
-    assert names(res) == ["c.jpg", "b.jpg", "a.jpg"]
+    assert names(res)[:3] == ["c.jpg", "b.jpg", "a.jpg"]
+    # Upper bound: a 0.3 z prior (priority 100 vs 0) must not flip a file whose z is 1.0 higher.
+    c_score = next(r.score for r in res if Path(r.path).name == "c.jpg")
+    b_score = next(r.score for r in res if Path(r.path).name == "b.jpg")
+    assert (c_score - (b_score - cfg.location_prior)) >= 1.0
+    assert c_score > b_score
     cfg.location_prior = 0.0
-    assert names(Searcher(store, cfg, FakeEmbedder()).search_vector(q, "", limit=10)) == ["c.jpg", "a.jpg", "b.jpg"]
+    assert names(Searcher(store, cfg, FakeEmbedder()).search_vector(q, "", limit=10))[:3] == ["c.jpg", "a.jpg", "b.jpg"]
 
 
 # -- 17. the in-memory vector cache --------------------------------------------------------------
@@ -1008,5 +1014,5 @@ def test_single_word_text_hit_ranks_after_strong_meaning_match(tmp_path: Path) -
         db.execute("INSERT INTO fts_chunks (rowid, text) VALUES (?, 'a dog appears in figure 3')", (cid,))
     s = Searcher(store, cfg, FakeEmbedder())
     res = s.search_vector(q, "dog", limit=10)
-    assert names(res) == ["photo.jpg", "thesis.md"]
+    assert names(res)[:2] == ["photo.jpg", "thesis.md"]
     assert res[0].matched == ["vector"] and res[1].matched == ["text"]

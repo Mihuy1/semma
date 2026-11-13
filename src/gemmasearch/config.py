@@ -198,10 +198,9 @@ class Config:
     # 2.0 keeps roughly the top 2-3% of chunks for a query (DigUp's value).
     z_gate: float = 2.0
     knn_k: int = 200  # only used without the vector cache (sqlite-vec KNN)
-    # Cosine-similarity bonus for priority 100 (scaled linearly; 0 disables), converted to z units
-    # with the query's standard deviation. Only meant to break near-ties in favour of files in
-    # the user's own folders.
-    location_prior: float = 0.02
+    # Score bonus in z units for priority 100 (scaled linearly; 0 disables). Only meant to break
+    # near-ties in favour of files in the user's own folders.
+    location_prior: float = 0.3
     duplicate_similarity: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_DUPLICATE_SIMILARITY))
     # A long-running process keeps all vectors in RAM (768 floats = 3 KiB per chunk) up to this
     # many chunks; beyond it, searches use sqlite-vec directly.
@@ -344,6 +343,14 @@ def _is_valid_device_spec(val: str) -> bool:
     return False
 
 
+def _bounded_float(raw: Any, key_name: str, lo: float, hi: float, default: float) -> float:
+    val = float(raw) if isinstance(raw, int | float) and not isinstance(raw, bool) else None
+    if val is None or not lo <= val <= hi:
+        _warn(f"{key_name} must be a number between {lo:g} and {hi:g} (got {raw!r}); using {default}")
+        return default
+    return val
+
+
 def _parse_query_device(raw: Any, key_name: str) -> str:
     if isinstance(raw, str):
         val = raw.strip().lower()
@@ -432,14 +439,10 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
     if "prefetch_chunks" in index:
         cfg.prefetch_chunks = max(1, int(index["prefetch_chunks"]))
     if "location_prior" in search:
-        cfg.location_prior = float(search["location_prior"])
+        cfg.location_prior = _bounded_float(search["location_prior"], "search.location_prior", 0.0, 2.0,
+                                            cfg.location_prior)
     if "z_gate" in search:
-        raw = search["z_gate"]
-        gate = float(raw) if isinstance(raw, int | float) and not isinstance(raw, bool) else None
-        if gate is None or not 0.0 <= gate <= 10.0:
-            _warn(f"search.z_gate must be a number between 0 and 10 (got {raw!r}); using {cfg.z_gate}")
-        else:
-            cfg.z_gate = gate
+        cfg.z_gate = _bounded_float(search["z_gate"], "search.z_gate", 0.0, 10.0, cfg.z_gate)
     if "knn_k" in search:
         k = int(search["knn_k"])
         if not 1 <= k <= MAX_KNN_K:

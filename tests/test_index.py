@@ -11,7 +11,7 @@ from fakes import ExtractionError, FakeEmbedder, FakeExtractor
 from gemmasearch.config import Config, load_config
 from gemmasearch.indexer import Indexer
 from gemmasearch.scanner import Scanner
-from gemmasearch.search import Searcher, fts_query, fts_text_query
+from gemmasearch.search import Searcher, _file_patterns, _patterns, query_terms
 from gemmasearch.store import MIGRATIONS, SCHEMA_V1, Store, connect
 
 DOCS = {
@@ -297,20 +297,43 @@ def test_crash_in_extract_module_propagates(env) -> None:
 def test_fts_escaping_never_errors(env, query: str) -> None:
     cfg, store = env
     run(cfg, store)
-    match = fts_query(query)
-    if match is not None:
-        store.db.execute("SELECT rowid FROM fts_files WHERE fts_files MATCH ?", [match]).fetchall()
-        store.db.execute("SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH ?", [match]).fetchall()
+    terms = query_terms(query)
+    if terms:
+        store.db.execute("SELECT rowid FROM fts_files WHERE fts_files MATCH ?",
+                         [" ".join(_file_patterns(terms))]).fetchall()
+        store.db.execute("SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH ?",
+                         [" ".join(_patterns(terms))]).fetchall()
     Searcher(store, cfg, FakeEmbedder()).search(query)
 
 
-def test_fts_query_shape() -> None:
-    assert fts_query('rocket-engine "launch" OR x') == '"rocket"* "engine"* "launch"* "OR"* "x"'
-    assert fts_query("!!! ---") is None
-    # Chunk text: only the last term is a prefix, and only from 3 characters on.
-    assert fts_text_query('rocket-engine "launch"') == '"rocket" "engine" "launch"*'
-    assert fts_text_query("the re") == '"the" "re"'
-    assert fts_text_query("!!!") is None
+def test_fts_prefix_rules(tmp_path: Path) -> None:
+    # File names/dirs prefix every term >= 3 chars (>= 2 for last); chunk text prefixes only the
+    # last term >= 3 chars, and only when not already in chunks as typed.
+    assert _file_patterns(query_terms('rocket-engine "launch" OR x')) == [
+        '"rocket"*', '"engine"*', '"launch"*', '"OR"', '"x"']
+    assert _file_patterns(query_terms("thes pr")) == ['"thes"*', '"pr"*']
+    assert _file_patterns(query_terms("!!! ---")) == []
+    assert _patterns(query_terms('rocket-engine "launch"')) == ['"rocket"', '"engine"', '"launch"*']
+    assert _patterns(query_terms("the re")) == ['"the"', '"re"']
+    assert _patterns(query_terms("!!!")) == []
+
+    cfg = make_cfg(tmp_path)
+    write_docs(tmp_path, {
+        "a.md": "transformer attention mechanism",
+        "b.md": "installing transformers with pip",
+    })
+    store = Store(cfg.db_path)
+    scan(store, cfg)
+    _, emb = run(store=store, cfg=cfg)
+    s = Searcher(store, cfg, emb)
+    # "transfo" is not indexed whole, so chunk text prefixes it -> matches "transformer" and "transformers".
+    assert {"a.md", "b.md"} <= {Path(r.path).name for r in s.search("transfo")}
+    # "transformer" IS indexed whole, so chunk text drops the wildcard -> "b.md" ("transformers") is not text-matched.
+    res = s.search("transformer")
+    assert Path(res[0].path).name == "a.md" and "text" in res[0].matched
+    b_res = [r for r in res if Path(r.path).name == "b.md"]
+    assert not b_res or "text" not in b_res[0].matched
+    store.close()
 
 
 def test_finnish_diacritics_both_ways(tmp_path: Path) -> None:

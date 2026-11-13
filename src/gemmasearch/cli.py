@@ -242,9 +242,7 @@ def cmd_search(args: argparse.Namespace, cfg: Config) -> int:
     embedder.load_query()
     # Score every vector in memory, as the daemon does (loaded up front so the timing below is
     # the search alone); above vector_cache_max_chunks the search falls back to sqlite-vec.
-    cache = store.enable_vector_cache(cfg.vector_cache_max_chunks)
-    with cache.lock:
-        cache.ensure_fresh(store.reader())
+    store.warm_vector_cache(cfg.vector_cache_max_chunks)
     searcher = Searcher(store, cfg, embedder)
     results = searcher.search(args.query, limit=args.n, kinds=args.kind)
     t = searcher.last_timings

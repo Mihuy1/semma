@@ -352,6 +352,13 @@ class Store:
             self.vectors = VectorCache(self.embedding_dim(), max_chunks)
         return self.vectors
 
+    def warm_vector_cache(self, max_chunks: int | None = None) -> VectorCache:
+        """Enable the in-memory vector cache and load it now (for CLI/eval timings)."""
+        cache = self.enable_vector_cache(max_chunks)
+        with cache.lock:
+            cache.ensure_fresh(self.reader())
+        return cache
+
     # -- meta -----------------------------------------------------------------
     def get_meta(self, key: str, default: str | None = None) -> str | None:
         row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()

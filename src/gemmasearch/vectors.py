@@ -274,27 +274,6 @@ class VectorCache:
         self._maybe_compact()
 
     # -- queries (call with `lock` held) -------------------------------------------
-    def knn(self, q: np.ndarray, k: int, kinds: Iterable[str] | None = None) -> list[tuple[int, int, float]]:
-        """Top-k (chunk_id, file_id, cosine similarity), best first."""
-        n = self.n
-        if n == 0 or k <= 0:
-            return []
-        q = np.asarray(q, dtype=np.float32)
-        q = q / (np.linalg.norm(q) or 1.0)
-        sims = self.mat[:n] @ q
-        valid = self.alive[:n]
-        if kinds is not None:
-            codes = [self._codes[x] for x in kinds if x in self._codes]
-            valid = valid & np.isin(self.kind[:n], codes)
-        sims = np.where(valid, sims, -np.inf)
-        k = min(k, int(valid.sum()))
-        if k == 0:
-            return []
-        top = np.argpartition(-sims, k - 1)[:k] if k < n else np.arange(n)
-        top = top[np.argsort(-sims[top], kind="stable")]
-        top = top[np.isfinite(sims[top])]
-        return list(zip(self.chunk_ids[top].tolist(), self.file_ids[top].tolist(), sims[top].tolist(), strict=True))
-
     def scores(self, q: np.ndarray) -> VectorScores:
         """Cosine similarity of q with every stored vector, with each row's chunk id, file id,
         modality code and kind code (views into the cache: use them with `lock` held). `valid`
