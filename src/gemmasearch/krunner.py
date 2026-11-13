@@ -108,28 +108,44 @@ def format_subtext(result: SearchResult, home: Path | None = None) -> str:
     return base
 
 
+# A result scoring at least this (z of 4, or z 2 + every query word, or a file-name match) is a
+# strong match and gets KRunner's "Moderate" category relevance; the rest get "Low".
+STRONG_SCORE = 4.0
+RELEVANCE_STEP = 1e-4  # relevances strictly decrease by at least this, so ties never reorder
+
+
+def category_relevances(results: list[SearchResult]) -> list[int]:
+    """50 (Moderate) for the leading results that are strong matches (score >= STRONG_SCORE),
+    30 (Low) from the first weaker one on. KRunner sorts by category relevance before relevance,
+    so this must never increase down our ranking."""
+    out: list[int] = []
+    strong = True
+    for r in results:
+        strong = strong and r.score >= STRONG_SCORE
+        out.append(50 if strong else 30)
+    return out
+
+
 def category_relevance_for(result: SearchResult) -> int:
-    """50 (Moderate) when similarity >= 0.75 or file name matched, else 30 (Low)."""
-    if (result.similarity is not None and result.similarity >= 0.75) or ("name" in result.matched):
-        return 50
-    return 30
+    """The category relevance of a lone result (see `category_relevances`)."""
+    return category_relevances([result])[0]
 
 
-def raw_relevance(similarity: float | None) -> float:
-    """Map similarity linearly from [0.55, 0.85] to [0.3, 0.9] (clamped); None -> 0.6."""
-    if similarity is None:
-        return 0.6
-    t = (similarity - 0.55) / (0.85 - 0.55)
-    t = max(0.0, min(1.0, t))
+def raw_relevance(score: float) -> float:
+    """Map the search score linearly from [0, 8] to [0.3, 0.9] (clamped)."""
+    t = max(0.0, min(1.0, score / 8.0))
     return round(0.3 + t * (0.9 - 0.3), 6)
 
 
 def compute_monotonic_relevances(results: list[SearchResult]) -> list[float]:
-    """Compute relevance in [0, 1] per result, adjusted minimally to be non-increasing."""
-    relevances = [raw_relevance(r.similarity) for r in results]
-    for i in range(1, len(relevances)):
-        if relevances[i] > relevances[i - 1]:
-            relevances[i] = relevances[i - 1]
+    """Relevance in (0, 1] per result, strictly decreasing in rank (results come best first), so
+    KRunner keeps our order."""
+    relevances: list[float] = []
+    for r in results:
+        rel = raw_relevance(r.score)
+        if relevances:
+            rel = min(rel, relevances[-1] - RELEVANCE_STEP)
+        relevances.append(round(max(rel, RELEVANCE_STEP), 6))
     return relevances
 
 
@@ -350,6 +366,7 @@ class KRunnerService(ServiceInterface):
 
         results = list(raw_results[: self._max_results])
         relevances = compute_monotonic_relevances(results)
+        cat_rels = category_relevances(results)
         try:
             thumbs = await self._gather_thumbnails(results)
         except asyncio.CancelledError:
@@ -359,11 +376,10 @@ class KRunnerService(ServiceInterface):
             thumbs = {}
 
         matches: list[list[Any]] = []
-        for result, relevance in zip(results, relevances, strict=True):
+        for result, relevance, cat_rel in zip(results, relevances, cat_rels, strict=True):
             match_id = self._remember(result)
             text = Path(result.path).name or result.path
             icon_name = icon_name_for(result.path, result.kind)
-            cat_rel = category_relevance_for(result)
             subtext = format_subtext(result, self._home)
 
             props: dict[str, Variant] = {

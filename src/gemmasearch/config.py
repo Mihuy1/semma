@@ -189,23 +189,18 @@ class Config:
     batch_sizes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_BATCH_SIZES))
     prefetch_chunks: int = 8  # extracted chunks buffered ahead of the GPU (bounds memory)
 
-    # Search. EmbeddingGemma similarities are compressed: on a calibration set unrelated
-    # query/file pairs scored 0.43-0.69 (median 0.53, p90 0.60), relevant ones 0.62-0.81.
-    # A vector-only match must clear `min_similarity` AND lie within `similarity_margin` of the
-    # best match of the query (short queries inflate every similarity, which the margin absorbs).
-    min_similarity: float = 0.60
-    similarity_margin: float = 0.10
-    # Single-word queries (most KRunner queries) inflate every similarity and flatten the
-    # curve: on the real index "dog" had 22 files within 0.05 of its best match (0.73) and 99
-    # within 0.10. Checked by eye: dog photos score 0.70-0.73 and cats/cows/sheep start at
-    # 0.656; for "mountains" (best 0.698) real mountain photos end around 0.66, then cows,
-    # hydrants and buses at 0.64-0.65. So single words keep only the top 0.04 and >= 0.65.
-    min_similarity_short: float = 0.65
-    similarity_margin_short: float = 0.04
-    knn_k: int = 200
-    rrf_k: int = 60
-    # Similarity bonus for priority 100 (scaled linearly; 0 disables). Only meant to break
-    # near-ties in favour of files in the user's own folders.
+    # Search. A chunk's meaning score is a z-score: how many standard deviations its cosine
+    # similarity to the query stands out from every stored vector's (after centring each
+    # modality on its own mean, since image cosines run lower than text ones). EmbeddingGemma
+    # cosines are compressed (unrelated pairs score ~0.45-0.70), so a fixed cosine threshold
+    # does not work across queries; z does. A file whose best chunk reaches `z_gate` is a
+    # meaning match; below it a file needs half the query's words (or its name) to be shown.
+    # 2.0 keeps roughly the top 2-3% of chunks for a query (DigUp's value).
+    z_gate: float = 2.0
+    knn_k: int = 200  # only used without the vector cache (sqlite-vec KNN)
+    # Cosine-similarity bonus for priority 100 (scaled linearly; 0 disables), converted to z units
+    # with the query's standard deviation. Only meant to break near-ties in favour of files in
+    # the user's own folders.
     location_prior: float = 0.02
     duplicate_similarity: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_DUPLICATE_SIMILARITY))
     # A long-running process keeps all vectors in RAM (768 floats = 3 KiB per chunk) up to this
@@ -310,11 +305,16 @@ KNOWN_KEYS: dict[str, frozenset[str]] = {
     "media": frozenset({"max_minutes", "segment_seconds"}),
     "model": frozenset({"name", "device", "query_device", "llama_lib_dir", "model_dir"}),
     "index": frozenset({"batch_sizes", "prefetch_chunks"}),
-    "search": frozenset({"min_similarity", "similarity_margin", "min_similarity_short", "similarity_margin_short",
-                         "knn_k", "rrf_k", "location_prior", "duplicate_similarity", "vector_cache_max_chunks"}),
+    "search": frozenset({"z_gate", "knn_k", "location_prior", "duplicate_similarity", "vector_cache_max_chunks"}),
     "daemon": frozenset({"model_idle_unload_minutes", "index_model_unload_seconds", "rescan_hours",
                          "watch_debounce_seconds", "gpu_busy_threshold", "gpu_check_seconds", "krunner_max_results",
                          "query_debounce_ms", "query_device"}),
+}
+
+# Settings of earlier versions that are accepted with a warning and ignored.
+REMOVED_KEYS: dict[str, frozenset[str]] = {
+    "search": frozenset({"min_similarity", "similarity_margin", "min_similarity_short", "similarity_margin_short",
+                         "rrf_k"}),
 }
 
 VALID_QUERY_DEVICES = frozenset({"auto", "cpu", "cuda", "vulkan", "gpu"})
@@ -330,7 +330,8 @@ def check_unknown_keys(data: dict[str, Any]) -> list[str]:
     for section, keys in KNOWN_KEYS.items():
         value = data.get(section) if section else None
         if isinstance(value, dict):
-            unknown += [f"{section}.{k}" for k in value if k not in keys]
+            removed = REMOVED_KEYS.get(section, frozenset())
+            unknown += [f"{section}.{k}" for k in value if k not in keys and k not in removed]
     return unknown
 
 
@@ -367,6 +368,12 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
     home = cfg.home
     for key in check_unknown_keys(data):
         _warn(f"unknown key {key!r} ignored")
+    for section, keys in REMOVED_KEYS.items():
+        value = data.get(section)
+        if isinstance(value, dict):
+            for key in sorted(keys & value.keys()):
+                _warn(f"{section}.{key} is no longer used and is ignored (search ranks by how far a match "
+                      f"stands out from the whole index; see search.z_gate)")
     scan = data.get("scan", {})
     prio = data.get("priority", {})
     media = data.get("media", {})
@@ -424,17 +431,20 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
         cfg.batch_sizes.update({k: max(1, int(v)) for k, v in index["batch_sizes"].items()})
     if "prefetch_chunks" in index:
         cfg.prefetch_chunks = max(1, int(index["prefetch_chunks"]))
-    for key in ("min_similarity", "similarity_margin", "min_similarity_short", "similarity_margin_short",
-                "location_prior"):
-        if key in search:
-            setattr(cfg, key, float(search[key]))
+    if "location_prior" in search:
+        cfg.location_prior = float(search["location_prior"])
+    if "z_gate" in search:
+        raw = search["z_gate"]
+        gate = float(raw) if isinstance(raw, int | float) and not isinstance(raw, bool) else None
+        if gate is None or not 0.0 <= gate <= 10.0:
+            _warn(f"search.z_gate must be a number between 0 and 10 (got {raw!r}); using {cfg.z_gate}")
+        else:
+            cfg.z_gate = gate
     if "knn_k" in search:
         k = int(search["knn_k"])
         if not 1 <= k <= MAX_KNN_K:
             _warn(f"search.knn_k must be between 1 and {MAX_KNN_K}; using {min(max(k, 1), MAX_KNN_K)}")
         cfg.knn_k = min(max(k, 1), MAX_KNN_K)
-    if "rrf_k" in search:
-        cfg.rrf_k = max(1, int(search["rrf_k"]))
     if "duplicate_similarity" in search:
         cfg.duplicate_similarity.update({k: float(v) for k, v in search["duplicate_similarity"].items()})
     if "vector_cache_max_chunks" in search:

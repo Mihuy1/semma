@@ -43,6 +43,19 @@ class Delta:
         return self.cleared or bool(self.removed_files) or bool(self.added)
 
 
+@dataclass
+class VectorScores:
+    """One query scored against every row of the cache (see `VectorCache.scores`)."""
+
+    sims: np.ndarray       # float32 cosine per row
+    chunk_ids: np.ndarray  # int64
+    file_ids: np.ndarray   # int64
+    modality: np.ndarray   # int16 codes (names[code])
+    kind: np.ndarray       # int16 codes
+    valid: np.ndarray | None  # alive rows; None = all
+    names: list[str]
+
+
 def chunks_version(db: sqlite3.Connection) -> int:
     row = db.execute("SELECT value FROM counters WHERE name = 'chunks'").fetchone()
     return int(row[0]) if row else 0
@@ -281,6 +294,27 @@ class VectorCache:
         top = top[np.argsort(-sims[top], kind="stable")]
         top = top[np.isfinite(sims[top])]
         return list(zip(self.chunk_ids[top].tolist(), self.file_ids[top].tolist(), sims[top].tolist(), strict=True))
+
+    def scores(self, q: np.ndarray) -> VectorScores:
+        """Cosine similarity of q with every stored vector, with each row's chunk id, file id,
+        modality code and kind code (views into the cache: use them with `lock` held). `valid`
+        masks out deleted rows (None when there are none)."""
+        n = self.n
+        q = np.asarray(q, dtype=np.float32)
+        q = q / (np.linalg.norm(q) or 1.0)
+        return VectorScores(
+            sims=self.mat[:n] @ q, chunk_ids=self.chunk_ids[:n], file_ids=self.file_ids[:n],
+            modality=self.modality[:n], kind=self.kind[:n], valid=self.alive[:n] if self.dead else None,
+            names=list(self._names))
+
+    def codes(self, names: Iterable[str]) -> list[int]:
+        """Codes of these modality/kind names (unknown names are skipped)."""
+        return [self._codes[x] for x in names if x in self._codes]
+
+    def rows(self, chunk_ids: Iterable[int]) -> np.ndarray:
+        """Rows of these chunks (chunks not in the cache are skipped)."""
+        got = [r for r in (self.row_of.get(c) for c in chunk_ids) if r is not None]
+        return np.asarray(got, dtype=np.int64)
 
     def vectors(self, chunk_ids: Iterable[int]) -> dict[int, np.ndarray]:
         out = {}

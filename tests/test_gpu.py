@@ -54,7 +54,8 @@ def test_query_and_mixed_modalities(embedder: Embedder) -> None:
 
 def test_semantic_search_end_to_end(tmp_path: Path, embedder: Embedder) -> None:
     cfg = make_cfg(tmp_path)
-    cfg.min_similarity, cfg.similarity_margin = 0.60, 0.10  # the shipped defaults
+    # Three files: no z-score can exceed sqrt(2), so the shipped gate (2.0) is out of reach.
+    cfg.z_gate = 1.0
     write_docs(tmp_path, {
         "a.md": "Feed the sourdough starter, knead the dough and bake the loaf in a hot oven.",
         "b.md": "The Kubernetes cluster lost quorum when an etcd node ran out of disk space.",

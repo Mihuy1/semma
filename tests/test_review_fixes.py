@@ -308,6 +308,7 @@ def test_folder_word_does_not_flood(tmp_path: Path) -> None:
     docs = {f"note{i:02d}.md": f"entry {i} about gardening tomatoes" for i in range(60)}
     docs["paper.md"] = "the documents describing the merger were signed in march"
     cfg, store = make_env(tmp_path, docs)
+    cfg.z_gate = 2.0  # 61 files: enough for the real gate
     _, emb = run(cfg, store)
     s = Searcher(store, cfg, emb)
     assert names(s.search("documents", limit=10)) == ["paper.md"]
@@ -363,7 +364,7 @@ def test_kind_filter_applies_before_the_fts_limit(tmp_path: Path) -> None:
     scan(store, cfg)
     ex = FakeExtractor({"annual.pdf": ["the annual budget was approved by the board " * 3]})
     _, emb = run(cfg, store, ex)
-    cfg.min_similarity = 0.99
+    cfg.z_gate = 10.0  # words only
     res = Searcher(store, cfg, emb).search("budget", kinds=["pdf"])
     assert names(res) == ["annual.pdf"]
 
@@ -858,6 +859,18 @@ def with_cos(q: np.ndarray, cos: float, seed: int) -> np.ndarray:
     return cos * q + np.sqrt(1 - cos**2) * r
 
 
+def put_background(store: Store, root: Path, q: np.ndarray, n: int = 60, mean: float = 0.55, std: float = 0.04,
+                   kind: str = "image", modality: str = "image", seed: int = 1000) -> None:
+    """n unrelated files whose cosines to q look like a real index's bulk (EmbeddingGemma cosines
+    of unrelated pairs sit around 0.5-0.6), so z-scores behave as they do on real data. Uniform
+    with this std, so none of them reaches z 2 (a normal bulk would put a few there, by design)."""
+    rng = np.random.default_rng(seed)
+    w = std * np.sqrt(3)
+    put_vectors(store, [(str(root / f"bg_{modality}" / f"{i}.{'jpg' if kind == 'image' else 'md'}"), 10,
+                         with_cos(q, float(rng.uniform(mean - w, mean + w)), seed + 1 + i)) for i in range(n)],
+                kind=kind, modality=modality)
+
+
 @pytest.mark.parametrize("cache", [False, True])
 def test_near_duplicates_collapse_to_the_preferred_copy(tmp_path: Path, cache: bool) -> None:
     cfg = make_cfg(tmp_path)
@@ -871,12 +884,14 @@ def test_near_duplicates_collapse_to_the_preferred_copy(tmp_path: Path, cache: b
         (str(tmp_path / "Pictures/dog.jpg"), 70, copy),
         (str(tmp_path / "Pictures/cat.jpg"), 70, with_cos(q, 0.75, 4)),
     ])
+    put_background(store, tmp_path, q)
+    cfg.z_gate = 2.0
     res = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "", limit=10)
     assert [(Path(r.path).parent.name, Path(r.path).name, r.duplicates) for r in res] == [
         ("Pictures", "dog.jpg", 2), ("Pictures", "cat.jpg", 0)]
     assert len(res[0].duplicate_paths) == 2
     cfg.duplicate_similarity = {}
-    assert len(Searcher(store, cfg, FakeEmbedder()).search_vector(q, "", limit=10)) == 4
+    assert len(Searcher(store, cfg, FakeEmbedder()).search_vector(q, "", limit=10)) == 4  # the background stays out
 
 
 def test_location_prior_only_breaks_near_ties(tmp_path: Path) -> None:
@@ -889,24 +904,12 @@ def test_location_prior_only_breaks_near_ties(tmp_path: Path) -> None:
         (str(tmp_path / "Pictures/b.jpg"), 80, with_cos(q, 0.700, 3)),   # in the user's own folder
         (str(tmp_path / "proj/data/c.jpg"), 5, with_cos(q, 0.760, 4)),   # clearly better
     ])
+    put_background(store, tmp_path, q)
+    cfg.z_gate = 2.0
     res = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "", limit=10)
     assert names(res) == ["c.jpg", "b.jpg", "a.jpg"]
     cfg.location_prior = 0.0
     assert names(Searcher(store, cfg, FakeEmbedder()).search_vector(q, "", limit=10)) == ["c.jpg", "a.jpg", "b.jpg"]
-
-
-def test_single_word_queries_use_the_stricter_floor(tmp_path: Path) -> None:
-    cfg = make_cfg(tmp_path)
-    cfg.duplicate_similarity = {}
-    cfg.min_similarity, cfg.similarity_margin = 0.5, 0.2
-    cfg.min_similarity_short, cfg.similarity_margin_short = 0.5, 0.05
-    store = Store(cfg.db_path)
-    q = unit(1)
-    put_vectors(store, [(str(tmp_path / "x/a.jpg"), 10, with_cos(q, 0.70, 2)),
-                        (str(tmp_path / "x/b.jpg"), 10, with_cos(q, 0.62, 3))])
-    s = Searcher(store, cfg, FakeEmbedder())
-    assert names(s.search_vector(q, "zzzz", limit=10)) == ["a.jpg"]
-    assert names(s.search_vector(q, "zzzz yyyy", limit=10)) == ["a.jpg", "b.jpg"]
 
 
 # -- 17. the in-memory vector cache --------------------------------------------------------------
@@ -967,8 +970,8 @@ def test_common_text_terms_are_dropped_at_scale(tmp_path: Path, monkeypatch) -> 
     cfg, store = make_env(tmp_path, docs)
     _, emb = run(cfg, store)
     s = Searcher(store, cfg, emb)
-    assert s._selective(store.reader(), ['"the"', '"rocket"']) == '"rocket"'
-    assert s._selective(store.reader(), ['"the"', '"common"']) is None
+    assert s._selective(store.reader(), ['"the"', '"rocket"']) == ['"rocket"']
+    assert s._selective(store.reader(), ['"the"', '"common"']) == []
     assert names(s.search("the rocket"))[0] == "d0.md"
 
 
@@ -988,16 +991,22 @@ def test_versions_collapse_by_first_chunk(tmp_path: Path) -> None:
     assert len(thesis) == 1 and thesis[0].duplicates == 2
 
 
-def test_single_word_text_hits_rank_after_strong_matches(tmp_path: Path) -> None:
+def test_single_word_text_hit_ranks_after_strong_meaning_match(tmp_path: Path) -> None:
+    """One mention of "dog" in a thesis is a candidate (all the query's words) but the dog photo,
+    which stands far out in meaning, still comes first."""
     cfg = make_cfg(tmp_path)
+    cfg.z_gate = 2.0
     cfg.duplicate_similarity = {}
-    cfg.min_similarity_short, cfg.similarity_margin_short = 0.5, 0.1
     store = Store(cfg.db_path)
     q = unit(1)
-    put_vectors(store, [(str(tmp_path / "x/photo.jpg"), 10, with_cos(q, 0.70, 2))])
-    put_vectors(store, [(str(tmp_path / "x/thesis.md"), 90, with_cos(q, 0.30, 3))], kind="text", modality="text")
+    put_background(store, tmp_path, q)
+    put_background(store, tmp_path, q, mean=0.59, kind="text", modality="text", seed=5000)
+    put_vectors(store, [(str(tmp_path / "x/photo.jpg"), 10, with_cos(q, 0.80, 2))])
+    put_vectors(store, [(str(tmp_path / "x/thesis.md"), 90, with_cos(q, 0.58, 3))], kind="text", modality="text")
     with store.write() as (db, _):
         cid = db.execute("SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.path LIKE '%thesis.md'").fetchone()[0]
         db.execute("INSERT INTO fts_chunks (rowid, text) VALUES (?, 'a dog appears in figure 3')", (cid,))
     s = Searcher(store, cfg, FakeEmbedder())
-    assert names(s.search_vector(q, "dog", limit=10)) == ["photo.jpg", "thesis.md"]
+    res = s.search_vector(q, "dog", limit=10)
+    assert names(res) == ["photo.jpg", "thesis.md"]
+    assert res[0].matched == ["vector"] and res[1].matched == ["text"]

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 from dbus_fast.aio import MessageBus
+import numpy as np
 from PIL import Image
 import pytest
 
@@ -21,9 +22,13 @@ from gemmasearch.krunner import (
     CATEGORY_LABEL,
     KRunnerService,
     Launcher,
+    STRONG_SCORE,
+    category_relevance_for,
+    category_relevances,
     compute_monotonic_relevances,
     format_subtext,
     icon_name_for,
+    raw_relevance,
 )
 from gemmasearch.search import SearchResult
 from gemmasearch.thumbnails import IconData, Thumbnailer
@@ -85,7 +90,7 @@ class SlowThumbnailer(Thumbnailer):
 def _sample_result(
     path: str = "/home/user/Documents/thesis.pdf",
     kind: str = ft.PDF,
-    score: float = 0.03,
+    score: float = 3.0,
     similarity: float | None = 0.78,
     locator: str = "p. 4",
     snippet: str = "Introduction to semantic desktop search.",
@@ -251,24 +256,40 @@ def test_mapping_helpers_subtext_icons_and_monotonic_relevance() -> None:
     assert icon_name_for("/tmp/a.unknown_ext_xyz", ft.AUDIO) == "audio-x-generic"
     assert icon_name_for("/tmp/a.unknown_ext_xyz", ft.VIDEO) == "video-x-generic"
 
-    # 4. Relevance linear mapping and monotonic enforcement
-    # Ranked list where result 0 is name-only (similarity None -> 0.6),
-    # result 1 has similarity 0.80 (raw relevance ~0.8 > 0.6),
-    # result 2 has similarity 0.55 (raw 0.3),
-    # result 3 has similarity 0.70 (raw 0.6 > 0.3).
+    # 4. Relevance: linear in the search score ([0, 8] -> [0.3, 0.9]), strictly decreasing in rank.
+    # Similarity no longer matters: the score already ranks the results.
     results = [
-        _sample_result(path="/a", similarity=None, matched=["name"]),
-        _sample_result(path="/b", similarity=0.80, matched=["vector"]),
-        _sample_result(path="/c", similarity=0.55, matched=["vector"]),
-        _sample_result(path="/d", similarity=0.70, matched=["vector"]),
+        _sample_result(path="/a", score=4.0, similarity=None, matched=["name"]),
+        _sample_result(path="/b", score=4.0, similarity=0.80, matched=["vector"]),  # a tie
+        _sample_result(path="/c", score=0.0, similarity=0.55, matched=["vector"]),
+        _sample_result(path="/d", score=2.0, similarity=0.90, matched=["vector"]),  # out of order
     ]
     rels = compute_monotonic_relevances(results)
-    assert all(0.3 <= x <= 0.9 for x in rels)
-    assert rels == sorted(rels, reverse=True)
+    assert all(0.0 < x <= 0.9 for x in rels)
+    assert all(a > b for a, b in itertools.pairwise(rels))
     assert rels[0] == pytest.approx(0.6)
-    assert rels[1] == pytest.approx(0.6)  # clamped down to preserve monotonic ordering
+    assert rels[1] == pytest.approx(0.6 - 1e-4)  # ties are split in rank order
     assert rels[2] == pytest.approx(0.3)
-    assert rels[3] == pytest.approx(0.3)
+    assert rels[3] < rels[2]
+    assert raw_relevance(100.0) == pytest.approx(0.9) and raw_relevance(-1.0) == pytest.approx(0.3)
+
+    # Category relevance never increases down the list: 50 while results are strong, then 30.
+    assert category_relevances(results) == [50, 50, 30, 30]
+    assert category_relevances([_sample_result(score=1.0), _sample_result(score=9.0)]) == [30, 30]
+    assert category_relevance_for(_sample_result(score=STRONG_SCORE)) == 50
+
+
+def test_relevances_never_reorder_results() -> None:
+    """Whatever the scores, KRunner sorting by (category relevance, relevance) keeps our order."""
+    rng = np.random.default_rng(7)
+    for _ in range(200):
+        n = int(rng.integers(1, 30))
+        scores = rng.choice([rng.uniform(-1, 12), 4.0, 0.0], size=n)
+        results = [_sample_result(path=f"/{i}", score=float(sc)) for i, sc in enumerate(scores)]
+        rels = compute_monotonic_relevances(results)
+        cats = category_relevances(results)
+        order = sorted(range(n), key=lambda i: (-cats[i], -rels[i]))
+        assert order == list(range(n))
 
 
 @requires_session_bus
@@ -284,6 +305,7 @@ def test_match_properties_urls_thumbnails_and_actions(tmp_path: Path) -> None:
         _sample_result(
             path=str(doc_path),
             kind=ft.PDF,
+            score=6.4,
             similarity=0.80,
             locator="p. 4",
             snippet="Johdanto kappale.",
@@ -318,13 +340,13 @@ def test_match_properties_urls_thumbnails_and_actions(tmp_path: Path) -> None:
             matches = await iface.call_match("johdanto")
             assert len(matches) == 2
 
-            # Match 0: PDF (no icon-data, similarity 0.80 >= 0.75 -> cat_rel 50)
+            # Match 0: PDF (no icon-data, score 6.4 >= STRONG_SCORE -> cat_rel 50)
             m0_id, m0_text, m0_icon, m0_cat_rel, m0_rel, m0_props = matches[0]
             assert m0_id == str(doc_path)
             assert m0_text == "Muistiinpanot & raportti.pdf"
             assert m0_icon == "application-pdf"
             assert m0_cat_rel == 50
-            assert m0_rel == pytest.approx(0.8, abs=1e-4)
+            assert m0_rel == pytest.approx(0.78, abs=1e-4)
             assert m0_props["subtext"].value == "p. 4 · Johdanto kappale.  (+3 similar)"
             assert m0_props["urls"].value == [doc_path.as_uri()]
             assert "%20" in m0_props["urls"].value[0]
@@ -332,7 +354,7 @@ def test_match_properties_urls_thumbnails_and_actions(tmp_path: Path) -> None:
             assert m0_props["actions"].value == [ACTION_OPEN_FOLDER, ACTION_COPY_PATH]
             assert "icon-data" not in m0_props
 
-            # Match 1: Image (has icon-data, similarity 0.68 < 0.75 and not name match -> cat_rel 30)
+            # Match 1: Image (has icon-data, score 3.0 < STRONG_SCORE -> cat_rel 30)
             m1_id, m1_text, m1_icon, m1_cat_rel, m1_rel, m1_props = matches[1]
             assert m1_id == str(img_path)
             assert m1_text == "kesä kuva (1).png"

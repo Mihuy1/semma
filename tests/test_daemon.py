@@ -206,9 +206,9 @@ def make_cfg(home: Path) -> Config:
     cfg.db_path = home / "db" / "index.db"
     cfg.roots = [home / "Documents"]
     cfg.locations = {home / "Documents": 40}
-    cfg.min_similarity = 0.2
-    cfg.similarity_margin = 1.0
-    cfg.min_similarity_short, cfg.similarity_margin_short = 0.2, 1.0
+    # Tiny indexes: with n vectors no z-score can exceed sqrt(n - 1), so the default gate (2.0)
+    # is out of reach for 3-5 files.
+    cfg.z_gate = 1.0
     cfg.query_debounce_ms = 0
     cfg.gpu_check_seconds = 0.05
     cfg.model_idle_unload_minutes = 0  # tests that need it set it

@@ -26,9 +26,9 @@ def make_cfg(home: Path) -> Config:
     cfg.include_mounts = False
     cfg.db_path = home / "db" / "index.db"
     cfg.roots = [home / "Documents"]
-    cfg.min_similarity = 0.2  # bag-of-words vectors of unrelated texts are ~0
-    cfg.similarity_margin = 1.0
-    cfg.min_similarity_short, cfg.similarity_margin_short = 0.2, 1.0
+    # Tiny indexes: with n vectors no z-score can exceed sqrt(n - 1), so the default gate (2.0)
+    # is out of reach for 3-5 files.
+    cfg.z_gate = 1.0
     return cfg
 
 
@@ -339,7 +339,7 @@ def test_camel_case_and_prefix_names(tmp_path: Path) -> None:
     store.close()
 
 
-def test_rrf_combines_name_and_content(tmp_path: Path) -> None:
+def test_name_and_content_combine(tmp_path: Path) -> None:
     cfg = make_cfg(tmp_path)
     write_docs(tmp_path, {
         # Matches by content only.
@@ -371,19 +371,20 @@ def test_kind_filter(env, tmp_path: Path) -> None:
     assert [r.kind for r in s.search("bread", kinds=["text"])] == ["text"]
 
 
-def test_similarity_floor_drops_vector_only_matches(env) -> None:
+def test_z_gate_drops_vector_only_matches(env) -> None:
     cfg, store = env
     _, emb = run(cfg, store)
-    # "feline" occurs nowhere, so there is no lexical match and only the vector ranking counts.
-    cfg.min_similarity = 0.99
-    assert Searcher(store, cfg, emb).search("warm sofa feline") == []
-    cfg.min_similarity = 0.2
-    assert [Path(r.path).name for r in Searcher(store, cfg, emb).search("warm sofa feline")] == ["cats.md"]
-    cfg.min_similarity = -1.0
-    assert len(Searcher(store, cfg, emb).search("warm sofa feline")) == 3
-    # The relative margin: everything far below the best match goes too.
-    cfg.similarity_margin = 0.05
-    assert [Path(r.path).name for r in Searcher(store, cfg, emb).search("warm sofa feline")] == ["cats.md"]
+    # Only "sofa" occurs in a file (1 of 4 words: too few to count), so only meaning can find it.
+    query = "sofa feline kitten whiskers"
+    cfg.z_gate = 10.0
+    assert Searcher(store, cfg, emb).search(query) == []
+    cfg.z_gate = 1.0
+    res = Searcher(store, cfg, emb).search(query)
+    assert [Path(r.path).name for r in res] == ["cats.md"] and "vector" in res[0].matched
+    # Half the words found in the text keep a file whatever its meaning score.
+    cfg.z_gate = 10.0
+    res = Searcher(store, cfg, emb).search("warm sofa feline")
+    assert [Path(r.path).name for r in res] == ["cats.md"] and res[0].matched == ["text"]
 
 
 def test_reset_index(env) -> None:
