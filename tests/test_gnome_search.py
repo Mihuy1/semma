@@ -14,7 +14,10 @@ import pytest
 
 from gemmasearch import filetypes as ft
 from gemmasearch.dbus_names import GNOME_INTERFACE, GNOME_PATH
+from gemmasearch import gnome_search as gs
 from gemmasearch.gnome_search import (
+    GNOME_THUMBNAIL_BUDGET_SECONDS,
+    GNOME_VISIBLE_RESULTS,
     GnomeLauncher,
     GnomeSearchService,
     gicon_string,
@@ -191,8 +194,9 @@ def test_dbus_round_trip_metas_activate_and_signatures(tmp_path: Path) -> None:
             assert queries == ["rocket launch", "rocket launch pad"]
 
             metas = await iface.call_get_result_metas(["/unknown/file.txt", *ids])
-            assert len(metas) == 3
-            text, image, video = ({k: v.value for k, v in m.items()} for m in metas)
+            assert len(metas) == 4
+            unknown, text, image, video = ({k: v.value for k, v in m.items()} for m in metas)
+            assert unknown["id"] == "/unknown/file.txt" and unknown["name"] == "file.txt"
             assert text == {
                 "id": "/home/user/notes/rockets.md",
                 "name": "rockets.md",
@@ -256,6 +260,7 @@ def test_launcher_prefers_gio_then_xdg_open(monkeypatch: pytest.MonkeyPatch) -> 
     available = {"gio": "/usr/bin/gio", "xdg-open": "/usr/bin/xdg-open"}
     monkeypatch.setattr("gemmasearch.gnome_search.shutil.which", lambda n: available.get(n))
     launcher = GnomeLauncher()
+    monkeypatch.setattr(launcher, "_scope_prefix", lambda: None)
     monkeypatch.setattr(launcher, "_spawn_detached", lambda argv: spawned.append(argv) or True)
     asyncio.run(launcher.open_file("/x/a b.txt"))
     assert spawned == [["/usr/bin/gio", "open", "/x/a b.txt"]]
@@ -356,3 +361,166 @@ def test_gnome_description_shortens_long_parent_and_keeps_suffix() -> None:
         assert metas[0]["description"] == "/mnt/…/coco2017/evaluation/prepared_standalone  (+3 similar)"
 
     asyncio.run(check_metas())
+
+
+class _FakeProc:
+    def __init__(self, returncode: int | None) -> None:
+        self.returncode = returncode
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+
+def _scope_env(monkeypatch: pytest.MonkeyPatch, *, systemd_run: bool, under_systemd: bool) -> None:
+    tools = {"gio": "/usr/bin/gio", "xdg-open": "/usr/bin/xdg-open"}
+    if systemd_run:
+        tools["systemd-run"] = "/usr/bin/systemd-run"
+    monkeypatch.setattr(gs.shutil, "which", lambda n: tools.get(n))
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    if under_systemd:
+        monkeypatch.setenv("INVOCATION_ID", "abc123")
+    monkeypatch.setattr(gs, "SYSTEMD_RUNTIME_DIR", "/nonexistent/systemd/system")
+
+
+def _recording_launcher(monkeypatch: pytest.MonkeyPatch, returncode: int | None = 0):
+    launcher = GnomeLauncher()
+    spawned: list[list[str]] = []
+
+    def fake_popen(argv: list[str]):
+        spawned.append(argv)
+        return _FakeProc(returncode if argv[0].endswith("systemd-run") else None)
+
+    monkeypatch.setattr(launcher, "_popen", fake_popen)
+    return launcher, spawned
+
+
+SCOPE = ["/usr/bin/systemd-run", "--user", "--scope", "--collect", "--quiet", "--"]
+
+
+def test_launcher_wraps_opener_in_systemd_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    _scope_env(monkeypatch, systemd_run=True, under_systemd=True)
+    launcher, spawned = _recording_launcher(monkeypatch)
+    asyncio.run(launcher.open_file("/x/a b.txt"))
+    assert spawned == [[*SCOPE, "/usr/bin/gio", "open", "/x/a b.txt"]]
+
+
+def test_launcher_scope_also_wraps_xdg_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    _scope_env(monkeypatch, systemd_run=True, under_systemd=True)
+    monkeypatch.setattr(gs.shutil, "which", lambda n: {"systemd-run": "/usr/bin/systemd-run",
+                                                        "xdg-open": "/usr/bin/xdg-open"}.get(n))
+    launcher, spawned = _recording_launcher(monkeypatch)
+    asyncio.run(launcher.open_file("/x/a.txt"))
+    assert spawned == [[*SCOPE, "/usr/bin/xdg-open", "/x/a.txt"]]
+
+
+def test_launcher_detects_systemd_via_runtime_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _scope_env(monkeypatch, systemd_run=True, under_systemd=False)
+    launcher = GnomeLauncher()
+    assert launcher._scope_prefix() is None
+    monkeypatch.setattr(gs, "SYSTEMD_RUNTIME_DIR", str(tmp_path))
+    assert launcher._scope_prefix() == SCOPE
+
+
+def test_launcher_plain_spawn_without_systemd_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    _scope_env(monkeypatch, systemd_run=False, under_systemd=True)
+    launcher, spawned = _recording_launcher(monkeypatch)
+    asyncio.run(launcher.open_file("/x/a.txt"))
+    assert spawned == [["/usr/bin/gio", "open", "/x/a.txt"]]
+
+
+def test_launcher_plain_spawn_when_not_under_systemd(monkeypatch: pytest.MonkeyPatch) -> None:
+    _scope_env(monkeypatch, systemd_run=True, under_systemd=False)
+    launcher, spawned = _recording_launcher(monkeypatch)
+    asyncio.run(launcher.open_file("/x/a.txt"))
+    assert spawned == [["/usr/bin/gio", "open", "/x/a.txt"]]
+
+
+def test_launcher_falls_back_when_systemd_run_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    _scope_env(monkeypatch, systemd_run=True, under_systemd=True)
+    launcher, spawned = _recording_launcher(monkeypatch, returncode=1)
+    asyncio.run(launcher.open_file("/x/a.txt"))
+    assert spawned == [[*SCOPE, "/usr/bin/gio", "open", "/x/a.txt"], ["/usr/bin/gio", "open", "/x/a.txt"]]
+
+
+def test_launcher_falls_back_when_systemd_run_cannot_exec(monkeypatch: pytest.MonkeyPatch) -> None:
+    _scope_env(monkeypatch, systemd_run=True, under_systemd=True)
+    launcher = GnomeLauncher()
+    spawned: list[list[str]] = []
+
+    def fake_popen(argv: list[str]):
+        spawned.append(argv)
+        return None if argv[0].endswith("systemd-run") else _FakeProc(None)
+
+    monkeypatch.setattr(launcher, "_popen", fake_popen)
+    asyncio.run(launcher.open_file("/x/a.txt"))
+    assert spawned[-1] == ["/usr/bin/gio", "open", "/x/a.txt"] and len(spawned) == 2
+
+
+def test_gnome_budget_default_and_prewarm_cap() -> None:
+    assert GNOME_THUMBNAIL_BUDGET_SECONDS == 0.75
+    assert GNOME_VISIBLE_RESULTS == 5
+
+    async def check() -> None:
+        results = [_result(f"/p/{i}.jpg", kind=ft.IMAGE) for i in range(8)]
+        thumb = FakeThumbnailer(delay=0.0)
+        svc, _ = _service(results, thumbnailer=thumb, max_results=10)
+        assert svc._thumbnail_budget == GNOME_THUMBNAIL_BUDGET_SECONDS
+        ids = await svc._run_search(["sunset"])
+        assert len(ids) == 8  # max_results is unchanged; only prewarming is capped
+        await asyncio.sleep(0.05)
+        assert thumb.calls == GNOME_VISIBLE_RESULTS
+        # Asking for a result past the cap still produces its thumbnail on demand.
+        metas = await _call_metas(svc, [ids[7]])
+        assert "icon-data" in metas[0]
+        assert thumb.calls == GNOME_VISIBLE_RESULTS + 1
+
+    asyncio.run(check())
+
+
+def test_metas_one_per_id_in_request_order_for_unknown_ids() -> None:
+    async def check() -> None:
+        home = Path("/home/user")
+        svc, _ = _service([_result("/home/user/a.md")], home=home)
+        ids = await svc._run_search(["alpha"])
+        long_dir = "/home/user/" + "/".join(f"folder{i:02d}" for i in range(10))
+        req = [f"{long_dir}/photo.png", ids[0], "/home/user/Music/song.flac", "/srv/noext"]
+        metas = await _call_metas(svc, req)
+        assert [m["id"] for m in metas] == req
+        photo, known, song, noext = metas
+        assert photo == {
+            "id": req[0],
+            "name": "photo.png",
+            "description": shorten_folder(f"~/{long_dir.removeprefix('/home/user/')}"),
+            "clipboardText": req[0],
+            "gicon": gicon_string(req[0], ft.IMAGE),
+        }
+        assert photo["description"].startswith("~/…/")
+        assert known["description"] == "some text"
+        assert song["gicon"] == gicon_string(req[2], ft.AUDIO)
+        assert noext["gicon"] == gicon_string(req[3], ft.TEXT) and noext["description"] == "/srv"
+        assert all("icon-data" not in m for m in (photo, song, noext))
+        assert await _call_metas(svc, []) == []
+
+    asyncio.run(check())
+
+
+def test_activate_unknown_id_opens_existing_indexable_file_only(tmp_path: Path) -> None:
+    async def check() -> None:
+        launcher = FakeLauncher()
+        svc, _ = _service([], launcher=launcher)
+        activate = type(svc).__dict__["ActivateResult"].__wrapped__
+        doc = tmp_path / "report.pdf"
+        doc.write_bytes(b"%PDF")
+        script = tmp_path / "run.desktop"
+        script.write_text("[Desktop Entry]")
+        folder = tmp_path / "dir.txt"
+        folder.mkdir()
+
+        await activate(svc, str(doc), ["x"], 0)
+        await activate(svc, str(tmp_path / "gone.txt"), ["x"], 0)  # missing
+        await activate(svc, str(script), ["x"], 0)  # not an indexable kind
+        await activate(svc, str(folder), ["x"], 0)  # not a regular file
+        await activate(svc, "report.pdf", ["x"], 0)  # relative
+        assert launcher.opened == [str(doc)]
+
+    asyncio.run(check())

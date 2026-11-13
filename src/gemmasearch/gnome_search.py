@@ -39,7 +39,6 @@ from .krunner import (
     _WS_RE,
     KIND_FALLBACK_ICONS,
     RECENT_RESULTS_MAX,
-    THUMBNAIL_BUDGET_SECONDS,
     count_alnum,
     icon_name_for,
     shorten_home,
@@ -51,6 +50,18 @@ from .thumbnails import IconData, Thumbnailer
 log = logging.getLogger(__name__)
 
 FOLDER_MAX_CHARS = 48
+
+# GNOME Shell asks GetResultMetas once per id and caches the result actor until the search is
+# cleared (search.js _ensureResultActors), so a thumbnail that misses this budget never shows.
+# It is much longer than KRunner's budget, which can update a match later.
+GNOME_THUMBNAIL_BUDGET_SECONDS = 0.75
+# GNOME's list view shows this many results per provider; only those get thumbnails prewarmed.
+GNOME_VISIBLE_RESULTS = 5
+
+# sd_booted(3): systemd is PID 1 when this directory exists.
+SYSTEMD_RUNTIME_DIR = "/run/systemd/system"
+# How long to watch a ``systemd-run --scope`` launch for an early failure before trusting it.
+SCOPE_START_TIMEOUT_SECONDS = 1.0
 
 
 def shorten_folder(path: str, limit: int = FOLDER_MAX_CHARS) -> str:
@@ -121,12 +132,27 @@ def gicon_string(path: str, kind: str) -> str:
 class GnomeLauncher:
     """Opens files with the default application (``gio open``, fallback ``xdg-open``).
 
+    The daemon runs as ``gemmasearch.service`` with ``KillMode=control-group``: anything it
+    spawns directly stays in the service's cgroup and is killed by ``systemctl --user
+    restart/stop gemmasearch``, taking the user's open documents with it. Under systemd the
+    opener is therefore started in its own transient scope (``systemd-run --user --scope``),
+    falling back to a plain spawn if ``systemd-run`` is missing or fails to start.
+
     Injectable so tests can inspect calls without opening windows.
     """
 
-    def _spawn_detached(self, argv: list[str]) -> bool:
+    def _scope_prefix(self) -> list[str] | None:
+        """``systemd-run`` argv prefix that moves the child into its own scope, if usable."""
+        if not (os.environ.get("INVOCATION_ID") or os.path.isdir(SYSTEMD_RUNTIME_DIR)):
+            return None
+        systemd_run = shutil.which("systemd-run")
+        if not systemd_run:
+            return None
+        return [systemd_run, "--user", "--scope", "--collect", "--quiet", "--"]
+
+    def _popen(self, argv: list[str]) -> subprocess.Popen[bytes] | None:
         try:
-            subprocess.Popen(
+            return subprocess.Popen(
                 argv,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -134,18 +160,48 @@ class GnomeLauncher:
                 start_new_session=True,
                 env=os.environ.copy(),
             )
-            return True
         except OSError as e:
             log.warning("failed to spawn %s: %s", argv, e)
+            return None
+
+    def _spawn_detached(self, argv: list[str]) -> bool:
+        return self._popen(argv) is not None
+
+    async def _spawn_scoped(self, argv: list[str]) -> bool:
+        """Run ``argv`` in a transient systemd scope. False if that is unavailable or failed.
+
+        ``systemd-run --scope`` registers the scope and then execs ``argv`` in place, so an
+        early non-zero exit means either the scope could not be created or the opener itself
+        failed; the plain retry is harmless in the latter case (it fails the same way).
+        """
+        prefix = self._scope_prefix()
+        if prefix is None:
             return False
+        proc = self._popen(prefix + argv)
+        if proc is None:
+            return False
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SCOPE_START_TIMEOUT_SECONDS
+        while proc.poll() is None and loop.time() < deadline:
+            await asyncio.sleep(0.02)
+        if proc.returncode not in (None, 0):
+            log.info("systemd-run scope launch of %s exited %s; spawning directly", argv, proc.returncode)
+            return False
+        return True
+
+    async def spawn(self, argv: list[str]) -> bool:
+        """Start ``argv`` detached, outside the service's cgroup when possible."""
+        if await self._spawn_scoped(argv):
+            return True
+        return self._spawn_detached(argv)
 
     async def open_file(self, path: str) -> None:
         gio = shutil.which("gio")
-        if gio and self._spawn_detached([gio, "open", path]):
+        if gio and await self.spawn([gio, "open", path]):
             return
         xdg_open = shutil.which("xdg-open")
         if xdg_open:
-            self._spawn_detached([xdg_open, path])
+            await self.spawn([xdg_open, path])
         else:
             log.warning("neither gio nor xdg-open found: cannot open %s", path)
 
@@ -161,7 +217,7 @@ class GnomeSearchService(ServiceInterface):
         on_activity: Callable[[], None] | None = None,
         launcher: GnomeLauncher | None = None,
         thumbnailer: Thumbnailer | None = None,
-        thumbnail_budget: float = THUMBNAIL_BUDGET_SECONDS,
+        thumbnail_budget: float = GNOME_THUMBNAIL_BUDGET_SECONDS,
         home: Path | None = None,
     ) -> None:
         super().__init__(GNOME_INTERFACE)
@@ -205,7 +261,8 @@ class GnomeSearchService(ServiceInterface):
         results = list((raw_results or [])[: self._max_results])
         ids = [self._remember(r) for r in results]
         # Start thumbnails now so GetResultMetas (which follows right away) finds them cached.
-        for r in results:
+        # Only for the results GNOME will actually display; the rest get one on demand.
+        for r in results[:GNOME_VISIBLE_RESULTS]:
             if r.kind in (ft.IMAGE, ft.VIDEO) and self._thumbnailer.get_cached(r.path, r.mtime) is None:
                 self._spawn_thumb(r)
         return ids
@@ -255,6 +312,23 @@ class GnomeSearchService(ServiceInterface):
         # Semantic results don't narrow monotonically as the query grows: search again.
         return await self._run_search(list(terms))
 
+    def _synthetic_meta(self, path: str) -> dict[str, Variant]:
+        """Minimal meta for an id we no longer remember (daemon restart, LRU eviction).
+
+        GNOME Shell's remoteSearch.js rejects a reply whose length differs from the request
+        ("Wrong number of result metas"), blanking the whole provider, so every id needs one.
+        Ids are file paths, which is enough for a name, folder and themed icon.
+        """
+        p = Path(path)
+        kind = ft.classify(p.name) or ft.TEXT
+        return {
+            "id": Variant("s", path),
+            "name": Variant("s", p.name or path),
+            "description": Variant("s", shorten_folder(shorten_home(p.parent, self._home))),
+            "clipboardText": Variant("s", path),
+            "gicon": Variant("s", gicon_string(path, kind)),
+        }
+
     @method()
     async def GetResultMetas(self, identifiers: "as") -> "aa{sv}":  # noqa: F821, N802, UP037
         results = [self._recent[i] for i in identifiers if i in self._recent]
@@ -267,7 +341,11 @@ class GnomeSearchService(ServiceInterface):
             thumbs = {}
 
         metas: list[dict[str, Variant]] = []
-        for r in results:
+        for identifier in identifiers:
+            r = self._recent.get(identifier)
+            if r is None:
+                metas.append(self._synthetic_meta(identifier))
+                continue
             meta: dict[str, Variant] = {
                 "id": Variant("s", r.path),
                 "name": Variant("s", Path(r.path).name or r.path),
@@ -286,13 +364,34 @@ class GnomeSearchService(ServiceInterface):
             metas.append(meta)
         return metas
 
+    @staticmethod
+    def _openable_unknown_id(identifier: str) -> bool:
+        """Whether an id we don't remember may still be opened.
+
+        Ids are paths we handed to GNOME Shell earlier (before a restart or LRU eviction).
+        Opening one is no more than the caller could do itself: only same-user processes can
+        call us on the session bus, and they can run ``gio open`` directly. Still, only accept
+        what we could have returned: an absolute path to an existing regular file of an
+        indexable kind, which keeps ``.desktop`` files, scripts and other launchables out.
+        """
+        return (
+            os.path.isabs(identifier)
+            and ft.classify(os.path.basename(identifier)) is not None
+            and os.path.isfile(identifier)
+        )
+
     @method()
     async def ActivateResult(self, identifier: "s", terms: "as", timestamp: "u"):  # noqa: F821, N802, UP037
         result = self._recent.get(identifier)
-        if result is None:
+        if result is not None:
+            path = result.path
+        elif self._openable_unknown_id(identifier):
+            path = identifier
+        else:
+            log.debug("ActivateResult(%r): unknown id, ignored", identifier)
             return
         try:
-            await self._launcher.open_file(result.path)
+            await self._launcher.open_file(path)
         except Exception:
             log.exception("ActivateResult(%r) failed", identifier)
 
