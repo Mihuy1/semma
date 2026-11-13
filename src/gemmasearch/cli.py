@@ -358,11 +358,87 @@ def cmd_uninstall_kde(args: argparse.Namespace, cfg: Config) -> int:
 def cmd_kde_status(args: argparse.Namespace, cfg: Config) -> int:
     from .install import status_kde
 
-    st = status_kde(runner=_quiet_runner)
-    for name, path in st["paths"].items():
-        print(f"{name:<13} {'present' if st['files'][name] else 'missing':<8} {_short(str(path), cfg.home)}")
+    return _print_integration_status(status_kde(runner=_quiet_runner), cfg.home)
+
+
+def _print_integration_status(st: dict[str, object], home: Path) -> int:
+    files = st["files"]
+    paths = st["paths"]
+    assert isinstance(files, dict) and isinstance(paths, dict)
+    for name, path in paths.items():
+        print(f"{name:<13} {'present' if files[name] else 'missing':<8} {_short(str(path), home)}")
     print(f"service       {'enabled' if st['enabled'] else 'disabled'}, {'active' if st['active'] else 'inactive'}")
     return 0 if st["installed"] else 1
+
+
+def cmd_install_gnome(args: argparse.Namespace, cfg: Config) -> int:
+    from .install import install_gnome
+
+    res = install_gnome(enable=not args.no_enable)
+    for path in res.written:
+        print(f"wrote {_short(str(path), cfg.home)}")
+    if res.sudo_command:
+        print("\nRun this once to let GNOME Shell find the provider:")
+        print(f"  {res.sudo_command}")
+    if not args.no_enable:
+        print(
+            "Service enabled and started. "
+            "Log out and back in (or restart GNOME Shell) for the new search provider to appear."
+        )
+    else:
+        print("Log out and back in (or restart GNOME Shell) for the new search provider to appear.")
+    return 0
+
+
+def cmd_uninstall_gnome(args: argparse.Namespace, cfg: Config) -> int:
+    from .install import uninstall_gnome
+
+    res = uninstall_gnome()
+    for path in res.removed:
+        print(f"removed {_short(str(path), cfg.home)}")
+    if res.sudo_command:
+        print("\nRun this once to remove the system search provider file:")
+        print(f"  {res.sudo_command}")
+    print("The index database is kept; delete it with `gemmasearch reset --all --yes`.")
+    return 0
+
+
+def cmd_gnome_status(args: argparse.Namespace, cfg: Config) -> int:
+    from .install import status_gnome
+
+    return _print_integration_status(status_gnome(runner=_quiet_runner), cfg.home)
+
+
+def _resolve_desktop(desktop: str | None) -> str | None:
+    if desktop is not None:
+        return desktop
+    from .install import detect_desktop
+
+    detected = detect_desktop()
+    if detected is None:
+        print(
+            "Could not detect a supported desktop (KDE Plasma or GNOME). Use --desktop kde|gnome.",
+            file=sys.stderr,
+        )
+    return detected
+
+
+def cmd_install(args: argparse.Namespace, cfg: Config) -> int:
+    desktop = _resolve_desktop(args.desktop)
+    if desktop is None:
+        return 2
+    if desktop == "kde":
+        return cmd_install_kde(args, cfg)
+    return cmd_install_gnome(args, cfg)
+
+
+def cmd_uninstall(args: argparse.Namespace, cfg: Config) -> int:
+    desktop = _resolve_desktop(args.desktop)
+    if desktop is None:
+        return 2
+    if desktop == "kde":
+        return cmd_uninstall_kde(args, cfg)
+    return cmd_uninstall_gnome(args, cfg)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -421,6 +497,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     ks = sub.add_parser("kde-status", help="show whether the KDE integration is installed and running")
     ks.set_defaults(func=cmd_kde_status)
+
+    ig = sub.add_parser("install-gnome", help="install the GNOME Shell search provider and the systemd user service")
+    ig.add_argument("--no-enable", action="store_true", help="write the files but do not start the service")
+    ig.set_defaults(func=cmd_install_gnome)
+
+    ug = sub.add_parser("uninstall-gnome", help="stop the service and remove the GNOME Shell search provider")
+    ug.set_defaults(func=cmd_uninstall_gnome)
+
+    gs = sub.add_parser("gnome-status", help="show whether the GNOME integration is installed and running")
+    gs.set_defaults(func=cmd_gnome_status)
+
+    inst = sub.add_parser("install", help="install desktop search integration (auto-detects KDE or GNOME)")
+    inst.add_argument("--desktop", choices=["kde", "gnome"], help="desktop environment (default: auto-detect)")
+    inst.add_argument("--no-enable", action="store_true", help="write the files but do not start the service")
+    inst.add_argument("--no-restart", action="store_true", help="do not restart KRunner (KDE only)")
+    inst.set_defaults(func=cmd_install)
+
+    uninst = sub.add_parser("uninstall", help="remove desktop search integration (auto-detects KDE or GNOME)")
+    uninst.add_argument("--desktop", choices=["kde", "gnome"], help="desktop environment (default: auto-detect)")
+    uninst.set_defaults(func=cmd_uninstall)
     return p
 
 
