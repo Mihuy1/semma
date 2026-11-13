@@ -1,8 +1,9 @@
 """gemmasearchd: the long-running service behind KRunner.
 
 Runs as a systemd user service (Type=dbus) that owns `dbus_names.BUS_NAME` on the session bus,
-answers KRunner queries (`krunner.KRunnerService` at RUNNER_PATH) and keeps the index current
-in the background. `Control` at CONTROL_PATH reports status and takes pause/resume/rescan.
+answers KRunner queries (`krunner.KRunnerService` at RUNNER_PATH) and GNOME Shell overview
+searches (`gnome_search.GnomeSearchService` at GNOME_PATH) and keeps the index current in the
+background. `Control` at CONTROL_PATH reports status and takes pause/resume/rescan.
 
 Threads and what runs where:
 
@@ -190,7 +191,7 @@ class _ScanAborted(Exception):
 class Daemon:
     """Search service plus background indexing; every collaborator can be injected (tests).
 
-    gpu_monitor / watcher_factory / runner_factory: `_DEFAULT` builds the real one (if its
+    gpu_monitor / watcher_factory / runner_factory / gnome_factory: `_DEFAULT` builds the real one (if its
     module is available), None disables it.
     """
 
@@ -200,6 +201,7 @@ class Daemon:
                  extract_fn: Any = None, gpu_monitor: GpuMonitorLike | None = _DEFAULT,
                  watcher_factory: WatcherFactory | None = _DEFAULT,
                  runner_factory: RunnerFactory | None = _DEFAULT,
+                 gnome_factory: RunnerFactory | None = _DEFAULT,
                  bus_name: str = dbus_names.BUS_NAME) -> None:
         self.cfg = cfg
         self.bus_name = bus_name
@@ -215,6 +217,7 @@ class Daemon:
         self.gpu_monitor = _default_gpu_monitor(cfg, embedder=embedder) if gpu_monitor is _DEFAULT else gpu_monitor
         self._watcher_factory = _default_watcher_factory() if watcher_factory is _DEFAULT else watcher_factory
         self._runner_factory = _default_runner_factory() if runner_factory is _DEFAULT else runner_factory
+        self._gnome_factory = _default_gnome_factory() if gnome_factory is _DEFAULT else gnome_factory
         self.watcher: WatcherLike | None = None
 
         # Worker state, guarded by _cv (simple reads of single attributes are fine without it).
@@ -830,6 +833,15 @@ def _default_runner_factory() -> RunnerFactory | None:
     return KRunnerService
 
 
+def _default_gnome_factory() -> RunnerFactory | None:
+    try:
+        from .gnome_search import GnomeSearchService
+    except ImportError:
+        log.exception("gnome_search module unavailable: not serving GNOME Shell search")
+        return None
+    return GnomeSearchService
+
+
 # -- D-Bus ----------------------------------------------------------------------------------
 
 STATUS_SIGNATURES = {
@@ -887,6 +899,15 @@ async def serve(daemon: Daemon, *, bus_address: str | None = None, stop_event: a
         except Exception:
             log.exception("could not export the KRunner interface")
             runner = None
+    gnome = None
+    if daemon._gnome_factory is not None:
+        try:
+            gnome = daemon._gnome_factory(daemon.search, max_results=daemon.cfg.krunner_max_results,
+                                          on_activity=daemon.record_activity)
+            bus.export(dbus_names.GNOME_PATH, gnome)
+        except Exception:
+            log.exception("could not export the GNOME Shell search provider interface")
+            gnome = None
     bus.export(dbus_names.CONTROL_PATH, Control(daemon))
     try:
         reply = await bus.request_name(daemon.bus_name, NameFlag.DO_NOT_QUEUE)
@@ -899,7 +920,8 @@ async def serve(daemon: Daemon, *, bus_address: str | None = None, stop_event: a
         bus.disconnect()
         daemon.store.close()
         return 1
-    log.info("serving %s (KRunner %s)", daemon.bus_name, "on" if runner else "off")
+    log.info("serving %s (KRunner %s, GNOME %s)", daemon.bus_name, "on" if runner else "off",
+             "on" if gnome else "off")
     daemon.start()
     stop_wait = asyncio.ensure_future(stop_event.wait())
     disconnect = asyncio.ensure_future(bus.wait_for_disconnect())
@@ -911,6 +933,9 @@ async def serve(daemon: Daemon, *, bus_address: str | None = None, stop_event: a
     if runner is not None and not bus_lost:
         with contextlib.suppress(Exception):
             bus.unexport(dbus_names.RUNNER_PATH)
+    if gnome is not None and not bus_lost:
+        with contextlib.suppress(Exception):
+            bus.unexport(dbus_names.GNOME_PATH)
     await daemon.stop()
     if not bus_lost:
         with contextlib.suppress(Exception):

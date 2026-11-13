@@ -1,0 +1,237 @@
+"""GNOME Shell overview search provider (``org.gnome.Shell.SearchProvider2``).
+
+Exports ``GetInitialResultSet``, ``GetSubsearchResultSet``, ``GetResultMetas``, ``ActivateResult``
+and ``LaunchSearch`` using ``dbus-fast``. Result ids are file paths.
+
+Icons: GNOME Shell 51's ``ui/remoteSearch.js`` ``createIcon(size, meta)`` checks the metas in
+this order and uses the first one present::
+
+    if (meta['icon'])            gicon = Gio.icon_deserialize(meta['icon']);
+    else if (meta['gicon'])      gicon = Gio.icon_new_for_string(meta['gicon']);
+    else if (meta['icon-data'])  { const [width, height, rowStride, hasAlpha,
+                                          bitsPerSample, nChannels_, data] = meta['icon-data'];
+                                   gicon = Shell.util_create_pixbuf_from_data(data, ...); }
+
+So a thumbnail goes in ``icon-data`` (``(iiibiiay)``, the same raw-pixel tuple KRunner takes:
+no PNG encoding, no temp files), and ``gicon`` (a themed MIME icon name) must then be left
+out, because it would win over ``icon-data``. ``gicon`` uses the ``. GThemedIcon a b`` string
+form so a theme missing the MIME icon falls back to the generic one.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable
+import logging
+import os
+from pathlib import Path
+import shutil
+import subprocess
+from typing import Any
+
+from dbus_fast import Variant
+from dbus_fast.service import ServiceInterface, method
+
+from . import filetypes as ft
+from .dbus_names import GNOME_INTERFACE
+from .krunner import KIND_FALLBACK_ICONS, RECENT_RESULTS_MAX, THUMBNAIL_BUDGET_SECONDS, count_alnum, format_subtext, icon_name_for
+from .search import SearchResult
+from .thumbnails import IconData, Thumbnailer
+
+log = logging.getLogger(__name__)
+
+
+def gicon_string(path: str, kind: str) -> str:
+    """``Gio.icon_new_for_string`` form of a themed icon: the MIME icon, then the generic icon
+    for the kind as a fallback for themes that lack the specific one."""
+    names = [icon_name_for(path, kind)]
+    fallback = KIND_FALLBACK_ICONS.get(kind)
+    if fallback and fallback not in names:
+        names.append(fallback)
+    if len(names) == 1:
+        return names[0]
+    return ". GThemedIcon " + " ".join(names)
+
+
+class GnomeLauncher:
+    """Opens files with the default application (``gio open``, fallback ``xdg-open``).
+
+    Injectable so tests can inspect calls without opening windows.
+    """
+
+    def _spawn_detached(self, argv: list[str]) -> bool:
+        try:
+            subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                env=os.environ.copy(),
+            )
+            return True
+        except OSError as e:
+            log.warning("failed to spawn %s: %s", argv, e)
+            return False
+
+    async def open_file(self, path: str) -> None:
+        gio = shutil.which("gio")
+        if gio and self._spawn_detached([gio, "open", path]):
+            return
+        xdg_open = shutil.which("xdg-open")
+        if xdg_open:
+            self._spawn_detached([xdg_open, path])
+        else:
+            log.warning("neither gio nor xdg-open found: cannot open %s", path)
+
+
+class GnomeSearchService(ServiceInterface):
+    """D-Bus service implementing ``org.gnome.Shell.SearchProvider2``."""
+
+    def __init__(
+        self,
+        search: Callable[[str], Awaitable[list[SearchResult]]],
+        *,
+        max_results: int = 10,
+        on_activity: Callable[[], None] | None = None,
+        launcher: GnomeLauncher | None = None,
+        thumbnailer: Thumbnailer | None = None,
+        thumbnail_budget: float = THUMBNAIL_BUDGET_SECONDS,
+        home: Path | None = None,
+    ) -> None:
+        super().__init__(GNOME_INTERFACE)
+        self._search = search
+        self._max_results = max(1, int(max_results))
+        self._on_activity = on_activity
+        self._launcher = launcher if launcher is not None else GnomeLauncher()
+        self._thumbnailer = thumbnailer if thumbnailer is not None else Thumbnailer()
+        self._thumbnail_budget = thumbnail_budget
+        self._home = home
+        self._recent: OrderedDict[str, SearchResult] = OrderedDict()
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+
+    def _remember(self, result: SearchResult) -> str:
+        result_id = result.path
+        self._recent[result_id] = result
+        self._recent.move_to_end(result_id)
+        while len(self._recent) > RECENT_RESULTS_MAX:
+            self._recent.popitem(last=False)
+        return result_id
+
+    async def _run_search(self, terms: list[str]) -> list[str]:
+        q = " ".join(terms).strip()
+        if count_alnum(q) < 3:
+            return []
+
+        if self._on_activity is not None:
+            try:
+                self._on_activity()
+            except Exception:
+                log.exception("on_activity callback failed")
+
+        try:
+            raw_results = await self._search(q)
+        except asyncio.CancelledError:
+            return []
+        except Exception:
+            log.exception("search failed for query %r", q)
+            return []
+
+        results = list((raw_results or [])[: self._max_results])
+        ids = [self._remember(r) for r in results]
+        # Start thumbnails now so GetResultMetas (which follows right away) finds them cached.
+        for r in results:
+            if r.kind in (ft.IMAGE, ft.VIDEO) and self._thumbnailer.get_cached(r.path, r.mtime) is None:
+                self._spawn_thumb(r)
+        return ids
+
+    def _spawn_thumb(self, result: SearchResult) -> asyncio.Task[IconData | None]:
+        task = asyncio.create_task(self._safe_thumb(result))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    async def _safe_thumb(self, result: SearchResult) -> IconData | None:
+        try:
+            return await self._thumbnailer.icon_data(result.path, result.kind, result.mtime)
+        except Exception as e:
+            log.debug("thumbnail error for %s: %s", result.path, e)
+            return None
+
+    async def _gather_thumbnails(self, results: list[SearchResult]) -> dict[str, IconData]:
+        """Thumbnails ready within the budget; the rest keep generating in the background."""
+        ready: dict[str, IconData] = {}
+        pending: dict[asyncio.Task[IconData | None], str] = {}
+        for r in results:
+            if r.kind not in (ft.IMAGE, ft.VIDEO):
+                continue
+            cached = self._thumbnailer.get_cached(r.path, r.mtime)
+            if cached is not None:
+                ready[r.path] = cached
+            else:
+                # The thumbnailer dedupes in-flight work, so this joins any prewarm task.
+                pending[self._spawn_thumb(r)] = r.path
+
+        if pending and self._thumbnail_budget > 0:
+            done, _ = await asyncio.wait(pending.keys(), timeout=self._thumbnail_budget)
+            for task in done:
+                if not task.cancelled() and task.exception() is None:
+                    icon = task.result()
+                    if icon is not None:
+                        ready[pending[task]] = icon
+        return ready
+
+    @method()
+    async def GetInitialResultSet(self, terms: "as") -> "as":  # noqa: F821, N802, UP037
+        return await self._run_search(list(terms))
+
+    @method()
+    async def GetSubsearchResultSet(self, previous_results: "as", terms: "as") -> "as":  # noqa: F821, N802, UP037
+        # Semantic results don't narrow monotonically as the query grows: search again.
+        return await self._run_search(list(terms))
+
+    @method()
+    async def GetResultMetas(self, identifiers: "as") -> "aa{sv}":  # noqa: F821, N802, UP037
+        results = [self._recent[i] for i in identifiers if i in self._recent]
+        try:
+            thumbs = await self._gather_thumbnails(results)
+        except asyncio.CancelledError:
+            thumbs = {}
+        except Exception:
+            log.exception("thumbnail gathering failed")
+            thumbs = {}
+
+        metas: list[dict[str, Variant]] = []
+        for r in results:
+            meta: dict[str, Variant] = {
+                "id": Variant("s", r.path),
+                "name": Variant("s", Path(r.path).name or r.path),
+                "description": Variant("s", format_subtext(r, self._home)),
+                "clipboardText": Variant("s", r.path),
+            }
+            icon = thumbs.get(r.path)
+            if icon is not None:
+                w, h, rowstride, has_alpha, bps, channels, raw_bytes = icon
+                meta["icon-data"] = Variant(
+                    "(iiibiiay)",
+                    [int(w), int(h), int(rowstride), bool(has_alpha), int(bps), int(channels), bytes(raw_bytes)],
+                )
+            else:
+                meta["gicon"] = Variant("s", gicon_string(r.path, r.kind))
+            metas.append(meta)
+        return metas
+
+    @method()
+    async def ActivateResult(self, identifier: "s", terms: "as", timestamp: "u"):  # noqa: F821, N802, UP037
+        result = self._recent.get(identifier)
+        if result is None:
+            return
+        try:
+            await self._launcher.open_file(result.path)
+        except Exception:
+            log.exception("ActivateResult(%r) failed", identifier)
+
+    @method()
+    def LaunchSearch(self, terms: "as", timestamp: "u"):  # noqa: F821, N802, UP037
+        log.debug("LaunchSearch(%r) ignored", terms)

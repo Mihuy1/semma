@@ -227,8 +227,10 @@ def write_docs(home: Path, docs: dict[str, str], sub: str = "") -> None:
 
 def make_daemon(cfg: Config, *, embedder: Any = None, extractor: FakeExtractor | None = None,
                 gpu: StubGpu | None = None, watcher: bool = True, **kw: Any) -> Daemon:
+    kw.setdefault("runner_factory", None)
+    kw.setdefault("gnome_factory", None)
     d = Daemon(cfg, embedder=embedder or LifecycleEmbedder(), extract_fn=extractor or FakeExtractor(),
-               gpu_monitor=gpu, watcher_factory=StubWatcher if watcher else None, runner_factory=None, **kw)
+               gpu_monitor=gpu, watcher_factory=StubWatcher if watcher else None, **kw)
     d.gpu_busy_recheck_s = 0.05
     return d
 
@@ -852,6 +854,55 @@ def test_krunner_match_over_dbus(home: Path) -> None:
             assert reply.message_type == MessageType.METHOD_RETURN, reply.body
             matches = reply.body[0]
             assert matches and "rockets.md" in matches[0][1]
+        finally:
+            bus.disconnect()
+            stop.set()
+            assert await asyncio.wait_for(task, 10) == 0
+
+    asyncio.run(main())
+
+
+@needs_bus
+@pytest.mark.parametrize("broken", [None, "runner", "gnome"])
+def test_serve_exports_krunner_and_gnome_independently(home: Path, broken: str | None) -> None:
+    from dbus_fast import Message, MessageType
+    from dbus_fast.aio import MessageBus
+
+    from gemmasearch import dbus_names
+    from gemmasearch.gnome_search import GnomeSearchService
+    from gemmasearch.krunner import KRunnerService
+
+    def boom(*_a: Any, **_kw: Any) -> Any:
+        raise RuntimeError("factory failed")
+
+    async def main() -> None:
+        name = test_bus_name()
+        d = make_daemon(make_cfg(home), watcher=False, bus_name=name,
+                        runner_factory=boom if broken == "runner" else KRunnerService,
+                        gnome_factory=boom if broken == "gnome" else GnomeSearchService)
+        stop = asyncio.Event()
+        task = asyncio.ensure_future(serve(d, stop_event=stop))
+        bus = await MessageBus().connect()
+        try:
+            await wait_until(lambda: d._running, what="daemon running")
+            await until_idle(d)
+            runner = await bus.call(Message(destination=name, path=dbus_names.RUNNER_PATH,
+                                            interface=dbus_names.RUNNER_INTERFACE, member="Match",
+                                            signature="s", body=["rocket launch"]))
+            gnome = await bus.call(Message(destination=name, path=dbus_names.GNOME_PATH,
+                                           interface=dbus_names.GNOME_INTERFACE, member="GetInitialResultSet",
+                                           signature="as", body=[["rocket", "launch"]]))
+            ok = {"runner": runner.message_type == MessageType.METHOD_RETURN,
+                  "gnome": gnome.message_type == MessageType.METHOD_RETURN}
+            assert ok == {"runner": broken != "runner", "gnome": broken != "gnome"}
+            if ok["gnome"]:
+                ids = gnome.body[0]
+                assert ids and ids[0].endswith("rockets.md")
+                metas = await bus.call(Message(destination=name, path=dbus_names.GNOME_PATH,
+                                               interface=dbus_names.GNOME_INTERFACE, member="GetResultMetas",
+                                               signature="as", body=[ids[:1]]))
+                assert metas.body[0][0]["name"].value == "rockets.md"
+            assert (await control_call("Status", bus_name=name))["state"]
         finally:
             bus.disconnect()
             stop.set()
