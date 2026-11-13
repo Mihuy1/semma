@@ -14,7 +14,14 @@ import pytest
 
 from gemmasearch import filetypes as ft
 from gemmasearch.dbus_names import GNOME_INTERFACE, GNOME_PATH
-from gemmasearch.gnome_search import GnomeLauncher, GnomeSearchService, gicon_string
+from gemmasearch.gnome_search import (
+    GnomeLauncher,
+    GnomeSearchService,
+    gicon_string,
+    gnome_description,
+    shorten_folder,
+)
+from gemmasearch.krunner import format_subtext
 from gemmasearch.search import SearchResult
 from gemmasearch.thumbnails import IconData, Thumbnailer
 
@@ -53,10 +60,16 @@ class FakeThumbnailer(Thumbnailer):
         return ICON
 
 
-def _result(path: str, kind: str = ft.TEXT, snippet: str = "some text", locator: str = "") -> SearchResult:
+def _result(
+    path: str,
+    kind: str = ft.TEXT,
+    snippet: str = "some text",
+    locator: str = "",
+    duplicates: int = 0,
+) -> SearchResult:
     return SearchResult(
         path=path, kind=kind, score=3.0, similarity=0.7, modality="text", locator=locator,
-        snippet=snippet, position=None, mtime=1700000000.0, matched=["vector"], duplicates=0,
+        snippet=snippet, position=None, mtime=1700000000.0, matched=["vector"], duplicates=duplicates,
         duplicate_paths=[], z=None,
     )
 
@@ -251,3 +264,95 @@ def test_launcher_prefers_gio_then_xdg_open(monkeypatch: pytest.MonkeyPatch) -> 
     del available["gio"]
     asyncio.run(launcher.open_file("/x/a.txt"))
     assert spawned == [["/usr/bin/xdg-open", "/x/a.txt"]]
+
+
+def test_shorten_folder_examples_and_edges() -> None:
+    assert (
+        shorten_folder("/mnt/games/code/thesisProject/backend/datasets/coco2017/evaluation/prepared_standalone")
+        == "/mnt/…/coco2017/evaluation/prepared_standalone"
+    )
+    assert (
+        shorten_folder("~/Documents/alpha/beta/gamma/delta/epsilon/very_long_folder_name")
+        == "~/…/gamma/delta/epsilon/very_long_folder_name"
+    )
+    assert (
+        shorten_folder("~/Documents/a/b/c/d/e/f/g/very_long_folder_name_here")
+        == "~/…/a/b/c/d/e/f/g/very_long_folder_name_here"
+    )
+    assert shorten_folder("~/Pictures/Trips") == "~/Pictures/Trips"
+    assert shorten_folder("/mnt/games") == "/mnt/games"
+
+    # Single-component paths (or no middle components to elide) stay untouched.
+    assert shorten_folder("/") == "/"
+    assert shorten_folder("~") == "~"
+    long_single = "/" + "a" * 60
+    assert shorten_folder(long_single) == long_single
+    long_home_single = "~/" + "a" * 60
+    assert shorten_folder(long_home_single) == long_home_single
+    long_root_child = "/mnt/" + "a" * 60
+    assert shorten_folder(long_root_child) == long_root_child
+
+    # Always keeps at least the last component even when longer than limit.
+    long_last = "x" * 60
+    assert shorten_folder(f"/mnt/middle/{long_last}") == f"/mnt/\u2026/{long_last}"
+    assert shorten_folder(f"~/middle/{long_last}") == f"~/\u2026/{long_last}"
+
+    # Limit boundary: len == limit untouched, len == limit + 1 shortened; exact fit at limit.
+    at_limit = "/mnt/alpha/beta/gamma"
+    assert shorten_folder(at_limit, limit=len(at_limit)) == at_limit
+    assert shorten_folder(at_limit, limit=len(at_limit) - 1) == "/mnt/…/beta/gamma"
+    exact_fit = "/mnt/alpha/bb/cc"
+    assert shorten_folder(exact_fit, limit=len("/mnt/…/bb/cc")) == "/mnt/…/bb/cc"
+    assert shorten_folder(exact_fit, limit=len("/mnt/…/bb/cc") - 1) == "/mnt/…/cc"
+
+    # Unicode folder names.
+    uni = "~/Документы/проекты/фотографии/лето_2025/архив_снимков_выходные"
+    short_uni = shorten_folder(uni)
+    assert short_uni == "~/…/фотографии/лето_2025/архив_снимков_выходные"
+    assert len(short_uni) <= 48
+    assert "\u2026" in short_uni
+
+
+def test_gnome_description_matches_format_subtext_for_short_paths_and_snippets() -> None:
+    home = Path("/home/user")
+    cases = [
+        _result("/home/user/Pictures/Trips/a.jpg", kind=ft.IMAGE, snippet=""),
+        _result("/home/user/Pictures/Trips/a.jpg", kind=ft.IMAGE, snippet="", locator="01:00–02:00", duplicates=2),
+        _result(
+            "/mnt/games/code/thesisProject/backend/datasets/coco2017/evaluation/prepared_standalone/notes.txt",
+            snippet="  first   line\n\t" + ("word " * 30),
+            locator=" p.\n 12 ",
+            duplicates=3,
+        ),
+        _result("/home/user/notes/a.txt", snippet="plain snippet", duplicates=1),
+    ]
+    for r in cases:
+        assert gnome_description(r, home=home) == format_subtext(r, home=home)
+
+
+def test_gnome_description_shortens_long_parent_and_keeps_suffix() -> None:
+    home = Path("/home/user")
+    r_abs = _result(
+        "/mnt/games/code/thesisProject/backend/datasets/coco2017/evaluation/prepared_standalone/img.jpg",
+        kind=ft.IMAGE,
+        snippet="",
+        duplicates=3,
+    )
+    assert gnome_description(r_abs, home=home) == "/mnt/…/coco2017/evaluation/prepared_standalone  (+3 similar)"
+
+    r_home = _result(
+        "/home/user/Documents/alpha/beta/gamma/delta/epsilon/very_long_folder_name/doc.pdf",
+        kind=ft.PDF,
+        snippet="",
+        locator="  p.\n 4 ",
+        duplicates=2,
+    )
+    assert gnome_description(r_home, home=home) == "p. 4 · ~/…/gamma/delta/epsilon/very_long_folder_name  (+2 similar)"
+
+    async def check_metas() -> None:
+        svc, _ = _service([r_abs], home=home)
+        ids = await svc._run_search(["coco"])
+        metas = await _call_metas(svc, ids)
+        assert metas[0]["description"] == "/mnt/…/coco2017/evaluation/prepared_standalone  (+3 similar)"
+
+    asyncio.run(check_metas())

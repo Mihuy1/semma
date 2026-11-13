@@ -35,11 +35,75 @@ from dbus_fast.service import ServiceInterface, method
 
 from . import filetypes as ft
 from .dbus_names import GNOME_INTERFACE
-from .krunner import KIND_FALLBACK_ICONS, RECENT_RESULTS_MAX, THUMBNAIL_BUDGET_SECONDS, count_alnum, format_subtext, icon_name_for
+from .krunner import (
+    _WS_RE,
+    KIND_FALLBACK_ICONS,
+    RECENT_RESULTS_MAX,
+    THUMBNAIL_BUDGET_SECONDS,
+    count_alnum,
+    icon_name_for,
+    shorten_home,
+    trim_snippet,
+)
 from .search import SearchResult
 from .thumbnails import IconData, Thumbnailer
 
 log = logging.getLogger(__name__)
+
+FOLDER_MAX_CHARS = 48
+
+
+def shorten_folder(path: str, limit: int = FOLDER_MAX_CHARS) -> str:
+    """Shorten a home-shortened folder path in the middle to fit within ``limit`` chars."""
+    if len(path) <= limit:
+        return path
+
+    if path.startswith("~/"):
+        head = "~"
+        rest = [p for p in path[2:].split("/") if p]
+    elif path.startswith("/"):
+        parts = [p for p in path[1:].split("/") if p]
+        if len(parts) <= 1:
+            return path
+        head = "/" + parts[0]
+        rest = parts[1:]
+    else:
+        parts = [p for p in path.split("/") if p]
+        if len(parts) <= 2:
+            return path
+        head = parts[0]
+        rest = parts[1:]
+
+    if len(rest) <= 1:
+        return path
+
+    prefix = f"{head}/…/"
+    kept = [rest[-1]]
+    total = len(prefix) + len(rest[-1])
+    for part in reversed(rest[:-1]):
+        added = 1 + len(part)
+        if total + added > limit:
+            break
+        kept.append(part)
+        total += added
+
+    return prefix + "/".join(reversed(kept))
+
+
+def gnome_description(result: SearchResult, home: Path | None = None) -> str:
+    """Format the one-line description for a GNOME Shell search result."""
+    snippet = trim_snippet(result.snippet) if result.snippet else ""
+    locator = _WS_RE.sub(" ", result.locator).strip() if result.locator else ""
+
+    if snippet:
+        base = f"{locator} · {snippet}" if locator else snippet
+    else:
+        parent = shorten_folder(shorten_home(Path(result.path).parent, home))
+        base = f"{locator} · {parent}" if locator else parent
+
+    if result.duplicates > 0:
+        base = f"{base}  (+{result.duplicates} similar)"
+    return base
 
 
 def gicon_string(path: str, kind: str) -> str:
@@ -207,7 +271,7 @@ class GnomeSearchService(ServiceInterface):
             meta: dict[str, Variant] = {
                 "id": Variant("s", r.path),
                 "name": Variant("s", Path(r.path).name or r.path),
-                "description": Variant("s", format_subtext(r, self._home)),
+                "description": Variant("s", gnome_description(r, self._home)),
                 "clipboardText": Variant("s", r.path),
             }
             icon = thumbs.get(r.path)
