@@ -46,6 +46,7 @@ from .krunner import (
 )
 from .search import SearchResult
 from .thumbnails import IconData, Thumbnailer
+from .viewer import Spot, spot_for, viewer_argv
 
 log = logging.getLogger(__name__)
 
@@ -195,7 +196,13 @@ class GnomeLauncher:
             return True
         return self._spawn_detached(argv)
 
-    async def open_file(self, path: str) -> None:
+    async def open_file(self, path: str, spot: Spot | None = None) -> None:
+        """Open ``path`` with the default application; with a ``spot`` (a PDF hit's page), a
+        default viewer that can be pointed at a page is started with its page options."""
+        if spot is not None:
+            argv = await viewer_argv(path, spot)
+            if argv and await self.spawn(argv):
+                return
         gio = shutil.which("gio")
         if gio and await self.spawn([gio, "open", path]):
             return
@@ -383,15 +390,17 @@ class GnomeSearchService(ServiceInterface):
     @method()
     async def ActivateResult(self, identifier: "s", terms: "as", timestamp: "u"):  # noqa: F821, N802, UP037
         result = self._recent.get(identifier)
+        spot: Spot | None = None
         if result is not None:
             path = result.path
+            spot = spot_for(result)
         elif self._openable_unknown_id(identifier):
             path = identifier
         else:
             log.debug("ActivateResult(%r): unknown id, ignored", identifier)
             return
         try:
-            await self._launcher.open_file(path)
+            await self._launcher.open_file(path, spot=spot)
         except Exception:
             log.exception("ActivateResult(%r) failed", identifier)
 

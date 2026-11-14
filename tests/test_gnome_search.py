@@ -27,6 +27,7 @@ from semma.gnome_search import (
 from semma.krunner import format_subtext
 from semma.search import SearchResult
 from semma.thumbnails import IconData, Thumbnailer
+from semma.viewer import Spot
 
 _NAME_COUNTER = itertools.count(1)
 
@@ -42,8 +43,11 @@ class FakeLauncher(GnomeLauncher):
     def __init__(self) -> None:
         self.opened: list[str] = []
 
-    async def open_file(self, path: str) -> None:
+        self.spots: list[Spot | None] = []
+
+    async def open_file(self, path: str, spot: Spot | None = None) -> None:
         self.opened.append(path)
+        self.spots.append(spot)
 
 
 class FakeThumbnailer(Thumbnailer):
@@ -243,7 +247,7 @@ async def _call_metas(svc: GnomeSearchService, ids: list[str]):
 
 def test_activate_failure_never_raises() -> None:
     class Broken(FakeLauncher):
-        async def open_file(self, path: str) -> None:
+        async def open_file(self, path: str, spot: Spot | None = None) -> None:
             raise OSError("no opener")
 
     async def check() -> None:

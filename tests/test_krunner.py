@@ -32,6 +32,7 @@ from semma.krunner import (
 )
 from semma.search import SearchResult
 from semma.thumbnails import IconData, Thumbnailer
+from semma.viewer import Spot
 
 _NAME_COUNTER = itertools.count(1)
 
@@ -47,9 +48,11 @@ class FakeLauncher(Launcher):
         self.opened_files: list[tuple[str, str | None]] = []
         self.opened_folders: list[tuple[str, str | None]] = []
         self.copied_paths: list[str] = []
+        self.spots: list[Spot | None] = []
 
-    async def open_file(self, path: str, activation_token: str | None = None) -> None:
+    async def open_file(self, path: str, activation_token: str | None = None, spot: Spot | None = None) -> None:
         self.opened_files.append((path, activation_token))
+        self.spots.append(spot)
 
     async def open_folder(self, path: str, activation_token: str | None = None) -> None:
         self.opened_folders.append((path, activation_token))

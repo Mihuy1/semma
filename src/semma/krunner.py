@@ -25,6 +25,7 @@ from . import filetypes as ft
 from .dbus_names import RUNNER_INTERFACE
 from .search import SearchResult
 from .thumbnails import IconData, Thumbnailer
+from .viewer import Spot, spot_for, viewer_argv
 
 log = logging.getLogger(__name__)
 
@@ -230,8 +231,15 @@ class Launcher:
                 except Exception:
                     pass
 
-    async def open_file(self, path: str, activation_token: str | None = None) -> None:
-        """Open ``path`` with the default application (``kde-open``, fallback ``xdg-open``)."""
+    async def open_file(self, path: str, activation_token: str | None = None, spot: Spot | None = None) -> None:
+        """Open ``path`` with the default application (``kde-open``, fallback ``xdg-open``).
+
+        With a ``spot`` (a PDF hit's page), a default viewer that can be pointed at a page is
+        started directly with its page (and search) options instead."""
+        if spot is not None:
+            argv = await viewer_argv(path, spot)
+            if argv and self._spawn_detached(argv, activation_token=activation_token):
+                return
         self._open_with_desktop_opener(path, activation_token=activation_token)
 
     async def open_folder(self, path: str, activation_token: str | None = None) -> None:
@@ -424,7 +432,7 @@ class KRunnerService(ServiceInterface):
         path = result.path
         try:
             if actionId == "":
-                await self._launcher.open_file(path, activation_token=token)
+                await self._launcher.open_file(path, activation_token=token, spot=spot_for(result))
             elif actionId == ACTION_OPEN_FOLDER:
                 await self._launcher.open_folder(path, activation_token=token)
             elif actionId == ACTION_COPY_PATH:
