@@ -235,7 +235,7 @@ class Launcher:
         """Open ``path`` with the default application (``kde-open``, fallback ``xdg-open``).
 
         With a ``spot`` (a PDF hit's page), a default viewer that can be pointed at a page is
-        started directly with its page (and search) options instead."""
+        started directly with its page option instead."""
         if spot is not None:
             argv = await viewer_argv(path, spot)
             if argv and self._spawn_detached(argv, activation_token=activation_token):

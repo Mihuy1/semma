@@ -1,16 +1,14 @@
-"""Open a PDF search hit at its page, and at the matching text where the viewer can search.
+"""Open a PDF search hit at its page in the default PDF viewer.
 
 ``gio open`` / ``kde-open`` / ``xdg-open`` take only a file, so for a PDF hit with a page the
 default PDF application is looked up (``xdg-mime query default application/pdf``), its desktop
-entry's ``Exec`` line read, and the viewer's own options added in front of the file:
+entry's ``Exec`` line read, and the viewer's own page option added in front of the file:
 
-  viewer    page                 text (the hit's opening words)
-  okular    --page N             --find TEXT    searches forward from page N, across lines;
-                                                no match leaves it on page N
-  evince    --page-index=N       --find=TEXT
-  zathura   --page=N             --find=TEXT
-  papers    --page-index=N       (no search option since the Evince fork)
-  firefox   file:///x.pdf#page=N&search=TEXT&phrase=true   (pdf.js)
+  okular    --page N
+  evince    --page-index=N
+  papers    --page-index=N
+  zathura   --page=N
+  firefox   file:///x.pdf#page=N   (pdf.js)
 
 Flatpak entries (``flatpak run ... --command=okular org.kde.okular @@u %U @@``) work the same:
 the options go in front of the ``@@u`` file-forwarding block. Any other viewer, a missing
@@ -29,7 +27,6 @@ from pathlib import Path
 import re
 import shlex
 import shutil
-from urllib.parse import quote
 
 from . import filetypes as ft
 from .search import SearchResult
@@ -39,13 +36,6 @@ log = logging.getLogger(__name__)
 PDF_MIME = "application/pdf"
 MIME_QUERY_TIMEOUT_SECONDS = 2.0
 
-# The search text is the start of the hit's chunk. Chunks start at a paragraph or sentence
-# where they can, so a few words usually sit on one line of the page; a long phrase is more
-# likely to trip over a line break, hyphenation or ligature the viewer extracts differently.
-FIND_MAX_WORDS = 5
-FIND_MAX_CHARS = 48
-FIND_MIN_ALNUM = 6
-
 FILE_FIELD_CODES = frozenset({"%f", "%F", "%u", "%U"})
 DROPPED_FIELD_CODES = frozenset({"%i", "%c", "%k"})
 FLATPAK_FORWARD_MARKERS = frozenset({"@@", "@@u"})
@@ -53,77 +43,29 @@ FLATPAK_FORWARD_MARKERS = frozenset({"@@", "@@u"})
 
 @dataclass(frozen=True, slots=True)
 class Spot:
-    """Where in a document to open: a 1-based page index and optionally text to find on it."""
+    """Where in a document to open: a 1-based page index."""
 
     page: int
-    find: str | None = None
-
-
-def find_phrase(snippet: str) -> str | None:
-    """The first few words of a snippet, trimmed of punctuation at both ends, or None."""
-    words = snippet.removesuffix("…").split()
-    # A page's first chunk often starts with its printed page number or a section number
-    # ("19", "4.2", "[15]") on a line of its own; a phrase spanning that line never matches.
-    while words and not any(c.isalpha() for c in words[0]):
-        words.pop(0)
-    picked: list[str] = []
-    for word in words[:FIND_MAX_WORDS]:
-        if picked and len(" ".join([*picked, word])) > FIND_MAX_CHARS:
-            break
-        picked.append(word)
-    phrase = " ".join(picked)
-    start, end = 0, len(phrase)
-    while start < end and not phrase[start].isalnum():
-        start += 1
-    while end > start and not phrase[end - 1].isalnum():
-        end -= 1
-    phrase = phrase[start:end]
-    if sum(c.isalnum() for c in phrase) < FIND_MIN_ALNUM:
-        return None
-    return phrase
 
 
 def spot_for(result: SearchResult) -> Spot | None:
-    """The page (and text) to open a PDF hit at; None for other kinds or without a page."""
+    """The page to open a PDF hit at; None for other kinds or without a page."""
     if result.kind != ft.PDF or result.position is None:
         return None
     page = int(result.position)
-    if page < 1:
-        return None
-    # Scanned pages are image chunks: their snippet is not text on the page.
-    find = find_phrase(result.snippet) if result.modality == "text" and result.snippet else None
-    return Spot(page, find)
-
-
-def _okular(spot: Spot) -> list[str]:
-    return ["--page", str(spot.page)] + (["--find", spot.find] if spot.find else [])
-
-
-def _evince(spot: Spot) -> list[str]:
-    return [f"--page-index={spot.page}"] + ([f"--find={spot.find}"] if spot.find else [])
-
-
-def _zathura(spot: Spot) -> list[str]:
-    return [f"--page={spot.page}"] + ([f"--find={spot.find}"] if spot.find else [])
-
-
-def _papers(spot: Spot) -> list[str]:
-    return [f"--page-index={spot.page}"]
+    return Spot(page) if page >= 1 else None
 
 
 def _pdfjs_uri(path: str, spot: Spot) -> str:
-    fragment = f"page={spot.page}"
-    if spot.find:
-        fragment += f"&search={quote(spot.find, safe='')}&phrase=true"
-    return f"{Path(path).as_uri()}#{fragment}"
+    return f"{Path(path).as_uri()}#page={spot.page}"
 
 
 # Program name -> options placed before the file.
 OPTION_VIEWERS: dict[str, Callable[[Spot], list[str]]] = {
-    "okular": _okular,
-    "evince": _evince,
-    "zathura": _zathura,
-    "papers": _papers,
+    "okular": lambda spot: ["--page", str(spot.page)],
+    "evince": lambda spot: [f"--page-index={spot.page}"],
+    "papers": lambda spot: [f"--page-index={spot.page}"],
+    "zathura": lambda spot: [f"--page={spot.page}"],
 }
 # Program name -> the file argument replaced by a URI.
 URI_VIEWERS: dict[str, Callable[[str, Spot], str]] = {

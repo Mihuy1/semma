@@ -13,10 +13,10 @@ from semma import viewer
 from semma.gnome_search import GnomeLauncher, GnomeSearchService
 from semma.krunner import KRunnerService, Launcher
 from semma.search import SearchResult
-from semma.viewer import Spot, build_argv, find_phrase, parse_exec, spot_for, viewer_name
+from semma.viewer import Spot, build_argv, parse_exec, spot_for, viewer_name
 
 PDF = "/home/u/Docs/paper one.pdf"
-SPOT = Spot(7, "quantum walrus sings")
+SPOT = Spot(7)
 
 
 def _pdf_result(position: float | None = 7.0, modality: str = "text",
@@ -27,28 +27,11 @@ def _pdf_result(position: float | None = 7.0, modality: str = "text",
     )
 
 
-def test_find_phrase_takes_first_words_trimmed() -> None:
-    assert find_phrase("Quantum walrus sings at midnight on the shore…") == "Quantum walrus sings at midnight"
-    assert find_phrase("“Hello there,” said the walrus.") == "Hello there,” said the walrus"
-    # Leading page and section numbers are skipped: they sit on a line of their own.
-    assert find_phrase("(1) Introduction") == "Introduction"
-    assert find_phrase("19 Ensin kuvan EXIF-metatietoon mahdollisesti tallennettu") == \
-        "Ensin kuvan EXIF-metatietoon mahdollisesti"
-    assert find_phrase("12 4.2 Vision Transformer -arkkitehtuuri Vision") == "Vision Transformer -arkkitehtuuri Vision"
-    assert find_phrase("[15] Rafal Jozefowicz, Oriol Vinyals") == "Rafal Jozefowicz, Oriol Vinyals"
-    assert find_phrase("12 34 5.6") is None
-    # Long words: stop before the phrase exceeds the char budget.
-    long = "Supercalifragilistic expialidocious antidisestablishmentarianism words here"
-    assert find_phrase(long) == "Supercalifragilistic expialidocious"
-    assert find_phrase("a b") is None and find_phrase("") is None and find_phrase("— … —") is None
-
-
 def test_spot_for_only_pdf_hits_with_a_page() -> None:
-    assert spot_for(_pdf_result()) == Spot(7, "Quantum walrus sings at midnight")
+    assert spot_for(_pdf_result()) == Spot(7)
+    assert spot_for(_pdf_result(modality="image")) == Spot(7)  # a scanned page
     assert spot_for(_pdf_result(position=None)) is None
     assert spot_for(_pdf_result(position=0.0)) is None
-    assert spot_for(_pdf_result(modality="image", snippet="faint ocr words here")) == Spot(7, None)
-    assert spot_for(_pdf_result(snippet="")) == Spot(7, None)
     assert spot_for(replace(_pdf_result(), kind=ft.OFFICE)) is None
 
 
@@ -64,15 +47,11 @@ def test_viewer_name_native_env_and_flatpak() -> None:
 
 
 def test_build_argv_per_viewer() -> None:
-    assert build_argv(["okular", "%U"], PDF, SPOT) == ["okular", "--page", "7", "--find", "quantum walrus sings", PDF]
-    assert build_argv(["okular", "%U"], PDF, Spot(2)) == ["okular", "--page", "2", PDF]
-    assert build_argv(["evince", "%U"], PDF, SPOT) == ["evince", "--page-index=7", "--find=quantum walrus sings", PDF]
-    assert build_argv(["zathura", "%f"], PDF, SPOT) == ["zathura", "--page=7", "--find=quantum walrus sings", PDF]
-    # Papers has no search option: page only.
+    assert build_argv(["okular", "%U"], PDF, SPOT) == ["okular", "--page", "7", PDF]
+    assert build_argv(["evince", "%U"], PDF, SPOT) == ["evince", "--page-index=7", PDF]
     assert build_argv(["papers", "%U"], PDF, SPOT) == ["papers", "--page-index=7", PDF]
-    assert build_argv(["firefox", "%u"], PDF, SPOT) == [
-        "firefox", "file:///home/u/Docs/paper%20one.pdf#page=7&search=quantum%20walrus%20sings&phrase=true"]
-    assert build_argv(["firefox", "%u"], PDF, Spot(3)) == ["firefox", "file:///home/u/Docs/paper%20one.pdf#page=3"]
+    assert build_argv(["zathura", "%f"], PDF, SPOT) == ["zathura", "--page=7", PDF]
+    assert build_argv(["firefox", "%u"], PDF, SPOT) == ["firefox", "file:///home/u/Docs/paper%20one.pdf#page=7"]
 
 
 def test_build_argv_flatpak_options_go_before_forwarding_block() -> None:
@@ -80,7 +59,7 @@ def test_build_argv_flatpak_options_go_before_forwarding_block() -> None:
                  "org.kde.okular", "@@u", "%U", "@@"]
     assert build_argv(exec_argv, PDF, SPOT) == [
         "/usr/bin/flatpak", "run", "--branch=stable", "--command=okular", "--file-forwarding",
-        "org.kde.okular", "--page", "7", "--find", "quantum walrus sings", "@@u", PDF, "@@"]
+        "org.kde.okular", "--page", "7", "@@u", PDF, "@@"]
 
 
 def test_build_argv_field_codes() -> None:
@@ -254,7 +233,7 @@ def test_services_pass_the_hit_spot(tmp_path: Path) -> None:
         krunner = KRunnerService(_no_search, launcher=rec)  # type: ignore[arg-type]
         match_id = krunner._remember(hit)
         await type(krunner).__dict__["Run"].__wrapped__(krunner, match_id, "")
-        assert rec.calls == [(PDF, Spot(7, "Quantum walrus sings at midnight"))]
+        assert rec.calls == [(PDF, Spot(7))]
 
         rec.calls.clear()
         gnome = GnomeSearchService(_no_search, launcher=rec)  # type: ignore[arg-type]
@@ -264,6 +243,6 @@ def test_services_pass_the_hit_spot(tmp_path: Path) -> None:
         doc = tmp_path / "old.pdf"
         doc.write_bytes(b"%PDF")
         await activate(gnome, str(doc), [], 0)
-        assert rec.calls == [(PDF, Spot(7, "Quantum walrus sings at midnight")), (str(doc), None)]
+        assert rec.calls == [(PDF, Spot(7)), (str(doc), None)]
 
     asyncio.run(check())
