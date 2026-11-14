@@ -336,19 +336,16 @@ def cmd_ctl(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
-def _refuse_in_package() -> bool:
-    """A package already installs these files for every user; per-user copies would take
-    precedence over them and go stale at the next update."""
-    if Path(sys.base_prefix) != Path("/usr/lib/semma/python"):
-        return False
-    print("Semma was installed from a package, which already added it to KRunner and GNOME Shell "
-          "for every user: there is nothing to install.", file=sys.stderr)
-    return True
+def is_packaged() -> bool:
+    """True when running from the rpm/deb package's private interpreter.
+
+    A package installs the desktop files for every user; per-user copies written by the
+    install commands would take precedence over them and go stale at the next update, so
+    those commands are not registered in a packaged install."""
+    return Path(sys.base_prefix) == Path("/usr/lib/semma/python")
 
 
 def cmd_install_kde(args: argparse.Namespace, cfg: Config) -> int:
-    if _refuse_in_package():
-        return 1
     from .install import install_kde
 
     for path in install_kde(
@@ -393,8 +390,6 @@ def _print_integration_status(st: dict[str, object], home: Path) -> int:
 
 
 def cmd_install_gnome(args: argparse.Namespace, cfg: Config) -> int:
-    if _refuse_in_package():
-        return 1
     from .install import install_gnome
 
     res = install_gnome(python=getattr(args, "python", None), enable=not args.no_enable)
@@ -521,38 +516,39 @@ def build_parser() -> argparse.ArgumentParser:
     ct.add_argument("action", choices=["status", "pause", "resume", "rescan", "retry-failed"])
     ct.set_defaults(func=cmd_ctl)
 
-    ik = sub.add_parser("install-kde", help="install the KRunner plugin and the systemd user service")
-    ik.add_argument("--no-enable", action="store_true", help="write the files but do not start the service")
-    ik.add_argument("--no-restart", action="store_true", help="do not restart KRunner")
-    ik.set_defaults(func=cmd_install_kde)
+    if not is_packaged():
+        ik = sub.add_parser("install-kde", help="install the KRunner plugin and the systemd user service")
+        ik.add_argument("--no-enable", action="store_true", help="write the files but do not start the service")
+        ik.add_argument("--no-restart", action="store_true", help="do not restart KRunner")
+        ik.set_defaults(func=cmd_install_kde)
 
-    uk = sub.add_parser("uninstall-kde", help="stop the service and remove the KRunner plugin")
-    uk.set_defaults(func=cmd_uninstall_kde)
+        uk = sub.add_parser("uninstall-kde", help="stop the service and remove the KRunner plugin")
+        uk.set_defaults(func=cmd_uninstall_kde)
 
-    ks = sub.add_parser("kde-status", help="show whether the KDE integration is installed and running")
-    ks.set_defaults(func=cmd_kde_status)
+        ks = sub.add_parser("kde-status", help="show whether the KDE integration is installed and running")
+        ks.set_defaults(func=cmd_kde_status)
 
-    ig = sub.add_parser("install-gnome", help="install the GNOME Shell search provider and the systemd user service")
-    ig.add_argument("--python", metavar="PATH", help="Python interpreter for the generated service files")
-    ig.add_argument("--no-enable", action="store_true", help="write the files but do not start the service")
-    ig.set_defaults(func=cmd_install_gnome)
+        ig = sub.add_parser("install-gnome", help="install the GNOME Shell search provider and the systemd user service")
+        ig.add_argument("--python", metavar="PATH", help="Python interpreter for the generated service files")
+        ig.add_argument("--no-enable", action="store_true", help="write the files but do not start the service")
+        ig.set_defaults(func=cmd_install_gnome)
 
-    ug = sub.add_parser("uninstall-gnome", help="stop the service and remove the GNOME Shell search provider")
-    ug.set_defaults(func=cmd_uninstall_gnome)
+        ug = sub.add_parser("uninstall-gnome", help="stop the service and remove the GNOME Shell search provider")
+        ug.set_defaults(func=cmd_uninstall_gnome)
 
-    gs = sub.add_parser("gnome-status", help="show whether the GNOME integration is installed and running")
-    gs.set_defaults(func=cmd_gnome_status)
+        gs = sub.add_parser("gnome-status", help="show whether the GNOME integration is installed and running")
+        gs.set_defaults(func=cmd_gnome_status)
 
-    inst = sub.add_parser("install", help="install desktop search integration (auto-detects KDE or GNOME)")
-    inst.add_argument("--desktop", choices=["kde", "gnome"], help="desktop environment (default: auto-detect)")
-    inst.add_argument("--python", metavar="PATH", help="Python interpreter for the generated service files")
-    inst.add_argument("--no-enable", action="store_true", help="write the files but do not start the service")
-    inst.add_argument("--no-restart", action="store_true", help="do not restart KRunner (KDE only)")
-    inst.set_defaults(func=cmd_install)
+        inst = sub.add_parser("install", help="install desktop search integration (auto-detects KDE or GNOME)")
+        inst.add_argument("--desktop", choices=["kde", "gnome"], help="desktop environment (default: auto-detect)")
+        inst.add_argument("--python", metavar="PATH", help="Python interpreter for the generated service files")
+        inst.add_argument("--no-enable", action="store_true", help="write the files but do not start the service")
+        inst.add_argument("--no-restart", action="store_true", help="do not restart KRunner (KDE only)")
+        inst.set_defaults(func=cmd_install)
 
-    uninst = sub.add_parser("uninstall", help="remove desktop search integration (auto-detects KDE or GNOME)")
-    uninst.add_argument("--desktop", choices=["kde", "gnome"], help="desktop environment (default: auto-detect)")
-    uninst.set_defaults(func=cmd_uninstall)
+        uninst = sub.add_parser("uninstall", help="remove desktop search integration (auto-detects KDE or GNOME)")
+        uninst.add_argument("--desktop", choices=["kde", "gnome"], help="desktop environment (default: auto-detect)")
+        uninst.set_defaults(func=cmd_uninstall)
     return p
 
 
