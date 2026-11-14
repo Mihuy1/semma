@@ -1,4 +1,4 @@
-"""gemmasearchd: the long-running service behind KRunner.
+"""semmad: the long-running service behind KRunner.
 
 Runs as a systemd user service (Type=dbus) that owns `dbus_names.BUS_NAME` on the session bus,
 answers KRunner queries (`krunner.KRunnerService` at RUNNER_PATH) and GNOME Shell overview
@@ -9,16 +9,16 @@ Threads and what runs where:
 
   event loop (main thread)   D-Bus, query debounce/stale-cancellation, idle-unload timer.
                              Never touches SQLite or the model directly.
-  gemmasearch-search (1)     every query: embed_query + Searcher.search_vector on this one
+  semma-search (1)     every query: embed_query + Searcher.search_vector on this one
                              thread (its read-only connection and the in-memory vector cache);
                              also Status counts and RetryFailed.
-  gemmasearch-model (1)      model load (shared by all queries waiting for it) and unload.
-  gemmasearch-worker         scans (startup, inotify, daily, Rescan()) and indexing slices.
+  semma-model (1)      model load (shared by all queries waiting for it) and unload.
+  semma-worker         scans (startup, inotify, daily, Rescan()) and indexing slices.
                              nice 10 + idle IO class; the indexer's extraction thread and the
                              ffmpeg processes it starts inherit both.
-  gemmasearch-gpumon         while a slice runs: samples other processes' GPU use every
+  semma-gpumon         while a slice runs: samples other processes' GPU use every
                              gpu_check_seconds and stops the slice when the GPU is busy.
-  gemmasearch-watcher        (watcher.DirWatcher) inotify; changes become partial rescans.
+  semma-watcher        (watcher.DirWatcher) inotify; changes become partial rescans.
 
 The model is shared: queries take it through the embedder's GpuLock with priority, so a query
 waits for at most the index batch already on the GPU. Indexing runs in slices
@@ -54,7 +54,7 @@ from .scanner import Scanner, _is_app_install
 from .search import Searcher, SearchResult
 from .store import Store
 
-log = logging.getLogger("gemmasearch.daemon")
+log = logging.getLogger("semma.daemon")
 
 MIN_QUERY_CHARS = 3
 PROGRESS_LOG_EVERY = 100  # files
@@ -252,8 +252,8 @@ class Daemon:
         self._last_query = 0.0  # monotonic
         self._load_task: asyncio.Future[None] | None = None
         self._idle_task: asyncio.Task[None] | None = None
-        self._search_exec = ThreadPoolExecutor(1, thread_name_prefix="gemmasearch-search")
-        self._model_exec = ThreadPoolExecutor(1, thread_name_prefix="gemmasearch-model")
+        self._search_exec = ThreadPoolExecutor(1, thread_name_prefix="semma-search")
+        self._model_exec = ThreadPoolExecutor(1, thread_name_prefix="semma-model")
         self._started = time.monotonic()
         self._running = False
         self._closed = False
@@ -276,10 +276,10 @@ class Daemon:
                 self.watcher = None
         with self._cv:
             self._scan_full = True
-        self._worker = threading.Thread(target=self._worker_main, name="gemmasearch-worker", daemon=True)
+        self._worker = threading.Thread(target=self._worker_main, name="semma-worker", daemon=True)
         self._worker.start()
         if self.gpu_monitor is not None:
-            self._gpu_thread = threading.Thread(target=self._gpu_main, name="gemmasearch-gpumon", daemon=True)
+            self._gpu_thread = threading.Thread(target=self._gpu_main, name="semma-gpumon", daemon=True)
             self._gpu_thread.start()
         self._idle_task = asyncio.ensure_future(self._idle_loop())
 
@@ -682,7 +682,7 @@ class Daemon:
         try:
             st = self.indexer.run(stop=self._slice_stop, progress=self._on_progress)
         except ModelMismatch as exc:
-            self._set_phase("paused", f"{exc}; run `gemmasearch index --rebuild`")
+            self._set_phase("paused", f"{exc}; run `semma index --rebuild`")
             self._wait(600)
             return
         finally:
@@ -852,7 +852,7 @@ STATUS_SIGNATURES = {
 
 
 class Control(ServiceInterface):
-    """`io.github.GemmaSearch.Control1`: status and indexing control for the CLI."""
+    """`io.github.Semma.Control1`: status and indexing control for the CLI."""
 
     def __init__(self, daemon: Daemon) -> None:
         super().__init__(dbus_names.CONTROL_INTERFACE)
@@ -950,7 +950,7 @@ def setup_logging(level: str | int | None = None) -> None:
     root = logging.getLogger()
     if root.handlers:
         return
-    level = level or os.environ.get("GEMMASEARCH_LOG_LEVEL", "INFO")
+    level = level or os.environ.get("SEMMA_LOG_LEVEL", "INFO")
     fmt = "%(levelname)s %(name)s: %(message)s"
     if "JOURNAL_STREAM" not in os.environ:
         fmt = "%(asctime)s " + fmt
@@ -965,7 +965,7 @@ def setup_logging(level: str | int | None = None) -> None:
 
 
 def run_daemon(cfg: Config, *, bus_address: str | None = None, bus_name: str = dbus_names.BUS_NAME) -> int:
-    """Entry point of `gemmasearch daemon`: runs until SIGTERM/SIGINT, returns the exit status."""
+    """Entry point of `semma daemon`: runs until SIGTERM/SIGINT, returns the exit status."""
     setup_logging()
 
     async def main() -> int:

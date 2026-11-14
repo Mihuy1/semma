@@ -8,11 +8,11 @@ import numpy as np
 import pytest
 from fakes import ExtractionError, FakeEmbedder, FakeExtractor
 
-from gemmasearch.config import Config, load_config
-from gemmasearch.indexer import Indexer
-from gemmasearch.scanner import Scanner
-from gemmasearch.search import Searcher, _file_patterns, _patterns, query_terms
-from gemmasearch.store import MIGRATIONS, SCHEMA_V1, Store, connect
+from semma.config import Config, load_config
+from semma.indexer import Indexer
+from semma.scanner import Scanner
+from semma.search import Searcher, _file_patterns, _patterns, query_terms
+from semma.store import MIGRATIONS, SCHEMA_V1, Store, connect
 
 DOCS = {
     "cats.md": "the cat sleeps on the warm sofa all afternoon",

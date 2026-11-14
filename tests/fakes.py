@@ -11,8 +11,8 @@ from typing import Any
 
 import numpy as np
 
-from gemmasearch.config import Config
-from gemmasearch.extract.base import Chunk, ExtractionError
+from semma.config import Config
+from semma.extract.base import Chunk, ExtractionError
 
 DIM = 768
 

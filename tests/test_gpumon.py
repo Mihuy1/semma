@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gemmasearch.gpumon import GpuMonitor, parse_pmon_output
+from semma.gpumon import GpuMonitor, parse_pmon_output
 
 SAMPLE_PMON = """\
 # gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command
@@ -115,7 +115,7 @@ def test_timeout_marks_unavailable_until_ttl_expires(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     now = [1000.0]
-    monkeypatch.setattr("gemmasearch.gpumon.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("semma.gpumon.time.monotonic", lambda: now[0])
 
     mon = GpuMonitor(unavailable_ttl=600.0)
     assert mon.other_load() is None

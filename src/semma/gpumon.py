@@ -90,7 +90,7 @@ def parse_pmon_output(
 
 
 class GpuMonitor:
-    """Monitor NVIDIA GPU SM utilization of non-GemmaSearch processes."""
+    """Monitor NVIDIA GPU SM utilization of non-Semma processes."""
 
     def __init__(
         self,

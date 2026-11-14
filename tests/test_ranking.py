@@ -10,11 +10,11 @@ from fakes import FakeEmbedder
 from test_index import DOCS, make_cfg, run, scan, write_docs
 from test_review_fixes import make_env, names, put_background, put_vectors, unit, with_cos
 
-from gemmasearch import filetypes as ft
-from gemmasearch import search as search_mod
-from gemmasearch.config import load_config
-from gemmasearch.search import STD_FLOOR, Searcher, is_lookup, meaning_scale, query_words
-from gemmasearch.store import Store
+from semma import filetypes as ft
+from semma import search as search_mod
+from semma.config import load_config
+from semma.search import STD_FLOOR, Searcher, is_lookup, meaning_scale, query_words
+from semma.store import Store
 
 
 def add_text(store: Store, path_like: str, text: str) -> None:

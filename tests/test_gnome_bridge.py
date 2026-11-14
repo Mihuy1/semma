@@ -15,7 +15,7 @@ from dbus_fast.aio import MessageBus
 from dbus_fast.service import ServiceInterface, method
 import pytest
 
-from gemmasearch.dbus_names import BUS_NAME, GNOME_INTERFACE, GNOME_PATH
+from semma.dbus_names import BUS_NAME, GNOME_INTERFACE, GNOME_PATH
 
 BRIDGE_PATH = Path(__file__).resolve().parent.parent / "scripts" / "gnome_bridge.py"
 
@@ -75,7 +75,7 @@ class FakeUpstreamSearchProvider(ServiceInterface):
         if self.delay:
             await asyncio.sleep(self.delay)
         if self.mode == "error":
-            raise DBusError("io.github.GemmaSearch.TestError", "upstream failure")
+            raise DBusError("io.github.Semma.TestError", "upstream failure")
         return [f"doc:{'_'.join(terms)}"]
 
     @method()
@@ -91,7 +91,7 @@ class FakeUpstreamSearchProvider(ServiceInterface):
         if self.delay:
             await asyncio.sleep(self.delay)
         if self.mode == "error":
-            raise DBusError("io.github.GemmaSearch.TestError", "metas failure")
+            raise DBusError("io.github.Semma.TestError", "metas failure")
         return [
             {
                 "id": Variant("s", ident),

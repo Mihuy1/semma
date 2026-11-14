@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from gemmasearch import filetypes as ft
-from gemmasearch.config import Config, apply_overrides, load_config
-from gemmasearch.priority import Scorer
-from gemmasearch.scanner import Scanner
-from gemmasearch.store import Store
+from semma import filetypes as ft
+from semma.config import Config, apply_overrides, load_config
+from semma.priority import Scorer
+from semma.scanner import Scanner
+from semma.store import Store
 
 NOW = 1_800_000_000.0
 DAY = 86_400

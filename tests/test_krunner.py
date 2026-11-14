@@ -1,4 +1,4 @@
-"""Tests for ``gemmasearch.krunner`` (D-Bus ``org.kde.krunner1`` service)."""
+"""Tests for ``semma.krunner`` (D-Bus ``org.kde.krunner1`` service)."""
 
 from __future__ import annotations
 
@@ -14,9 +14,9 @@ import numpy as np
 from PIL import Image
 import pytest
 
-from gemmasearch import filetypes as ft
-from gemmasearch.dbus_names import RUNNER_INTERFACE, RUNNER_PATH
-from gemmasearch.krunner import (
+from semma import filetypes as ft
+from semma.dbus_names import RUNNER_INTERFACE, RUNNER_PATH
+from semma.krunner import (
     ACTION_COPY_PATH,
     ACTION_OPEN_FOLDER,
     CATEGORY_LABEL,
@@ -30,8 +30,8 @@ from gemmasearch.krunner import (
     icon_name_for,
     raw_relevance,
 )
-from gemmasearch.search import SearchResult
-from gemmasearch.thumbnails import IconData, Thumbnailer
+from semma.search import SearchResult
+from semma.thumbnails import IconData, Thumbnailer
 
 _NAME_COUNTER = itertools.count(1)
 
@@ -121,7 +121,7 @@ async def exported_krunner(
     service: KRunnerService,
 ) -> AsyncIterator[tuple[object, MessageBus, str]]:
     """Export ``service`` on the user's session bus under a unique throwaway name and yield a client proxy."""
-    bus_name = f"io.github.GemmaSearch.Test{os.getpid()}_{next(_NAME_COUNTER)}"
+    bus_name = f"io.github.Semma.Test{os.getpid()}_{next(_NAME_COUNTER)}"
     server_bus = await MessageBus().connect()
     client_bus = await MessageBus().connect()
     try:

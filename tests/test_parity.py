@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from gemmasearch.config import load_config
-from gemmasearch.embedder import (
+from semma.config import load_config
+from semma.embedder import (
     DEFAULT_MAX_TOKENS,
     GGUF_SPECS,
     Embedder,
@@ -195,13 +195,13 @@ def test_resolve_paths_and_ensure_model_file_hit(tmp_path: Path, monkeypatch: py
     cfg.model_dir = tmp_path / "cfg_models"
     cfg.llama_lib_dir = tmp_path / "cfg_libs"
 
-    monkeypatch.delenv("GEMMASEARCH_MODEL_DIR", raising=False)
-    monkeypatch.delenv("GEMMASEARCH_LLAMA_LIB_DIR", raising=False)
+    monkeypatch.delenv("SEMMA_MODEL_DIR", raising=False)
+    monkeypatch.delenv("SEMMA_LLAMA_LIB_DIR", raising=False)
     assert resolve_model_dir(cfg) == tmp_path / "cfg_models"
     assert resolve_llama_lib_dir(cfg) == tmp_path / "cfg_libs"
 
-    monkeypatch.setenv("GEMMASEARCH_MODEL_DIR", str(tmp_path / "env_models"))
-    monkeypatch.setenv("GEMMASEARCH_LLAMA_LIB_DIR", str(tmp_path / "env_libs"))
+    monkeypatch.setenv("SEMMA_MODEL_DIR", str(tmp_path / "env_models"))
+    monkeypatch.setenv("SEMMA_LLAMA_LIB_DIR", str(tmp_path / "env_libs"))
     assert resolve_model_dir(cfg) == tmp_path / "env_models"
     assert resolve_llama_lib_dir(cfg) == tmp_path / "env_libs"
 

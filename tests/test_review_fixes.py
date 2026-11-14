@@ -15,15 +15,15 @@ import pytest
 from fakes import DIM, FakeEmbedder, FakeExtractor, bag_of_words
 from test_index import make_cfg, run, scan, statuses, table_counts, write_docs
 
-from gemmasearch import config as config_mod
-from gemmasearch import indexer as indexer_mod
-from gemmasearch.cli import main as cli_main
-from gemmasearch.config import MAX_KNN_K, load_config
-from gemmasearch.embedder import Embedder, GpuLock, LlamaOOMError
-from gemmasearch.extract.base import Chunk
-from gemmasearch.indexer import INDEX_FORMAT_VERSION, Indexer, ModelMismatch
-from gemmasearch.search import Searcher
-from gemmasearch.store import SCHEMA_V1, SCHEMA_V2, Store, dir_terms
+from semma import config as config_mod
+from semma import indexer as indexer_mod
+from semma.cli import main as cli_main
+from semma.config import MAX_KNN_K, load_config
+from semma.embedder import Embedder, GpuLock, LlamaOOMError
+from semma.extract.base import Chunk
+from semma.indexer import INDEX_FORMAT_VERSION, Indexer, ModelMismatch
+from semma.search import Searcher
+from semma.store import SCHEMA_V1, SCHEMA_V2, Store, dir_terms
 
 
 def names(results) -> list[str]:
@@ -245,7 +245,7 @@ def test_cli_index_refuses_model_change(tmp_path: Path, capsys) -> None:
 
 
 def test_migration_v2_to_v3(tmp_path: Path) -> None:
-    from gemmasearch.store import connect
+    from semma.store import connect
 
     path = tmp_path / "v2.db"
     db = connect(path)
@@ -272,7 +272,7 @@ def test_migration_v2_to_v3(tmp_path: Path) -> None:
 
 
 def test_concurrent_migration(tmp_path: Path) -> None:
-    from gemmasearch.store import connect
+    from semma.store import connect
 
     path = tmp_path / "v1.db"
     db = connect(path)
@@ -427,7 +427,7 @@ def test_oom_halves_and_remembers_the_batch_size() -> None:
 
 
 def test_regrows_after_many_clean_batches(monkeypatch) -> None:
-    from gemmasearch import embedder as emb_mod
+    from semma import embedder as emb_mod
 
     monkeypatch.setattr(emb_mod, "OOM_REGROW_AFTER", 3)
     e = fake_embedder(max_batch=2)
@@ -440,7 +440,7 @@ def test_regrows_after_many_clean_batches(monkeypatch) -> None:
 
 
 def test_non_oom_errors_are_not_retried() -> None:
-    from gemmasearch.embedder import _is_oom
+    from semma.embedder import _is_oom
 
     assert not _is_oom(RuntimeError("out of memory"))  # e.g. a host-side allocator message
     e = fake_embedder()
@@ -460,7 +460,7 @@ def test_query_cache_and_float32_normalisation() -> None:
 
 
 def test_embedder_query_path_loads_text_only_and_reuses_full_model(tmp_path: Path, monkeypatch) -> None:
-    from gemmasearch import embedder as emb_mod
+    from semma import embedder as emb_mod
 
     worker_calls: list[dict] = []
     workers: list[StubWorker] = []
@@ -552,7 +552,7 @@ def test_embedder_query_path_loads_text_only_and_reuses_full_model(tmp_path: Pat
 
 
 def test_query_device_cpu_selects_float32_cpu_and_invalid_warns(tmp_path: Path, monkeypatch, capsys) -> None:
-    from gemmasearch import embedder as emb_mod
+    from semma import embedder as emb_mod
 
     worker_calls: list[dict] = []
 
@@ -640,7 +640,7 @@ class _ConcurrencyStubWorker:
 
 
 def _cpu_query_embedder(monkeypatch) -> Embedder:
-    from gemmasearch import embedder as emb_mod
+    from semma import embedder as emb_mod
 
     _ConcurrencyStubWorker.created = []
     _ConcurrencyStubWorker.load_seconds = 0.0
@@ -969,7 +969,7 @@ def test_vector_cache_falls_back_when_too_big(tmp_path: Path) -> None:
 
 
 def test_common_text_terms_are_dropped_at_scale(tmp_path: Path, monkeypatch) -> None:
-    import gemmasearch.search as search_mod
+    import semma.search as search_mod
 
     monkeypatch.setattr(search_mod, "TEXT_MAX_DF", 3)
     docs = {f"d{i}.md": f"the common words and {w}" for i, w in enumerate(["rocket", "bread", "cat", "dog", "fish"])}

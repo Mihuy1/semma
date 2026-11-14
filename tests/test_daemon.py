@@ -1,7 +1,7 @@
 """Daemon tests: no GPU, fake embedder, stub watcher/GPU monitor.
 
 D-Bus tests use the user's session bus with a throwaway bus name per test (never the real
-`io.github.GemmaSearch`); they are skipped when there is no session bus.
+`io.github.Semma`); they are skipped when there is no session bus.
 """
 
 from __future__ import annotations
@@ -21,10 +21,10 @@ from typing import Any
 import pytest
 from fakes import FakeEmbedder, FakeExtractor
 
-from gemmasearch import daemon as daemon_mod
-from gemmasearch.config import Config, load_config
-from gemmasearch.daemon import Daemon, DaemonNotRunning, control_call, daemon_status, partial_scan_roots, serve
-from gemmasearch.store import Store
+from semma import daemon as daemon_mod
+from semma.config import Config, load_config
+from semma.daemon import Daemon, DaemonNotRunning, control_call, daemon_status, partial_scan_roots, serve
+from semma.store import Store
 
 DOCS = {
     "cats.md": "the cat sleeps on the warm sofa all afternoon",
@@ -37,7 +37,7 @@ _names = itertools.count()
 
 
 def test_bus_name() -> str:
-    return f"io.github.GemmaSearch.Test{os.getpid()}_{next(_names)}"
+    return f"io.github.Semma.Test{os.getpid()}_{next(_names)}"
 
 
 test_bus_name.__test__ = False  # type: ignore[attr-defined]
@@ -771,8 +771,8 @@ def test_worker_survives_errors(home: Path, monkeypatch: pytest.MonkeyPatch) -> 
 def test_indexing_slices_do_not_leak_connections(tmp_path: Path) -> None:
     write_docs(tmp_path, {f"doc{i}.md": f"text {i}" for i in range(5)})
     cfg = make_cfg(tmp_path)
-    from gemmasearch.indexer import Indexer
-    from gemmasearch.scanner import Scanner
+    from semma.indexer import Indexer
+    from semma.scanner import Scanner
 
     store = Store(cfg.db_path)
     try:
@@ -831,12 +831,12 @@ def test_control_interface_over_dbus(home: Path) -> None:
 
 @needs_bus
 def test_krunner_match_over_dbus(home: Path) -> None:
-    pytest.importorskip("gemmasearch.krunner")
+    pytest.importorskip("semma.krunner")
     from dbus_fast import Message, MessageType
     from dbus_fast.aio import MessageBus
 
-    from gemmasearch import dbus_names
-    from gemmasearch.krunner import KRunnerService
+    from semma import dbus_names
+    from semma.krunner import KRunnerService
 
     async def main() -> None:
         name = test_bus_name()
@@ -868,9 +868,9 @@ def test_serve_exports_krunner_and_gnome_independently(home: Path, broken: str |
     from dbus_fast import Message, MessageType
     from dbus_fast.aio import MessageBus
 
-    from gemmasearch import dbus_names
-    from gemmasearch.gnome_search import GnomeSearchService
-    from gemmasearch.krunner import KRunnerService
+    from semma import dbus_names
+    from semma.gnome_search import GnomeSearchService
+    from semma.krunner import KRunnerService
 
     def boom(*_a: Any, **_kw: Any) -> Any:
         raise RuntimeError("factory failed")
@@ -919,8 +919,8 @@ def test_sigterm_exits_cleanly(tmp_path: Path) -> None:
     conf = tmp_path / "config.toml"
     conf.write_text(f'db_path = "{tmp_path}/db/index.db"\n[scan]\nroots = ["{tmp_path}/empty"]\n'
                     f"include_mounts = false\n", encoding="utf-8")
-    code = ("import sys\nfrom pathlib import Path\nfrom gemmasearch.config import load_config\n"
-            "from gemmasearch.daemon import run_daemon\n"
+    code = ("import sys\nfrom pathlib import Path\nfrom semma.config import load_config\n"
+            "from semma.daemon import run_daemon\n"
             f"cfg = load_config(path=Path({str(conf)!r}), home=Path({str(tmp_path)!r}))\n"
             f"sys.exit(run_daemon(cfg, bus_name={name!r}))\n")
     proc = subprocess.Popen([sys.executable, "-c", code], stderr=subprocess.PIPE, text=True)

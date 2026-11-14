@@ -314,7 +314,7 @@ class Indexer:
                 self.store.release_thread()  # the queue reader's connection (one per run)
             put((_DONE,))
 
-        thread = threading.Thread(target=work, name="gemmasearch-extract", daemon=True)
+        thread = threading.Thread(target=work, name="semma-extract", daemon=True)
         thread.start()
         try:
             while True:

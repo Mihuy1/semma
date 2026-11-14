@@ -132,9 +132,9 @@ def gicon_string(path: str, kind: str) -> str:
 class GnomeLauncher:
     """Opens files with the default application (``gio open``, fallback ``xdg-open``).
 
-    The daemon runs as ``gemmasearch.service`` with ``KillMode=control-group``: anything it
+    The daemon runs as ``semma.service`` with ``KillMode=control-group``: anything it
     spawns directly stays in the service's cgroup and is killed by ``systemctl --user
-    restart/stop gemmasearch``, taking the user's open documents with it. Under systemd the
+    restart/stop semma``, taking the user's open documents with it. Under systemd the
     opener is therefore started in its own transient scope (``systemd-run --user --scope``),
     falling back to a plain spawn if ``systemd-run`` is missing or fails to start.
 

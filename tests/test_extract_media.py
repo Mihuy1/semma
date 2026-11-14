@@ -12,10 +12,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gemmasearch.config import Config
-from gemmasearch.extract import ExtractionError, extract
-from gemmasearch.extract.base import AUDIO_SAMPLE_RATE, MAX_VIDEO_FRAMES
-from gemmasearch.extract.media import fmt_time, probe, time_range
+from semma.config import Config
+from semma.extract import ExtractionError, extract
+from semma.extract.base import AUDIO_SAMPLE_RATE, MAX_VIDEO_FRAMES
+from semma.extract.media import fmt_time, probe, time_range
 
 pytestmark = pytest.mark.skipif(
     not (shutil.which("ffmpeg") and shutil.which("ffprobe")), reason="ffmpeg not installed"
@@ -189,7 +189,7 @@ def test_early_close_kills_ffmpeg(media, cfg, kind):
 
 def fake_ffmpeg(tmp_path: Path, monkeypatch, body: str) -> Path:
     """Replace ffmpeg (not ffprobe) by a Python script; it gets the real ffmpeg's arguments."""
-    from gemmasearch.extract import media as media_mod
+    from semma.extract import media as media_mod
 
     script = tmp_path / "fake-ffmpeg"
     script.write_text(f"#!{sys.executable} -I\nimport os, sys, time\nout = sys.stdout.buffer\n{body}\n")
@@ -204,7 +204,7 @@ def assert_no_children_left(before: set[int]) -> None:
 
 
 def test_ffmpeg_stall_is_killed(media, cfg, tmp_path, monkeypatch):
-    from gemmasearch.extract import media as media_mod
+    from semma.extract import media as media_mod
 
     fake_ffmpeg(tmp_path, monkeypatch, "out.write(b'\\0' * 4000); out.flush(); time.sleep(60)")
     monkeypatch.setattr(media_mod, "STALL_TIMEOUT", 0.5)
@@ -217,7 +217,7 @@ def test_ffmpeg_stall_is_killed(media, cfg, tmp_path, monkeypatch):
 
 
 def test_ffmpeg_too_slow_is_killed(media, cfg, tmp_path, monkeypatch):
-    from gemmasearch.extract import media as media_mod
+    from semma.extract import media as media_mod
 
     # trickles output forever: never stalls, but far slower than the decode budget allows
     fake_ffmpeg(tmp_path, monkeypatch, "while True:\n    out.write(b'\\0' * 64); out.flush(); time.sleep(0.02)")

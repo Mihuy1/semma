@@ -73,7 +73,7 @@ wheels = [
 ]
 
 [[package]]
-name = "gemmasearch"
+name = "semma"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

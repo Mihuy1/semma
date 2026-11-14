@@ -1,4 +1,4 @@
-"""Integration tests with the real model. Run with: GEMMA_GPU_TESTS=1 uv run pytest tests/test_gpu.py"""
+"""Integration tests with the real model. Run with: SEMMA_GPU_TESTS=1 uv run pytest tests/test_gpu.py"""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ import pytest
 from fakes import FakeExtractor
 from test_index import make_cfg, scan, write_docs
 
-from gemmasearch.embedder import Embedder
-from gemmasearch.extract.base import Chunk
-from gemmasearch.indexer import Indexer
-from gemmasearch.search import Searcher
-from gemmasearch.store import Store
+from semma.embedder import Embedder
+from semma.extract.base import Chunk
+from semma.indexer import Indexer
+from semma.search import Searcher
+from semma.store import Store
 
 pytestmark = pytest.mark.gpu
 

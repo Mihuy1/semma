@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from gemmasearch import dbus_names
-from gemmasearch.cli import main as cli_main
-from gemmasearch.install import (
+from semma import dbus_names
+from semma.cli import main as cli_main
+from semma.install import (
     _atomic_write,
     detect_desktop,
     install_gnome,
@@ -48,10 +48,10 @@ def test_install_kde_writes_files_and_runs_commands_in_order(
         commands.append(cmd)
         return 0
 
-    fake_py = "/opt/gemma/venv/bin/python"
+    fake_py = "/opt/semma/venv/bin/python"
     written = install_kde(python=fake_py, runner=fake_runner)
 
-    expected_desktop = data_home / "krunner" / "dbusplugins" / "gemmasearch.desktop"
+    expected_desktop = data_home / "krunner" / "dbusplugins" / "semma.desktop"
     expected_dbus = data_home / "dbus-1" / "services" / f"{dbus_names.BUS_NAME}.service"
     expected_unit = config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT
 
@@ -65,7 +65,7 @@ def test_install_kde_writes_files_and_runs_commands_in_order(
     cp.read(expected_desktop, encoding="utf-8")
     assert "Desktop Entry" in cp
     entry = cp["Desktop Entry"]
-    assert entry["Name"] == "GemmaSearch"
+    assert entry["Name"] == "Semma"
     assert entry["Comment"] == "Semantic search of your files with EmbeddingGemma"
     assert entry["Icon"] == "system-search"
     assert entry["Type"] == "Service"
@@ -84,19 +84,19 @@ def test_install_kde_writes_files_and_runs_commands_in_order(
     dbus_cp.read(expected_dbus, encoding="utf-8")
     dbus_sec = dbus_cp["D-BUS Service"]
     assert dbus_sec["Name"] == dbus_names.BUS_NAME
-    assert dbus_sec["Exec"] == f"{fake_py} -m gemmasearch daemon"
+    assert dbus_sec["Exec"] == f"{fake_py} -m semma daemon"
     assert dbus_sec["SystemdService"] == dbus_names.SYSTEMD_UNIT
 
     # Check systemd user unit
     unit_cp = configparser.ConfigParser(interpolation=None, strict=False)
     unit_cp.optionxform = str  # type: ignore[assignment]
     unit_cp.read(expected_unit, encoding="utf-8")
-    assert unit_cp["Unit"]["Description"] == "GemmaSearch semantic file search daemon"
+    assert unit_cp["Unit"]["Description"] == "Semma semantic file search daemon"
     assert unit_cp["Unit"]["After"] == "graphical-session.target"
     assert unit_cp["Unit"]["PartOf"] == "graphical-session.target"
     assert unit_cp["Service"]["Type"] == "dbus"
     assert unit_cp["Service"]["BusName"] == dbus_names.BUS_NAME
-    assert unit_cp["Service"]["ExecStart"] == f"{fake_py} -m gemmasearch daemon"
+    assert unit_cp["Service"]["ExecStart"] == f"{fake_py} -m semma daemon"
     assert unit_cp["Service"]["Restart"] == "on-failure"
     assert unit_cp["Service"]["RestartSec"] == "5"
     assert unit_cp["Service"]["TimeoutStopSec"] == "30"
@@ -107,7 +107,7 @@ def test_install_kde_writes_files_and_runs_commands_in_order(
 
     assert commands == [
         ["systemctl", "--user", "daemon-reload"],
-        ["systemctl", "--user", "enable", "--now", "gemmasearch.service"],
+        ["systemctl", "--user", "enable", "--now", "semma.service"],
         ["kquitapp6", "krunner"],
     ]
 
@@ -136,7 +136,7 @@ def test_install_idempotency_and_uninstall_removes_everything(
         assert not p.exists()
 
     assert commands == [
-        ["systemctl", "--user", "disable", "--now", "gemmasearch.service"],
+        ["systemctl", "--user", "disable", "--now", "semma.service"],
         ["systemctl", "--user", "daemon-reload"],
         ["kquitapp6", "krunner"],
     ]
@@ -149,7 +149,7 @@ def test_paths_with_spaces_are_quoted_in_unit_and_dbus_service(
     isolated_xdg: tuple[Path, Path],
 ) -> None:
     _, config_home = isolated_xdg
-    spaced_py = "/home/user/My Projects/Gemma Search/.venv/bin/python"
+    spaced_py = "/home/user/My Projects/Semma Search/.venv/bin/python"
     written = install_kde(
         python=spaced_py,
         enable=False,
@@ -157,11 +157,11 @@ def test_paths_with_spaces_are_quoted_in_unit_and_dbus_service(
         runner=lambda cmd: 0,
     )
     _, dbus_path, unit_path = written
-    assert unit_path == config_home / "systemd" / "user" / "gemmasearch.service"
+    assert unit_path == config_home / "systemd" / "user" / "semma.service"
 
     unit_text = unit_path.read_text(encoding="utf-8")
     dbus_text = dbus_path.read_text(encoding="utf-8")
-    expected_exec = f'"{spaced_py}" -m gemmasearch daemon'
+    expected_exec = f'"{spaced_py}" -m semma daemon'
     assert f"ExecStart={expected_exec}\n" in unit_text
     assert f"Exec={expected_exec}\n" in dbus_text
 
@@ -191,37 +191,37 @@ def test_status_kde_reports_files_and_service_state(
     }
 
 
-def test_python_m_gemmasearch_help() -> None:
+def test_python_m_semma_help() -> None:
     proc = subprocess.run(
-        [sys.executable, "-m", "gemmasearch", "--help"],
+        [sys.executable, "-m", "semma", "--help"],
         capture_output=True,
         text=True,
         check=False,
     )
     assert proc.returncode == 0
-    assert "gemmasearch" in proc.stdout
+    assert "semma" in proc.stdout
 
 
 def test_gnome_renderers_contents() -> None:
-    desktop_text = render_gnome_desktop_file("/opt/gemma/venv/bin/python")
+    desktop_text = render_gnome_desktop_file("/opt/semma/venv/bin/python")
     cp = configparser.ConfigParser(interpolation=None)
     cp.optionxform = str  # type: ignore[assignment]
     cp.read_string(desktop_text)
     assert "Desktop Entry" in cp
     entry = cp["Desktop Entry"]
     assert entry["Type"] == "Application"
-    assert entry["Name"] == "GemmaSearch"
+    assert entry["Name"] == "Semma"
     assert entry["Comment"] == "Semantic search of your files with EmbeddingGemma"
     assert entry["Icon"] == "system-search"
-    assert entry["Exec"] == "/opt/gemma/venv/bin/python -m gemmasearch ctl status"
+    assert entry["Exec"] == "/opt/semma/venv/bin/python -m semma ctl status"
     assert entry["Terminal"] == "false"
     assert entry["OnlyShowIn"] == "GNOME;"
     assert entry["Categories"] == "Utility;"
     assert "NoDisplay" not in entry
 
-    spaced = "/home/user/My Projects/Gemma Search/.venv/bin/python"
+    spaced = "/home/user/My Projects/Semma Search/.venv/bin/python"
     spaced_desktop = render_gnome_desktop_file(spaced)
-    assert f'Exec="{spaced}" -m gemmasearch ctl status\n' in spaced_desktop
+    assert f'Exec="{spaced}" -m semma ctl status\n' in spaced_desktop
 
     ini_text = render_gnome_search_provider_ini()
     ini_cp = configparser.ConfigParser(interpolation=None)
@@ -229,10 +229,10 @@ def test_gnome_renderers_contents() -> None:
     ini_cp.read_string(ini_text)
     assert "Shell Search Provider" in ini_cp
     sec = ini_cp["Shell Search Provider"]
-    assert sec["DesktopId"] == "io.github.GemmaSearch.desktop"
-    assert sec["BusName"] == "io.github.GemmaSearch"
-    assert dbus_names.GNOME_PATH == "/io/github/GemmaSearch/SearchProvider"
-    assert sec["ObjectPath"] == "/io/github/GemmaSearch/SearchProvider"
+    assert sec["DesktopId"] == "io.github.Semma.desktop"
+    assert sec["BusName"] == "io.github.Semma"
+    assert dbus_names.GNOME_PATH == "/io/github/Semma/SearchProvider"
+    assert sec["ObjectPath"] == "/io/github/Semma/SearchProvider"
     assert sec["Version"] == "2"
 
 
@@ -251,7 +251,7 @@ def test_install_gnome_writable_system_dir(
         return 0
 
     res = install_gnome(
-        python="/opt/gemma/venv/bin/python",
+        python="/opt/semma/venv/bin/python",
         system_data_dir=sys_data,
         runner=fake_runner,
     )
@@ -259,7 +259,7 @@ def test_install_gnome_writable_system_dir(
     expected_desktop = data_home / "applications" / dbus_names.GNOME_DESKTOP_ID
     expected_dbus = data_home / "dbus-1" / "services" / f"{dbus_names.BUS_NAME}.service"
     expected_unit = config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT
-    expected_ini = sys_data / "gnome-shell" / "search-providers" / "io.github.GemmaSearch.search-provider.ini"
+    expected_ini = sys_data / "gnome-shell" / "search-providers" / "io.github.Semma.search-provider.ini"
 
     assert res.written == [expected_desktop, expected_dbus, expected_unit, expected_ini]
     assert res.pending_ini is None
@@ -304,8 +304,8 @@ def test_install_gnome_readonly_system_dir_stages_ini_and_returns_sudo(
             system_data_dir=sys_data,
             runner=lambda cmd: commands.append(cmd) or 0,
         )
-        expected_ini = sys_data / "gnome-shell" / "search-providers" / "io.github.GemmaSearch.search-provider.ini"
-        expected_staged = data_home / "gemmasearch" / "io.github.GemmaSearch.search-provider.ini"
+        expected_ini = sys_data / "gnome-shell" / "search-providers" / "io.github.Semma.search-provider.ini"
+        expected_staged = data_home / "semma" / "io.github.Semma.search-provider.ini"
 
         assert res.pending_ini == expected_staged
         assert expected_staged.is_file()
@@ -333,7 +333,7 @@ def test_uninstall_gnome_keeps_shared_service_when_kde_present(
     res = uninstall_gnome(system_data_dir=sys_data, runner=lambda cmd: commands.append(cmd) or 0)
 
     gnome_desktop = data_home / "applications" / dbus_names.GNOME_DESKTOP_ID
-    gnome_ini = sys_data / "gnome-shell" / "search-providers" / "io.github.GemmaSearch.search-provider.ini"
+    gnome_ini = sys_data / "gnome-shell" / "search-providers" / "io.github.Semma.search-provider.ini"
     kde_desktop = data_home / "krunner" / "dbusplugins" / f"{dbus_names.RUNNER_ID}.desktop"
     dbus_path = data_home / "dbus-1" / "services" / f"{dbus_names.BUS_NAME}.service"
     unit_path = config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT
@@ -359,7 +359,7 @@ def test_uninstall_gnome_removes_shared_service_when_kde_absent_and_handles_ro_i
     providers_dir.mkdir(parents=True)
 
     install_gnome(python="/usr/bin/python3", system_data_dir=sys_data, runner=lambda cmd: 0)
-    ini_path = providers_dir / "io.github.GemmaSearch.search-provider.ini"
+    ini_path = providers_dir / "io.github.Semma.search-provider.ini"
     assert ini_path.is_file()
 
     providers_dir.chmod(0o555)
@@ -443,7 +443,7 @@ def test_cli_install_gnome_prints_sudo_and_restart_note(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from gemmasearch import install as install_mod
+    from semma import install as install_mod
 
     sys_data = tmp_path / "ro_sys"
     sys_data.mkdir()
@@ -510,7 +510,7 @@ def test_install_gnome_try_restarts_when_already_active(
     commands: list[list[str]] = []
 
     res = install_gnome(
-        python="/opt/gemma/venv/bin/python",
+        python="/opt/semma/venv/bin/python",
         system_data_dir=sys_data,
         runner=lambda cmd: commands.append(cmd) or 0,
     )
@@ -587,7 +587,7 @@ def test_install_gnome_rerun_skips_staging_when_system_ini_identical(
     ini_path = providers_dir / f"{dbus_names.BUS_NAME}.search-provider.ini"
     ini_path.write_text(render_gnome_search_provider_ini(), encoding="utf-8")
 
-    staged_path = data_home / "gemmasearch" / f"{dbus_names.BUS_NAME}.search-provider.ini"
+    staged_path = data_home / "semma" / f"{dbus_names.BUS_NAME}.search-provider.ini"
     staged_path.parent.mkdir(parents=True)
     staged_path.write_text("stale staged content", encoding="utf-8")
 
@@ -615,7 +615,7 @@ def test_cli_uninstall_reports_kept_shared_service(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from gemmasearch import install as install_mod
+    from semma import install as install_mod
 
     sys_data = tmp_path / "sys_share"
     monkeypatch.setattr(install_mod, "_default_runner", lambda cmd: 0)
@@ -637,8 +637,8 @@ def test_cli_uninstall_reports_kept_shared_service(
     out_kde = capsys.readouterr().out
     assert rc_kde == 0
     assert (
-        "The gemmasearch service was kept because the GNOME search provider is still installed; "
-        "run `gemmasearch uninstall-gnome` to remove it."
+        "The semma service was kept because the GNOME search provider is still installed; "
+        "run `semma uninstall-gnome` to remove it."
     ) in out_kde
 
     install_kde(python="/usr/bin/python3", runner=lambda cmd: 0)
@@ -646,8 +646,8 @@ def test_cli_uninstall_reports_kept_shared_service(
     out_gnome = capsys.readouterr().out
     assert rc_gnome == 0
     assert (
-        "The gemmasearch service was kept because the KDE KRunner integration is still installed; "
-        "run `gemmasearch uninstall-kde` to remove it."
+        "The semma service was kept because the KDE KRunner integration is still installed; "
+        "run `semma uninstall-kde` to remove it."
     ) in out_gnome
 
 
@@ -657,7 +657,7 @@ def test_cli_install_gnome_kept_service_notice_and_python_flag(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from gemmasearch import install as install_mod
+    from semma import install as install_mod
 
     data_home, config_home = isolated_xdg
     sys_data = tmp_path / "sys_share"

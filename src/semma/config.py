@@ -1,4 +1,4 @@
-"""Configuration: built-in defaults, optionally overridden by ~/.config/gemmasearch/config.toml."""
+"""Configuration: built-in defaults, optionally overridden by ~/.config/semma/config.toml."""
 
 from __future__ import annotations
 
@@ -214,7 +214,7 @@ class Config:
     # many chunks; beyond it, searches use sqlite-vec directly.
     vector_cache_max_chunks: int = 1_000_000
 
-    # Daemon (gemmasearchd). The query model is unloaded (VRAM freed) after this long with no
+    # Daemon (semmad). The query model is unloaded (VRAM freed) after this long with no
     # queries; the next query reloads it (~1.5 s). The full index model is unloaded sooner once
     # indexing finishes.
     model_idle_unload_minutes: float = 15
@@ -280,7 +280,7 @@ def _expand(value: str, home: Path) -> Path:
 
 def default_config_path(home: Path | None = None) -> Path:
     home = home or Path.home()
-    return xdg_config_home(home) / "gemmasearch" / "config.toml"
+    return xdg_config_home(home) / "semma" / "config.toml"
 
 
 def load_config(path: Path | None = None, home: Path | None = None) -> Config:
@@ -289,7 +289,7 @@ def load_config(path: Path | None = None, home: Path | None = None) -> Config:
     config_home = xdg_config_home(home)
     cfg = Config(
         home=home,
-        db_path=xdg_data_home(home) / "gemmasearch" / "index.db",
+        db_path=xdg_data_home(home) / "semma" / "index.db",
         roots=[home],
         locations=default_locations(home, read_user_dirs(home, config_home)),
     )
@@ -328,7 +328,7 @@ VALID_QUERY_DEVICES = frozenset({"auto", "cpu", "cuda", "vulkan", "gpu"})
 
 
 def _warn(msg: str) -> None:
-    print(f"gemmasearch: config: {msg}", file=sys.stderr)
+    print(f"semma: config: {msg}", file=sys.stderr)
 
 
 def check_unknown_keys(data: dict[str, Any]) -> list[str]:

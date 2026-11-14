@@ -4,7 +4,7 @@ Looks up thumbnails in:
 1. An in-memory LRU cache keyed by ``(path, mtime, size)``.
 2. The freedesktop thumbnail cache (``$XDG_CACHE_HOME/thumbnails/{normal,large}/<md5(uri)>.png``),
    accepted only when its ``Thumb::MTime`` PNG text chunk matches ``int(mtime)``.
-3. Our own on-disk cache (``$XDG_CACHE_HOME/gemmasearch/thumbnails/<sha1(path|mtime|size)>.png``).
+3. Our own on-disk cache (``$XDG_CACHE_HOME/semma/thumbnails/<sha1(path|mtime|size)>.png``).
 4. On-the-fly generation: Pillow for images (with EXIF transpose, JPEG draft mode, and pillow-heif
    when available), or a single frame via ``ffmpeg`` for videos. Newly generated thumbnails are
    saved atomically to our own cache.
@@ -312,14 +312,14 @@ def make_icon_data(
         p = p.resolve()
     path_str = str(p)
     root = cache_dir if cache_dir is not None else xdg_cache_home()
-    own_dir = root / "gemmasearch" / "thumbnails"
+    own_dir = root / "semma" / "thumbnails"
 
     # 1. Freedesktop cache ($XDG_CACHE_HOME/thumbnails/{normal,large}/<md5(uri)>.png).
     img = _load_freedesktop_thumb(root, path_str, mtime)
     if img is not None:
         return _image_to_icon_data(img, size)
 
-    # 2. Our own disk cache ($XDG_CACHE_HOME/gemmasearch/thumbnails/<sha1(path|mtime|size)>.png).
+    # 2. Our own disk cache ($XDG_CACHE_HOME/semma/thumbnails/<sha1(path|mtime|size)>.png).
     img = _load_own_cache_thumb(own_dir, path_str, mtime, size)
     if img is not None:
         return _image_to_icon_data(img, size)
@@ -360,7 +360,7 @@ class Thumbnailer:
         self._lru_capacity = max(1, lru_capacity)
         self._lru: OrderedDict[tuple[str, int, int], IconData] = OrderedDict()
         self._lock = threading.Lock()
-        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="gemmasearch-thumb")
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="semma-thumb")
         self._inflight: dict[tuple[str, int, int], asyncio.Future[IconData | None]] = {}
 
     def _lru_key(self, path: str, mtime: float, size: int) -> tuple[str, int, int]:

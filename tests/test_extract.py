@@ -12,10 +12,10 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from gemmasearch.config import Config
-from gemmasearch.extract import ExtractionError, extract
-from gemmasearch.extract.office import rtf_to_text
-from gemmasearch.extract.text import (
+from semma.config import Config
+from semma.extract import ExtractionError, extract
+from semma.extract.office import rtf_to_text
+from semma.extract.text import (
     MAX_CHARS,
     MAX_CHUNKS,
     chunk_text,
@@ -264,7 +264,7 @@ def test_pdf_scanned_pages_rendered(tmp_path, cfg):
 def test_pdf_bad_page_skipped(tmp_path, cfg, monkeypatch):
     import pypdfium2
 
-    from gemmasearch.extract import pdf as pdf_mod
+    from semma.extract import pdf as pdf_mod
 
     p = tmp_path / "doc.pdf"
     make_text_pdf(p, [[FINNISH, "Sivu yksi."], [FINNISH, "Sivu kaksi."], []])
@@ -510,8 +510,8 @@ def test_rtf_emoji_file_storable(tmp_path, cfg):
 
 
 def test_dispatcher_sanitises_text_fields(tmp_path, cfg, monkeypatch):
-    from gemmasearch import extract as extract_mod
-    from gemmasearch.extract import Chunk, clean_str
+    from semma import extract as extract_mod
+    from semma.extract import Chunk, clean_str
 
     def dirty(path, cfg):
         yield Chunk("text", "a\x00b \ud83d\udeba c\udc00", "line 1 \ud800", "snip\x00\udfff", 1.0)
@@ -547,7 +547,7 @@ def test_office_rejects_dtd_and_missing_parts(tmp_path, cfg):
 def test_office_rejects_dtd_in_any_encoding(tmp_path, cfg, encoding):
     import codecs
 
-    from gemmasearch.extract.office import MAX_MEMBER_BYTES, parse_xml
+    from semma.extract.office import MAX_MEMBER_BYTES, parse_xml
 
     decl = "UTF-8" if encoding == "utf-8" else "UTF-16"
     xml = (f'<?xml version="1.0" encoding="{decl}"?>'
@@ -568,7 +568,7 @@ def test_office_rejects_dtd_in_any_encoding(tmp_path, cfg, encoding):
 
 
 def test_office_zip_bomb_guard(tmp_path, cfg, monkeypatch):
-    from gemmasearch.extract import office
+    from semma.extract import office
 
     monkeypatch.setattr(office, "MAX_MEMBER_BYTES", 10_000)
     p = tmp_path / "bomb.docx"
@@ -641,7 +641,7 @@ def test_heic(tmp_path, cfg):
 
 
 def test_decompression_bomb(tmp_path, cfg, monkeypatch):
-    from gemmasearch.extract import image as image_mod
+    from semma.extract import image as image_mod
 
     p = tmp_path / "big.png"
     Image.new("L", (3000, 3000)).save(p)
@@ -660,7 +660,7 @@ def _png_header(width: int, height: int) -> bytes:
 
 
 def test_image_pixel_limit_about_100_megapixels(tmp_path, cfg):
-    from gemmasearch.extract import image as image_mod
+    from semma.extract import image as image_mod
 
     image_mod._init()
     assert Image.MAX_IMAGE_PIXELS * 2 <= 100_000_000
@@ -693,8 +693,8 @@ def test_unknown_kind(tmp_path, cfg):
 
 
 def test_tiny_text_is_not_embedded(tmp_path):
-    from gemmasearch.config import load_config
-    from gemmasearch.extract import extract
+    from semma.config import load_config
+    from semma.extract import extract
 
     cfg = load_config(path=tmp_path / "none.toml", home=tmp_path)
     tiny = tmp_path / "CLAUDE.md"

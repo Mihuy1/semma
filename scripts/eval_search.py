@@ -1,4 +1,4 @@
-"""Evaluate gemmasearch ranking against a local JSON query set.
+"""Evaluate semma ranking against a local JSON query set.
 
 Usage:
     uv run python scripts/eval_search.py [QUERIES.json] [--json OUT.json] [--compare OLD.json]
@@ -267,7 +267,7 @@ def _load_queries(path: Path) -> list[dict[str, Any]]:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Evaluate gemmasearch ranking on a query set.",
+        description="Evaluate semma ranking on a query set.",
         epilog="Note: SearchResult.duplicate_paths is capped at 20 paths in search.py; "
                "expected files folded past the 20th duplicate are not visible to rank lookup.",
     )
@@ -285,10 +285,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from gemmasearch.config import load_config
-    from gemmasearch.embedder import Embedder
-    from gemmasearch.search import Searcher
-    from gemmasearch.store import Store
+    from semma.config import load_config
+    from semma.embedder import Embedder
+    from semma.search import Searcher
+    from semma.store import Store
 
     args = _build_parser().parse_args(argv)
     if not args.queries_file.is_file():
@@ -298,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
     queries = _load_queries(args.queries_file)
     cfg = load_config(args.config)
     if not cfg.db_path.exists():
-        print(f"No index at {cfg.db_path}. Run `gemmasearch scan` and `gemmasearch index`.", file=sys.stderr)
+        print(f"No index at {cfg.db_path}. Run `semma scan` and `semma index`.", file=sys.stderr)
         return 1
 
     store = Store(cfg.db_path)

@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 from inotify_simple import Event, flags
 
-from gemmasearch.config import load_config
-from gemmasearch.scanner import Scanner
-from gemmasearch.watcher import DirWatcher
+from semma.config import load_config
+from semma.scanner import Scanner
+from semma.watcher import DirWatcher
 
 
 def _wait_for(predicate, timeout: float = 2.0, interval: float = 0.02) -> bool:

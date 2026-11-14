@@ -117,7 +117,7 @@ class DirWatcher:
             self._stop_event.clear()
             self._thread = threading.Thread(
                 target=self._run,
-                name="gemmasearch-watcher",
+                name="semma-watcher",
                 daemon=True,
             )
             self._thread.start()

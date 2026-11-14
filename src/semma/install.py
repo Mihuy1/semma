@@ -81,14 +81,14 @@ def _gnome_target_paths(
     ini_name = f"{dbus_names.BUS_NAME}.search-provider.ini"
     desktop_path = data_home / "applications" / dbus_names.GNOME_DESKTOP_ID
     ini_path = Path(system_data_dir) / "gnome-shell" / "search-providers" / ini_name
-    staged_ini_path = data_home / "gemmasearch" / ini_name
+    staged_ini_path = data_home / "semma" / ini_name
     return desktop_path, ini_path, staged_ini_path
 
 
 def render_desktop_file() -> str:
     return (
         "[Desktop Entry]\n"
-        "Name=GemmaSearch\n"
+        "Name=Semma\n"
         "Comment=Semantic search of your files with EmbeddingGemma\n"
         "Icon=system-search\n"
         "Type=Service\n"
@@ -109,10 +109,10 @@ def render_gnome_desktop_file(python_path: str | None = None) -> str:
     return (
         "[Desktop Entry]\n"
         "Type=Application\n"
-        "Name=GemmaSearch\n"
+        "Name=Semma\n"
         "Comment=Semantic search of your files with EmbeddingGemma\n"
         "Icon=system-search\n"
-        f"Exec={quoted_py} -m gemmasearch ctl status\n"
+        f"Exec={quoted_py} -m semma ctl status\n"
         "Terminal=false\n"
         "OnlyShowIn=GNOME;\n"
         "Categories=Utility;\n"
@@ -135,7 +135,7 @@ def render_dbus_service_file(python_path: str) -> str:
     return (
         "[D-BUS Service]\n"
         f"Name={dbus_names.BUS_NAME}\n"
-        f"Exec={quoted_py} -m gemmasearch daemon\n"
+        f"Exec={quoted_py} -m semma daemon\n"
         f"SystemdService={dbus_names.SYSTEMD_UNIT}\n"
     )
 
@@ -144,14 +144,14 @@ def render_systemd_unit_file(python_path: str) -> str:
     quoted_py = _quote_exec_path(python_path)
     return (
         "[Unit]\n"
-        "Description=GemmaSearch semantic file search daemon\n"
+        "Description=Semma semantic file search daemon\n"
         "After=graphical-session.target\n"
         "PartOf=graphical-session.target\n"
         "\n"
         "[Service]\n"
         "Type=dbus\n"
         f"BusName={dbus_names.BUS_NAME}\n"
-        f"ExecStart={quoted_py} -m gemmasearch daemon\n"
+        f"ExecStart={quoted_py} -m semma daemon\n"
         "Restart=on-failure\n"
         "RestartSec=5\n"
         "Environment=PYTHONUNBUFFERED=1\n"

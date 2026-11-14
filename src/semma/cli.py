@@ -1,4 +1,4 @@
-"""Command line interface: `gemmasearch scan | index | search | status | reset`."""
+"""Command line interface: `semma scan | index | search | status | reset`."""
 
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def _duration(seconds: float) -> str:
 
 def cmd_status(args: argparse.Namespace, cfg: Config) -> int:
     if not cfg.db_path.exists():
-        print("No index yet. Run `gemmasearch scan`.")
+        print("No index yet. Run `semma scan`.")
         return 1
     store = Store(cfg.db_path)
     counts = store.counts()
@@ -166,7 +166,7 @@ def cmd_index(args: argparse.Namespace, cfg: Config) -> int:
     from .indexer import IndexStats, Indexer, ModelMismatch
 
     if not cfg.db_path.exists():
-        print("No index yet. Run `gemmasearch scan` first.")
+        print("No index yet. Run `semma scan` first.")
         return 1
     store = Store(cfg.db_path)
     embedder = Embedder(cfg)
@@ -178,7 +178,7 @@ def cmd_index(args: argparse.Namespace, cfg: Config) -> int:
         requeued = indexer.prepare(rebuild=args.rebuild, retry_failed=args.retry_failed)
     except ModelMismatch as exc:
         print(f"The index was built with {exc.stored}, but the configured model is {exc.configured}.\n"
-              f"Vectors of different models cannot be mixed. Run `gemmasearch index --rebuild` to drop "
+              f"Vectors of different models cannot be mixed. Run `semma index --rebuild` to drop "
               f"every vector and re-embed all files with {exc.configured}, or set model.name back.",
               file=sys.stderr)
         return 1
@@ -230,13 +230,13 @@ def cmd_search(args: argparse.Namespace, cfg: Config) -> int:
     from .search import Searcher
 
     if not cfg.db_path.exists():
-        print("No index yet. Run `gemmasearch scan` and `gemmasearch index`.")
+        print("No index yet. Run `semma scan` and `semma index`.")
         return 1
     store = Store(cfg.db_path)
     embedder = Embedder(cfg)
     stored_model = store.get_meta("model_id")
     if stored_model and stored_model != embedder.model_id:
-        print(f"Index was built with {stored_model}, not {embedder.model_id}; run `gemmasearch index --rebuild` "
+        print(f"Index was built with {stored_model}, not {embedder.model_id}; run `semma index --rebuild` "
               f"to re-embed everything with it, or set model.name back.", file=sys.stderr)
         return 1
     embedder.load_query()
@@ -316,7 +316,7 @@ def cmd_ctl(args: argparse.Namespace, cfg: Config) -> int:
     if args.action == "status":
         st = daemon_status()
         if st is None:
-            print("The daemon is not running (systemctl --user start gemmasearch).")
+            print("The daemon is not running (systemctl --user start semma).")
             return 1
         width = max(map(len, st))
         for key, value in st.items():
@@ -330,7 +330,7 @@ def cmd_ctl(args: argparse.Namespace, cfg: Config) -> int:
     try:
         result = daemon_call(method)
     except DaemonNotRunning:
-        print("The daemon is not running (systemctl --user start gemmasearch).")
+        print("The daemon is not running (systemctl --user start semma).")
         return 1
     print(f"{method}: ok" + (f" ({result} files queued)" if method == "RetryFailed" else ""))
     return 0
@@ -357,10 +357,10 @@ def cmd_uninstall_kde(args: argparse.Namespace, cfg: Config) -> int:
         print(f"removed {_short(str(path), cfg.home)}")
     if shared_service_kept_for_kde():
         print(
-            "The gemmasearch service was kept because the GNOME search provider is still installed; "
-            "run `gemmasearch uninstall-gnome` to remove it."
+            "The semma service was kept because the GNOME search provider is still installed; "
+            "run `semma uninstall-gnome` to remove it."
         )
-    print("The index database is kept; delete it with `gemmasearch reset --all --yes`.")
+    print("The index database is kept; delete it with `semma reset --all --yes`.")
     return 0
 
 
@@ -416,10 +416,10 @@ def cmd_uninstall_gnome(args: argparse.Namespace, cfg: Config) -> int:
         print(f"  {res.sudo_command}")
     if res.service_kept:
         print(
-            "The gemmasearch service was kept because the KDE KRunner integration is still installed; "
-            "run `gemmasearch uninstall-kde` to remove it."
+            "The semma service was kept because the KDE KRunner integration is still installed; "
+            "run `semma uninstall-kde` to remove it."
         )
-    print("The index database is kept; delete it with `gemmasearch reset --all --yes`.")
+    print("The index database is kept; delete it with `semma reset --all --yes`.")
     return 0
 
 
@@ -462,8 +462,8 @@ def cmd_uninstall(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="gemmasearch", description="Semantic desktop search")
-    p.add_argument("--config", type=Path, help="config file (default ~/.config/gemmasearch/config.toml)")
+    p = argparse.ArgumentParser(prog="semma", description="Semantic desktop search")
+    p.add_argument("--config", type=Path, help="config file (default ~/.config/semma/config.toml)")
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("scan", help="walk the filesystem and score files (phase 1)")

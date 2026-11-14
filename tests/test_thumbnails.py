@@ -1,4 +1,4 @@
-"""Tests for ``gemmasearch.thumbnails``."""
+"""Tests for ``semma.thumbnails``."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import time
 from PIL import Image, PngImagePlugin
 import pytest
 
-from gemmasearch import filetypes as ft
-from gemmasearch.thumbnails import (
+from semma import filetypes as ft
+from semma.thumbnails import (
     Thumbnailer,
     freedesktop_md5,
     make_icon_data,
@@ -94,7 +94,7 @@ def test_own_cache_and_exif_rotated_jpeg_generation(tmp_path: Path) -> None:
     assert (w, h) == (32, 64)
 
     # Check that our own cache file was written atomically.
-    own_file = cache_dir / "gemmasearch" / "thumbnails" / f"{own_cache_key(str(jpg_path), mtime, 64)}.png"
+    own_file = cache_dir / "semma" / "thumbnails" / f"{own_cache_key(str(jpg_path), mtime, 64)}.png"
     assert own_file.is_file()
 
     # Delete original image: second call with same path+mtime+size must hit our own cache!
@@ -152,7 +152,7 @@ def test_video_thumbnail_via_ffmpeg(tmp_path: Path) -> None:
     assert (w, h) == (64, 48)
 
     # Verify own cache was populated for video as well
-    own_file = cache_dir / "gemmasearch" / "thumbnails" / f"{own_cache_key(str(vid_path), mtime, 64)}.png"
+    own_file = cache_dir / "semma" / "thumbnails" / f"{own_cache_key(str(vid_path), mtime, 64)}.png"
     assert own_file.is_file()
 
 
@@ -171,7 +171,7 @@ def test_slow_thumbnail_continues_in_background_and_caches(tmp_path: Path, monke
         time.sleep(0.12)
         return orig_make(path, kind, mt, size, cache_dir=cache_dir)
 
-    monkeypatch.setattr("gemmasearch.thumbnails.make_icon_data", slow_make)
+    monkeypatch.setattr("semma.thumbnails.make_icon_data", slow_make)
     thumb = Thumbnailer(cache_dir=cache_dir)
 
     async def scenario() -> None:

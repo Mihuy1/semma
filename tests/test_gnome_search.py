@@ -1,4 +1,4 @@
-"""Tests for ``gemmasearch.gnome_search`` (D-Bus ``org.gnome.Shell.SearchProvider2`` service)."""
+"""Tests for ``semma.gnome_search`` (D-Bus ``org.gnome.Shell.SearchProvider2`` service)."""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from pathlib import Path
 from dbus_fast.aio import MessageBus
 import pytest
 
-from gemmasearch import filetypes as ft
-from gemmasearch.dbus_names import GNOME_INTERFACE, GNOME_PATH
-from gemmasearch import gnome_search as gs
-from gemmasearch.gnome_search import (
+from semma import filetypes as ft
+from semma.dbus_names import GNOME_INTERFACE, GNOME_PATH
+from semma import gnome_search as gs
+from semma.gnome_search import (
     GNOME_THUMBNAIL_BUDGET_SECONDS,
     GNOME_VISIBLE_RESULTS,
     GnomeLauncher,
@@ -24,9 +24,9 @@ from gemmasearch.gnome_search import (
     gnome_description,
     shorten_folder,
 )
-from gemmasearch.krunner import format_subtext
-from gemmasearch.search import SearchResult
-from gemmasearch.thumbnails import IconData, Thumbnailer
+from semma.krunner import format_subtext
+from semma.search import SearchResult
+from semma.thumbnails import IconData, Thumbnailer
 
 _NAME_COUNTER = itertools.count(1)
 
@@ -91,7 +91,7 @@ def _service(results: list[SearchResult], **kw) -> tuple[GnomeSearchService, lis
 
 @asynccontextmanager
 async def exported_gnome(service: GnomeSearchService) -> AsyncIterator[tuple[object, MessageBus, str]]:
-    bus_name = f"io.github.GemmaSearch.Test{os.getpid()}_g{next(_NAME_COUNTER)}"
+    bus_name = f"io.github.Semma.Test{os.getpid()}_g{next(_NAME_COUNTER)}"
     server_bus = await MessageBus().connect()
     client_bus = await MessageBus().connect()
     try:
@@ -258,7 +258,7 @@ def test_activate_failure_never_raises() -> None:
 def test_launcher_prefers_gio_then_xdg_open(monkeypatch: pytest.MonkeyPatch) -> None:
     spawned: list[list[str]] = []
     available = {"gio": "/usr/bin/gio", "xdg-open": "/usr/bin/xdg-open"}
-    monkeypatch.setattr("gemmasearch.gnome_search.shutil.which", lambda n: available.get(n))
+    monkeypatch.setattr("semma.gnome_search.shutil.which", lambda n: available.get(n))
     launcher = GnomeLauncher()
     monkeypatch.setattr(launcher, "_scope_prefix", lambda: None)
     monkeypatch.setattr(launcher, "_spawn_detached", lambda argv: spawned.append(argv) or True)

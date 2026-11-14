@@ -222,23 +222,23 @@ def quiet_model_loading() -> None:
 
 
 def resolve_model_dir(cfg: Config | None = None) -> Path:
-    env = os.environ.get("GEMMASEARCH_MODEL_DIR", "").strip()
+    env = os.environ.get("SEMMA_MODEL_DIR", "").strip()
     if env:
         return Path(env).expanduser()
     if cfg is not None and getattr(cfg, "model_dir", None) is not None:
         return Path(cfg.model_dir)
-    return xdg_data_home(Path.home()) / "gemmasearch" / "models"
+    return xdg_data_home(Path.home()) / "semma" / "models"
 
 
 def resolve_llama_lib_dir(cfg: Config | None = None) -> Path:
-    env = os.environ.get("GEMMASEARCH_LLAMA_LIB_DIR", "").strip()
+    env = os.environ.get("SEMMA_LLAMA_LIB_DIR", "").strip()
     if env:
         return Path(env).expanduser()
     if cfg is not None and getattr(cfg, "llama_lib_dir", None) is not None:
         return Path(cfg.llama_lib_dir)
     if DEFAULT_LLAMA_LIB_DIR.is_dir():
         return DEFAULT_LLAMA_LIB_DIR
-    return xdg_data_home(Path.home()) / "gemmasearch" / "lib"
+    return xdg_data_home(Path.home()) / "semma" / "lib"
 
 
 def ensure_model_file(kind: str, model_dir: Path) -> Path:
@@ -257,7 +257,7 @@ def ensure_model_file(kind: str, model_dir: Path) -> Path:
         url = f"{GGUF_BASE_URL}/{filename}"
         log.info("downloading %s (%d MiB) to %s", filename, expected_size // (1024 * 1024), dest)
 
-        req = urllib.request.Request(url, headers={"User-Agent": "GemmaSearch/0.1"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Semma/0.1"})
         hasher = hashlib.sha256()
         total = 0
         try:

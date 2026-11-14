@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch a nested GNOME Shell (mutter-devkit) window inside KDE Plasma with
-# GemmaSearch wired into GNOME Overview search.
+# Semma wired into GNOME Overview search.
 #
 # Why a private D-Bus session (dbus-run-session)?
 #   Running GNOME Shell directly on the host Plasma session bus causes it to
@@ -8,16 +8,16 @@
 #   org.kde.StatusNotifierWatcher, and xdg-desktop-portal backends. Starting a
 #   private session bus isolates the nested shell completely from Plasma, while
 #   scripts/gnome_bridge.py bridges only org.gnome.Shell.SearchProvider2
-#   (/io/github/GemmaSearch/SearchProvider on io.github.GemmaSearch) back to the real host session bus.
+#   (/io/github/Semma/SearchProvider on io.github.Semma) back to the real host session bus.
 #
 # Usage:
 #   ./scripts/gnome_devkit.sh [extra gnome-shell args...]
 #
 # Prerequisites:
-#   - gemmasearch daemon running on your session bus (with /io/github/GemmaSearch/SearchProvider exported)
+#   - semma daemon running on your session bus (with /io/github/Semma/SearchProvider exported)
 #   - gnome-shell and mutter-devkit installed (sudo dnf install mutter-devkit)
 #
-# Open the Overview in the nested window and type to search with GemmaSearch.
+# Open the Overview in the nested window and type to search with Semma.
 # Close the devkit window (or press Ctrl+C) to stop both the shell and bridge.
 
 set -euo pipefail
@@ -49,11 +49,11 @@ if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
     exit 1
 fi
 
-introspect_out="$(gdbus introspect --session -d io.github.GemmaSearch -o /io/github/GemmaSearch/SearchProvider 2>&1)" || true
+introspect_out="$(gdbus introspect --session -d io.github.Semma -o /io/github/Semma/SearchProvider 2>&1)" || true
 if [[ "$introspect_out" != *"SearchProvider2"* ]]; then
-    echo "Error: io.github.GemmaSearch (/io/github/GemmaSearch/SearchProvider) does not expose SearchProvider2 on the session bus." >&2
+    echo "Error: io.github.Semma (/io/github/Semma/SearchProvider) does not expose SearchProvider2 on the session bus." >&2
     echo "Restart the service and try again:" >&2
-    echo "  systemctl --user restart gemmasearch" >&2
+    echo "  systemctl --user restart semma" >&2
     exit 1
 fi
 
@@ -67,24 +67,24 @@ mkdir -p \
     "$tmp_dir/share/gnome-shell/search-providers" \
     "$tmp_dir/share/applications"
 
-cat >"$tmp_dir/share/gnome-shell/search-providers/io.github.GemmaSearch.search-provider.ini" <<'EOF'
+cat >"$tmp_dir/share/gnome-shell/search-providers/io.github.Semma.search-provider.ini" <<'EOF'
 [Shell Search Provider]
-DesktopId=io.github.GemmaSearch.desktop
-BusName=io.github.GemmaSearch
-ObjectPath=/io/github/GemmaSearch/SearchProvider
+DesktopId=io.github.Semma.desktop
+BusName=io.github.Semma
+ObjectPath=/io/github/Semma/SearchProvider
 Version=2
 AutoStart=false
 EOF
 
-cat >"$tmp_dir/share/applications/io.github.GemmaSearch.desktop" <<'EOF'
+cat >"$tmp_dir/share/applications/io.github.Semma.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
-Name=GemmaSearch
+Name=Semma
 Icon=system-search
 Exec=true
 EOF
 
-export GEMMASEARCH_UPSTREAM_BUS="$DBUS_SESSION_BUS_ADDRESS"
+export SEMMA_UPSTREAM_BUS="$DBUS_SESSION_BUS_ADDRESS"
 
 dbus-run-session -- bash -c '
 set -euo pipefail
@@ -114,7 +114,7 @@ for _ in $(seq 1 300); do
         -d org.freedesktop.DBus \
         -o /org/freedesktop/DBus \
         -m org.freedesktop.DBus.NameHasOwner \
-        io.github.GemmaSearch 2>/dev/null || true)"
+        io.github.Semma 2>/dev/null || true)"
     if [[ "$owner_out" == *"(true,)"* ]]; then
         ready=1
         break
@@ -123,7 +123,7 @@ for _ in $(seq 1 300); do
 done
 
 if [[ "$ready" -ne 1 ]]; then
-    echo "Error: timed out waiting for io.github.GemmaSearch on the private bus." >&2
+    echo "Error: timed out waiting for io.github.Semma on the private bus." >&2
     exit 1
 fi
 

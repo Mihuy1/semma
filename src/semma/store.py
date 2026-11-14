@@ -302,7 +302,7 @@ class Store:
             db.execute("BEGIN IMMEDIATE")
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version > len(MIGRATIONS):
-                raise SchemaTooNew(f"{self.path} has schema v{version}; this gemmasearch knows v{len(MIGRATIONS)}")
+                raise SchemaTooNew(f"{self.path} has schema v{version}; this semma knows v{len(MIGRATIONS)}")
             for i, script in enumerate(MIGRATIONS[version:], start=version + 1):
                 db.executescript(script)
                 db.execute(f"PRAGMA user_version = {i}")

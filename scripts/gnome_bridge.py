@@ -1,12 +1,12 @@
 """D-Bus bridge forwarding org.gnome.Shell.SearchProvider2 to the real session bus.
 
 Runs on the nested private session bus (default DBUS_SESSION_BUS_ADDRESS), owns
-``io.github.GemmaSearch``, exports ``org.gnome.Shell.SearchProvider2`` at
-``/io/github/GemmaSearch/SearchProvider``, and forwards all 5 SearchProvider2 calls
+``io.github.Semma``, exports ``org.gnome.Shell.SearchProvider2`` at
+``/io/github/Semma/SearchProvider``, and forwards all 5 SearchProvider2 calls
 to the upstream session bus daemon.
 
 Usage:
-    GEMMASEARCH_UPSTREAM_BUS="$DBUS_SESSION_BUS_ADDRESS" \\
+    SEMMA_UPSTREAM_BUS="$DBUS_SESSION_BUS_ADDRESS" \\
         dbus-run-session -- uv run --project . python scripts/gnome_bridge.py
 """
 
@@ -24,11 +24,11 @@ from dbus_fast import Message, MessageType, RequestNameReply, Variant
 from dbus_fast.aio import MessageBus
 from dbus_fast.service import ServiceInterface, method
 
-from gemmasearch.dbus_names import BUS_NAME, GNOME_INTERFACE, GNOME_PATH
+from semma.dbus_names import BUS_NAME, GNOME_INTERFACE, GNOME_PATH
 
 log = logging.getLogger(__name__)
 
-UPSTREAM_ENV_VAR = "GEMMASEARCH_UPSTREAM_BUS"
+UPSTREAM_ENV_VAR = "SEMMA_UPSTREAM_BUS"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 
 

@@ -1,4 +1,4 @@
-"""Map file names to the content kinds GemmaSearch knows how to index."""
+"""Map file names to the content kinds Semma knows how to index."""
 
 from __future__ import annotations
 
