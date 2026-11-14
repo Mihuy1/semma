@@ -63,3 +63,7 @@ Run `./scripts/gnome_devkit.sh` (requires `sudo dnf install mutter-devkit` along
 - `scripts/build-llama.sh` builds the pinned llama.cpp into `build/llama/lib`; a source checkout uses that build when it exists (`SEMMA_LLAMA_LIB_DIR` or `model.llama_lib_dir` override it).
 - Run tests: `uv run pytest -q`
 - Evaluate search ranking against a local JSON query set (`evals/local/search_queries.json` by default): `uv run python scripts/eval_search.py`
+
+## License
+
+MIT, see [LICENSE](LICENSE). The packages also carry the licences of Python and llama.cpp in /usr/share/doc/semma.

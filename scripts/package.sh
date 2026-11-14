@@ -55,6 +55,7 @@ install -m 755 packaging/semma "$stage/usr/bin/semma"
 install -D -m 644 README.md "$stage/usr/share/doc/semma/README.md"
 install -D -m 644 build/llama/LICENSE.llama.cpp "$stage/usr/share/doc/semma/LICENSE.llama.cpp"
 install -D -m 644 "$lib/LICENSE.txt" "$stage/usr/share/doc/semma/LICENSE.python"
+install -D -m 644 LICENSE "$stage/usr/share/doc/semma/LICENSE"
 
 # The desktop files, written by the same code as `semma install` writes them for one user.
 "$py" - "$stage/usr" <<'PY'

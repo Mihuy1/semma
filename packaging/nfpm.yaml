@@ -7,7 +7,8 @@ version: ${SEMMA_VERSION}
 release: "1"
 section: utils
 priority: optional
-maintainer: Semma
+maintainer: Mihuy1 <Mihuy1@users.noreply.github.com>
+license: MIT
 homepage: https://github.com/Mihuy1/semma
 description: |
   Semantic file search for KDE KRunner and GNOME Shell.
