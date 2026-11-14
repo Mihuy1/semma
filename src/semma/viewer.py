@@ -8,7 +8,8 @@ entry's ``Exec`` line read, and the viewer's own page option added in front of t
   evince    --page-index=N
   papers    --page-index=N
   zathura   --page=N
-  firefox   file:///x.pdf#page=N   (pdf.js)
+  browsers  file:///x.pdf#page=N   Firefox (pdf.js) and Chromium-based browsers (Chrome,
+                                   Chromium, Brave, Edge, Vivaldi, Opera: one shared viewer)
 
 Flatpak entries (``flatpak run ... --command=okular org.kde.okular @@u %U @@``) work the same:
 the options go in front of the ``@@u`` file-forwarding block. Any other viewer, a missing
@@ -56,7 +57,7 @@ def spot_for(result: SearchResult) -> Spot | None:
     return Spot(page) if page >= 1 else None
 
 
-def _pdfjs_uri(path: str, spot: Spot) -> str:
+def _page_uri(path: str, spot: Spot) -> str:
     return f"{Path(path).as_uri()}#page={spot.page}"
 
 
@@ -68,17 +69,28 @@ OPTION_VIEWERS: dict[str, Callable[[Spot], list[str]]] = {
     "zathura": lambda spot: [f"--page={spot.page}"],
 }
 # Program name -> the file argument replaced by a URI.
-URI_VIEWERS: dict[str, Callable[[str, Spot], str]] = {
-    "firefox": _pdfjs_uri,
-    "firefox-esr": _pdfjs_uri,
-    "firefox-bin": _pdfjs_uri,
-}
+BROWSERS = (
+    "firefox", "firefox-esr", "firefox-bin",
+    "chromium", "chromium-browser", "chrome", "google-chrome", "google-chrome-stable",
+    "google-chrome-beta", "google-chrome-unstable", "brave", "brave-browser", "brave-browser-stable",
+    "brave-browser-beta", "brave-browser-nightly", "microsoft-edge", "microsoft-edge-stable",
+    "microsoft-edge-beta", "microsoft-edge-dev", "edge", "vivaldi", "vivaldi-stable", "vivaldi-snapshot",
+    "opera", "opera-beta", "opera-developer",
+)
+URI_VIEWERS: dict[str, Callable[[str, Spot], str]] = dict.fromkeys(BROWSERS, _page_uri)
 FLATPAK_APPS: dict[str, str] = {
     "org.kde.okular": "okular",
     "org.gnome.Evince": "evince",
     "org.gnome.Papers": "papers",
     "org.pwmt.zathura": "zathura",
     "org.mozilla.firefox": "firefox",
+    "org.chromium.Chromium": "chromium",
+    "io.github.ungoogled_software.ungoogled_chromium": "chromium",
+    "com.google.Chrome": "chrome",
+    "com.brave.Browser": "brave",
+    "com.microsoft.Edge": "edge",
+    "com.vivaldi.Vivaldi": "vivaldi",
+    "com.opera.Opera": "opera",
 }
 
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")

@@ -52,6 +52,15 @@ def test_build_argv_per_viewer() -> None:
     assert build_argv(["papers", "%U"], PDF, SPOT) == ["papers", "--page-index=7", PDF]
     assert build_argv(["zathura", "%f"], PDF, SPOT) == ["zathura", "--page=7", PDF]
     assert build_argv(["firefox", "%u"], PDF, SPOT) == ["firefox", "file:///home/u/Docs/paper%20one.pdf#page=7"]
+    # Chromium-based browsers share one PDF viewer that takes the same fragment.
+    uri = "file:///home/u/Docs/paper%20one.pdf#page=7"
+    for exe in ("/usr/bin/google-chrome-stable", "/usr/bin/brave-browser-stable", "chromium-browser",
+                "/usr/bin/microsoft-edge-stable", "vivaldi-stable", "opera"):
+        assert build_argv([exe, "%U"], PDF, SPOT) == [exe, uri]
+    flatpak = ["/usr/bin/flatpak", "run", "--branch=stable", "--command=/app/bin/chrome", "--file-forwarding",
+               "com.google.Chrome", "@@u", "%U", "@@"]
+    assert build_argv(flatpak, PDF, SPOT) == [*flatpak[:6], "@@u", uri, "@@"]
+    assert viewer_name(["flatpak", "run", "com.brave.Browser", "%U"]) == "brave"
 
 
 def test_build_argv_flatpak_options_go_before_forwarding_block() -> None:
