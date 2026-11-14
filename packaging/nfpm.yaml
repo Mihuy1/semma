@@ -1,0 +1,51 @@
+# One description for both packages: scripts/package.sh fills build/stage and the variables, then
+# runs `nfpm package` once for the .rpm and once for the .deb.
+name: semma
+arch: amd64
+platform: linux
+version: ${SEMMA_VERSION}
+release: "1"
+section: utils
+priority: optional
+maintainer: Semma
+homepage: https://github.com/Mihuy1/semma
+description: |
+  Semantic file search for KDE KRunner and GNOME Shell.
+  Finds documents, PDFs, pictures, recordings and videos by what is in them, with
+  EmbeddingGemma 2 running on this computer through llama.cpp (Vulkan or CPU).
+  The model (865 MB) is downloaded the first time the service runs.
+
+contents:
+  - src: build/stage/usr
+    dst: /usr
+    type: tree
+
+scripts:
+  postinstall: packaging/postinstall.sh
+  preremove: packaging/preremove.sh
+
+# Python and its libraries are inside the package; the llama.cpp libraries need the C and C++
+# runtimes of the image they were built in or newer, and OpenMP. Vulkan and ffmpeg are optional:
+# without Vulkan the model runs on the processor, without ffmpeg audio and video are skipped.
+overrides:
+  deb:
+    depends:
+      - libc6 (>= ${SEMMA_GLIBC})
+      - libstdc++6
+      - libgomp1
+    recommends:
+      - libvulkan1
+      - ffmpeg
+  rpm:
+    depends:
+      - glibc >= ${SEMMA_GLIBC}
+      - libstdc++
+      - libgomp
+    recommends:
+      - vulkan-loader
+      - /usr/bin/ffmpeg
+
+deb:
+  compression: xz
+rpm:
+  compression: zstd
