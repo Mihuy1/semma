@@ -31,7 +31,7 @@ if [[ ${1:-} != --native ]]; then
   mkdir -p build
   # glslc compiles the Vulkan backend's shaders at build time; the backend loads the system's Vulkan
   # at run time.
-  "$engine" run --rm -v "$PWD:/src:Z" -w /src "$IMAGE" bash -c '
+  "$engine" run --rm --security-opt label=disable -v "$PWD:/src" -w /src "$IMAGE" bash -c '
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -q > /dev/null
@@ -61,7 +61,7 @@ cmake -S "$SOURCE" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build "$BUILD" -j "$(nproc)" > /dev/null
 
 # Each library once, under the name the others ask for (libllama.so.0), plus the unversioned name
-# embedder.py loads; the backends (libggml-cpu-*.so, libggml-vulkan.so) are loaded by path. They find
+# embedder.py loads; the backends (libggml-cpu-*.so, libsemma-ggml-vulkan.so) are loaded by path. They find
 # each other in their own folder ($ORIGIN, not the build's folders).
 rm -rf "$OUT"
 mkdir -p "$OUT/lib"
@@ -74,7 +74,9 @@ for file in "$BUILD"/bin/*.so*; do
     cp "$file" "$OUT/lib/"
   fi
 done
-strip --strip-unneeded "$OUT"/lib/*.so.* "$OUT"/lib/libggml-*.so 2>/dev/null || true
+# Under a name ggml does not look for: embedder.py loads it, and only in a worker that uses the GPU.
+mv "$OUT/lib/libggml-vulkan.so" "$OUT/lib/libsemma-ggml-vulkan.so"
+strip --strip-unneeded "$OUT"/lib/*.so.* "$OUT"/lib/lib*ggml-*.so 2>/dev/null || true
 cp "$SOURCE/LICENSE" "$OUT/LICENSE.llama.cpp"
 echo "$COMMIT native" > "$OUT/BUILD"
 echo "Built llama.cpp ${COMMIT:0:10} into $OUT/lib:"

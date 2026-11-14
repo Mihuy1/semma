@@ -16,8 +16,9 @@ NAME = "model.gguf"
 
 
 class _Server:
-    def __init__(self, honour_range: bool = True) -> None:
+    def __init__(self, honour_range: bool = True, cut_first: int = 0) -> None:
         self.ranges: list[str | None] = []
+        self.cut = cut_first  # the first answer stops after this many bytes (a clean early close)
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -26,9 +27,19 @@ class _Server:
                 outer.ranges.append(rng)
                 body, status = DATA, 200
                 if rng and honour_range:
-                    body, status = DATA[int(rng.removeprefix("bytes=").rstrip("-")):], 206
+                    start = int(rng.removeprefix("bytes=").rstrip("-"))
+                    if start >= len(DATA):
+                        self.send_error(416)
+                        return
+                    body, status = DATA[start:], 206
                 self.send_response(status)
-                self.send_header("Content-Length", str(len(body)))
+                if status == 206:
+                    self.send_header("Content-Range", f"bytes {start}-{len(DATA) - 1}/{len(DATA)}")
+                if outer.cut:
+                    body, outer.cut = body[: outer.cut], 0
+                    self.send_header("Connection", "close")  # no length: the close ends the body
+                else:
+                    self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -44,12 +55,12 @@ class _Server:
 def serve(monkeypatch: pytest.MonkeyPatch):
     servers: list[_Server] = []
 
-    def start(honour_range: bool = True, sha: str | None = None) -> _Server:
-        server = _Server(honour_range)
+    def start(honour_range: bool = True, sha: str | None = None, cut_first: int = 0, size: int = len(DATA)) -> _Server:
+        server = _Server(honour_range, cut_first)
         servers.append(server)
         monkeypatch.setattr(emb, "GGUF_BASE_URL", server.url)
         digest = sha or hashlib.sha256(DATA).hexdigest()
-        monkeypatch.setattr(emb, "GGUF_SPECS", {"text": (NAME, len(DATA), digest)})
+        monkeypatch.setattr(emb, "GGUF_SPECS", {"text": (NAME, size, digest)})
         return server
 
     yield start
@@ -94,3 +105,22 @@ def test_bad_checksum_discards_file(tmp_path: Path, serve) -> None:
         emb.ensure_model_file("text", tmp_path)
     assert not (tmp_path / NAME).exists()
     assert not (tmp_path / f"{NAME}.part").exists()
+
+
+def test_early_close_keeps_partial_file_for_resume(tmp_path: Path, serve) -> None:
+    server = serve(cut_first=400_000)
+    with pytest.raises(RuntimeError, match="stopped at 400000"):
+        emb.ensure_model_file("text", tmp_path)
+    assert (tmp_path / f"{NAME}.part").stat().st_size == 400_000
+    assert emb.ensure_model_file("text", tmp_path).read_bytes() == DATA
+    assert server.ranges == [None, "bytes=400000-"]
+
+
+def test_partial_file_longer_than_servers_restarts(tmp_path: Path, serve) -> None:
+    # A part left by another revision: longer than the server's file, shorter than expected.
+    server = serve(size=len(DATA) + 10)
+    (tmp_path / f"{NAME}.part").write_bytes(b"x" * (len(DATA) + 5))
+    with pytest.raises(RuntimeError, match="stopped at"):  # the server's file is the short one here
+        emb.ensure_model_file("text", tmp_path)
+    assert server.ranges == [f"bytes={len(DATA) + 5}-", None]
+    assert (tmp_path / f"{NAME}.part").read_bytes() == DATA

@@ -26,6 +26,7 @@ import os
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import weakref
 from collections import OrderedDict, deque
@@ -60,7 +61,6 @@ QUERY_CACHE_SIZE = 256  # type-as-you-go sends the same prefixes again (backspac
 # configured size) only after this many successful batches in a row.
 OOM_REGROW_AFTER = 200
 
-DEFAULT_LLAMA_LIB_DIR = Path("/home/yahhas/Documents/llama.cpp/build/bin")
 GGUF_REVISION = "bfcd298762cc34d0357ece5ebdd31791a3a374d8"
 GGUF_BASE_URL = f"https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/{GGUF_REVISION}"
 GGUF_SPECS: dict[str, tuple[str, int, str]] = {
@@ -78,6 +78,7 @@ GGUF_SPECS: dict[str, tuple[str, int, str]] = {
 
 _DOWNLOAD_LOCK = threading.Lock()
 DOWNLOAD_CHUNK = 1024 * 1024
+VULKAN_MODULE = "libsemma-ggml-vulkan.so"
 
 
 class LlamaOOMError(RuntimeError):
@@ -256,8 +257,6 @@ def resolve_llama_lib_dir(cfg: Config | None = None) -> Path:
     bundled = bundled_llama_lib_dir()
     if bundled is not None:
         return bundled
-    if DEFAULT_LLAMA_LIB_DIR.is_dir():
-        return DEFAULT_LLAMA_LIB_DIR
     return xdg_data_home(Path.home()) / "semma" / "lib"
 
 
@@ -289,6 +288,10 @@ def ensure_model_file(kind: str, model_dir: Path) -> Path:
                     hasher.update(chunk)
             digest = hasher.hexdigest()
             total = part.stat().st_size
+            if total < expected_size:
+                # The server closed the connection early (urllib reports that as the end of the
+                # data): the part is kept, and the next call continues after it.
+                raise RuntimeError(f"download of {filename} stopped at {total} of {expected_size} bytes")
             if total != expected_size or digest != expected_sha256:
                 part.unlink(missing_ok=True)
                 raise RuntimeError(
@@ -304,7 +307,8 @@ def _download_resumable(url: str, part: Path, expected_size: int) -> None:
     """Download `url` into `part`, continuing after the bytes `part` already holds.
 
     A failed transfer leaves `part` in place for the next call. A server that ignores the range
-    request (200 instead of 206) restarts the file from zero.
+    request (200 instead of 206), answers with another range, or has a shorter file (416) restarts
+    the file from zero.
     """
     have = part.stat().st_size if part.is_file() else 0
     if have > expected_size:
@@ -318,8 +322,20 @@ def _download_resumable(url: str, part: Path, expected_size: int) -> None:
     mib = 1024 * 1024
     log.info("downloading %s (%d MiB%s) to %s", part.name.removesuffix(".part"), expected_size // mib,
              f", continuing at {have // mib} MiB" if have else "", part.parent)
-    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=120) as resp:
-        resumed = have > 0 and resp.status == 206
+    try:
+        resp = urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=120)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 416 or not have:
+            raise
+        # The part is longer than the server's file (left by another model revision): start again.
+        part.unlink()
+        return _download_resumable(url, part, expected_size)
+    with resp:
+        resumed = (have > 0 and resp.status == 206
+                   and (resp.headers.get("Content-Range") or "").startswith(f"bytes {have}-"))
+        if have and resp.status == 206 and not resumed:
+            part.unlink()  # a range other than the one asked for
+            return _download_resumable(url, part, expected_size)
         with part.open("ab" if resumed else "wb") as fh:
             while chunk := resp.read(DOWNLOAD_CHUNK):
                 fh.write(chunk)
@@ -464,6 +480,14 @@ def _system_has_vulkan() -> bool:
     return True
 
 
+def _vulkan_module(lib_dir: Path) -> Path | None:
+    """The Vulkan backend of a build with module backends. scripts/build-llama.sh gives it a name
+    ggml does not look for when it loads its backends, so a worker that runs on the processor
+    never touches Vulkan."""
+    path = lib_dir / VULKAN_MODULE
+    return path if path.exists() else None
+
+
 def _backends_are_modules(lib_dir: Path) -> bool:
     """True for a llama.cpp build whose backends are loaded at run time (GGML_BACKEND_DL): the CPU
     backend then exists only as per-microarchitecture variants (libggml-cpu-haswell.so, ...)."""
@@ -500,6 +524,9 @@ def _load_shared_libs(
     if hasattr(ggml, "ggml_backend_load_all_from_path"):
         ggml.ggml_backend_load_all_from_path.argtypes = [ctypes.c_char_p]
         ggml.ggml_backend_load_all_from_path.restype = None
+    if hasattr(ggml, "ggml_backend_load"):
+        ggml.ggml_backend_load.argtypes = [ctypes.c_char_p]
+        ggml.ggml_backend_load.restype = ctypes.c_void_p
     if hasattr(ggml, "ggml_backend_reg_count"):
         ggml.ggml_backend_reg_count.argtypes = []
         ggml.ggml_backend_reg_count.restype = ctypes.c_size_t
@@ -700,9 +727,12 @@ class _LlamaEngine:
         if self.mtmd is not None:
             self.mtmd.mtmd_log_set(self._log_cb, None)
 
-        # Module backends are registered here: the best CPU variant for this machine, and Vulkan when
-        # the system has it (a missing libvulkan only leaves that backend out).
+        # Module backends are registered here: Vulkan only for a GPU worker (a missing or broken
+        # libvulkan leaves that backend out), then the best CPU variant for this machine.
         modules = _backends_are_modules(Path(lib_dir))
+        vulkan = _vulkan_module(Path(lib_dir))
+        if use_gpu and modules and vulkan is not None:
+            self.ggml.ggml_backend_load(str(vulkan).encode("utf-8"))
         if (use_gpu or modules) and hasattr(self.ggml, "ggml_backend_load_all_from_path"):
             self.ggml.ggml_backend_load_all_from_path(lib_dir.encode("utf-8"))
         self.llama.llama_backend_init()
@@ -1517,7 +1547,9 @@ class Embedder:
         return resolve_model_dir(self._cfg)
 
     def _has_vulkan_lib(self) -> bool:
-        return (self._lib_dir() / "libggml-vulkan.so").exists() and _system_has_vulkan()
+        lib_dir = self._lib_dir()
+        found = (lib_dir / "libggml-vulkan.so").exists() or _vulkan_module(lib_dir) is not None
+        return found and _system_has_vulkan()
 
     def _resolve_index_device_spec(self) -> tuple[bool, int | None, str, bool, bool]:
         return _parse_device_spec(self.requested_device, has_vulkan_lib=self._has_vulkan_lib())
