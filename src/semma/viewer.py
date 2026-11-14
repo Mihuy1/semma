@@ -62,6 +62,10 @@ class Spot:
 def find_phrase(snippet: str) -> str | None:
     """The first few words of a snippet, trimmed of punctuation at both ends, or None."""
     words = snippet.removesuffix("…").split()
+    # A page's first chunk often starts with its printed page number or a section number
+    # ("19", "4.2", "[15]") on a line of its own; a phrase spanning that line never matches.
+    while words and not any(c.isalpha() for c in words[0]):
+        words.pop(0)
     picked: list[str] = []
     for word in words[:FIND_MAX_WORDS]:
         if picked and len(" ".join([*picked, word])) > FIND_MAX_CHARS:

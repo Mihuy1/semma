@@ -30,7 +30,13 @@ def _pdf_result(position: float | None = 7.0, modality: str = "text",
 def test_find_phrase_takes_first_words_trimmed() -> None:
     assert find_phrase("Quantum walrus sings at midnight on the shore…") == "Quantum walrus sings at midnight"
     assert find_phrase("“Hello there,” said the walrus.") == "Hello there,” said the walrus"
-    assert find_phrase("(1) Introduction") == "1) Introduction"
+    # Leading page and section numbers are skipped: they sit on a line of their own.
+    assert find_phrase("(1) Introduction") == "Introduction"
+    assert find_phrase("19 Ensin kuvan EXIF-metatietoon mahdollisesti tallennettu") == \
+        "Ensin kuvan EXIF-metatietoon mahdollisesti"
+    assert find_phrase("12 4.2 Vision Transformer -arkkitehtuuri Vision") == "Vision Transformer -arkkitehtuuri Vision"
+    assert find_phrase("[15] Rafal Jozefowicz, Oriol Vinyals") == "Rafal Jozefowicz, Oriol Vinyals"
+    assert find_phrase("12 34 5.6") is None
     # Long words: stop before the phrase exceeds the char budget.
     long = "Supercalifragilistic expialidocious antidisestablishmentarianism words here"
     assert find_phrase(long) == "Supercalifragilistic expialidocious"
