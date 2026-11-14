@@ -12,10 +12,12 @@ cd "$(dirname "$0")/.."
 package=${1:?usage: scripts/check-package.sh <package> [image]}
 case $package in
   *.rpm) image=${2:-registry.fedoraproject.org/fedora:latest}
-         install="dnf install -y -q --setopt=install_weak_deps=False /pkg/$(basename "$package") dbus-daemon systemd > /dev/null" ;;
+         install="dnf install -y -q --setopt=install_weak_deps=False /pkg/$(basename "$package") dbus-daemon systemd > /dev/null"
+         reinstall="rpm -U --nosignature --replacepkgs /pkg/$(basename "$package")" remove="rpm -e semma" ;;
   *.deb) image=${2:-docker.io/library/ubuntu:24.04}
          install="apt-get update -q > /dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
-           --no-install-recommends /pkg/$(basename "$package") dbus-daemon systemd > /dev/null" ;;
+           --no-install-recommends /pkg/$(basename "$package") dbus-daemon systemd > /dev/null"
+         reinstall="dpkg -i /pkg/$(basename "$package")" remove="dpkg --purge semma" ;;
   *) echo "not an .rpm or a .deb: $package" >&2; exit 1 ;;
 esac
 engine=$(command -v podman || command -v docker) || { echo "needs podman or docker" >&2; exit 1; }
@@ -31,13 +33,18 @@ fi
 echo "checking $package on $image"
 "$engine" run --rm --security-opt label=disable -v "$(realpath "$(dirname "$package")"):/pkg:ro" \
   -v "$models:/models:$mode" \
-  -e SEMMA_MODEL_DIR=/models "$image" bash -c "
+  -e SEMMA_MODEL_DIR=/models -e reinstall="$reinstall" -e remove="$remove" "$image" bash -c "
 set -euo pipefail
 $install"'
 missing=$(find /usr/lib/semma -type f \( -name "*.so*" -o -name python3.13 \) -exec ldd {} + 2>&1 |
   grep "not found" | grep -v libvulkan.so.1 | sort -u || true)   # Vulkan is optional
 if [[ -n $missing ]]; then echo "missing libraries:"; echo "$missing"; exit 1; fi
 test -L /etc/systemd/user/graphical-session.target.wants/semma.service || { echo "the service is not enabled for users"; exit 1; }
+# An upgrade (here the same version again) leaves the service off where an administrator turned it off.
+systemctl --global disable semma.service 2> /dev/null
+$reinstall > /dev/null
+test ! -e /etc/systemd/user/graphical-session.target.wants/semma.service || { echo "an upgrade enabled the service again"; exit 1; }
+systemctl --global enable semma.service 2> /dev/null
 for file in /usr/share/dbus-1/services/io.github.Semma.service /usr/lib/systemd/user/semma.service \
     /usr/share/krunner/dbusplugins/semma.desktop /usr/share/applications/io.github.Semma.desktop \
     /usr/share/gnome-shell/search-providers/io.github.Semma.search-provider.ini; do
@@ -92,4 +99,6 @@ dbus-run-session -- /usr/lib/semma/python/bin/python3.13 -c "
 from semma.daemon import daemon_call
 status = daemon_call(\"Status\", auto_start=True, timeout=60)
 print(\"service: started over D-Bus,\", status.get(\"state\", status))"
+$remove > /dev/null
+test ! -e /etc/systemd/user/graphical-session.target.wants/semma.service || { echo "removing left the service enabled"; exit 1; }
 echo ok'

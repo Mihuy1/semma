@@ -23,6 +23,7 @@ contents:
 scripts:
   postinstall: packaging/postinstall.sh
   preremove: packaging/preremove.sh
+  postremove: packaging/postremove.sh
 
 # Python and its libraries are inside the package; the llama.cpp libraries need the C and C++
 # runtimes of the image they were built in or newer, and OpenMP. Vulkan and ffmpeg are optional:
