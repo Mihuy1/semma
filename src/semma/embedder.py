@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import atexit
 import ctypes
+import fcntl
+import functools
 import hashlib
 import logging
 import math
 import multiprocessing
 import os
+import sys
 import threading
 import time
 import urllib.request
@@ -74,6 +77,7 @@ GGUF_SPECS: dict[str, tuple[str, int, str]] = {
 }
 
 _DOWNLOAD_LOCK = threading.Lock()
+DOWNLOAD_CHUNK = 1024 * 1024
 
 
 class LlamaOOMError(RuntimeError):
@@ -230,62 +234,97 @@ def resolve_model_dir(cfg: Config | None = None) -> Path:
     return xdg_data_home(Path.home()) / "semma" / "models"
 
 
+def bundled_llama_lib_dir() -> Path | None:
+    """The llama.cpp libraries an installed package carries beside its Python (/usr/lib/semma/llama),
+    or those scripts/build-llama.sh built in a source checkout (build/llama/lib)."""
+    candidates = (
+        Path(sys.base_prefix).parent / "llama",
+        Path(__file__).resolve().parents[2] / "build" / "llama" / "lib",
+    )
+    for candidate in candidates:
+        if (candidate / "libllama.so").exists():
+            return candidate
+    return None
+
+
 def resolve_llama_lib_dir(cfg: Config | None = None) -> Path:
     env = os.environ.get("SEMMA_LLAMA_LIB_DIR", "").strip()
     if env:
         return Path(env).expanduser()
     if cfg is not None and getattr(cfg, "llama_lib_dir", None) is not None:
         return Path(cfg.llama_lib_dir)
+    bundled = bundled_llama_lib_dir()
+    if bundled is not None:
+        return bundled
     if DEFAULT_LLAMA_LIB_DIR.is_dir():
         return DEFAULT_LLAMA_LIB_DIR
     return xdg_data_home(Path.home()) / "semma" / "lib"
 
 
 def ensure_model_file(kind: str, model_dir: Path) -> Path:
-    """Ensure a GGUF file exists in `model_dir` with expected size, downloading atomically if missing."""
+    """Ensure a GGUF file exists in `model_dir` with the expected size, downloading it if missing.
+
+    An interrupted download is kept as `<name>.part` and continued from where it stopped (an HTTP
+    range request) the next time; the finished file is checked against its size and SHA-256 before it
+    is moved into place. A lock file keeps other processes (the query and index workers, a second
+    daemon) from writing the same partial file.
+    """
     filename, expected_size, expected_sha256 = GGUF_SPECS[kind]
     dest = model_dir / filename
     if dest.is_file() and dest.stat().st_size == expected_size:
         return dest
 
     with _DOWNLOAD_LOCK:
-        if dest.is_file() and dest.stat().st_size == expected_size:
+        model_dir.mkdir(parents=True, exist_ok=True)
+        with (model_dir / f"{filename}.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if dest.is_file() and dest.stat().st_size == expected_size:
+                return dest
+            part = model_dir / f"{filename}.part"
+            _download_resumable(f"{GGUF_BASE_URL}/{filename}", part, expected_size)
+
+            hasher = hashlib.sha256()
+            with part.open("rb") as fh:
+                while chunk := fh.read(DOWNLOAD_CHUNK):
+                    hasher.update(chunk)
+            digest = hasher.hexdigest()
+            total = part.stat().st_size
+            if total != expected_size or digest != expected_sha256:
+                part.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"downloaded {filename} failed verification: size={total} (expected {expected_size}), "
+                    f"sha256={digest} (expected {expected_sha256})"
+                )
+            os.replace(part, dest)
+            log.info("verified %s (sha256=%s)", filename, digest[:12])
             return dest
 
-        model_dir.mkdir(parents=True, exist_ok=True)
-        part = model_dir / f"{filename}.part.{os.getpid()}.{threading.get_ident()}"
-        url = f"{GGUF_BASE_URL}/{filename}"
-        log.info("downloading %s (%d MiB) to %s", filename, expected_size // (1024 * 1024), dest)
 
-        req = urllib.request.Request(url, headers={"User-Agent": "Semma/0.1"})
-        hasher = hashlib.sha256()
-        total = 0
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp, part.open("wb") as fh:
-                while True:
-                    chunk = resp.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-                    hasher.update(chunk)
-                    total += len(chunk)
-                fh.flush()
-                os.fsync(fh.fileno())
-        except Exception:
-            part.unlink(missing_ok=True)
-            raise
+def _download_resumable(url: str, part: Path, expected_size: int) -> None:
+    """Download `url` into `part`, continuing after the bytes `part` already holds.
 
-        digest = hasher.hexdigest()
-        if total != expected_size or digest != expected_sha256:
-            part.unlink(missing_ok=True)
-            raise RuntimeError(
-                f"downloaded {filename} failed verification: size={total} (expected {expected_size}), "
-                f"sha256={digest} (expected {expected_sha256})"
-            )
-
-        os.replace(part, dest)
-        log.info("verified %s (sha256=%s)", filename, digest[:12])
-        return dest
+    A failed transfer leaves `part` in place for the next call. A server that ignores the range
+    request (200 instead of 206) restarts the file from zero.
+    """
+    have = part.stat().st_size if part.is_file() else 0
+    if have > expected_size:
+        part.unlink()
+        have = 0
+    if have == expected_size:
+        return
+    headers = {"User-Agent": "Semma/0.1"}
+    if have:
+        headers["Range"] = f"bytes={have}-"
+    mib = 1024 * 1024
+    log.info("downloading %s (%d MiB%s) to %s", part.name.removesuffix(".part"), expected_size // mib,
+             f", continuing at {have // mib} MiB" if have else "", part.parent)
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=120) as resp:
+        resumed = have > 0 and resp.status == 206
+        with part.open("ab" if resumed else "wb") as fh:
+            while chunk := resp.read(DOWNLOAD_CHUNK):
+                fh.write(chunk)
+            fh.flush()
+            os.fsync(fh.fileno())
 
 
 # ---------------------------------------------------------------------------
@@ -414,14 +453,35 @@ class _MtmdDecoderPos(ctypes.Structure):
     ]
 
 
+@functools.cache
+def _system_has_vulkan() -> bool:
+    """Whether the system's Vulkan loader is installed. The packages only recommend it: without it
+    llama.cpp's Vulkan backend cannot be loaded, and "auto" means the processor."""
+    try:
+        ctypes.CDLL("libvulkan.so.1")
+    except OSError:
+        return False
+    return True
+
+
+def _backends_are_modules(lib_dir: Path) -> bool:
+    """True for a llama.cpp build whose backends are loaded at run time (GGML_BACKEND_DL): the CPU
+    backend then exists only as per-microarchitecture variants (libggml-cpu-haswell.so, ...)."""
+    return not (lib_dir / "libggml-cpu.so").exists() and any(lib_dir.glob("libggml-cpu-*.so"))
+
+
 def _load_shared_libs(
     lib_dir: Path,
     need_mtmd: bool,
     need_vulkan: bool = True,
 ) -> tuple[ctypes.CDLL, ctypes.CDLL, ctypes.CDLL | None]:
-    names = ["libggml-base.so", "libggml-cpu.so"]
-    if need_vulkan and (lib_dir / "libggml-vulkan.so").exists():
-        names.append("libggml-vulkan.so")
+    # A build with ggml's backends as modules (GGML_BACKEND_DL, what the packages carry) has no
+    # libggml-cpu.so: ggml picks the CPU variant for this machine itself (see _backends_are_modules).
+    names = ["libggml-base.so"]
+    if not _backends_are_modules(lib_dir):
+        names.append("libggml-cpu.so")
+        if need_vulkan and (lib_dir / "libggml-vulkan.so").exists():
+            names.append("libggml-vulkan.so")
     names.extend(["libggml.so", "libllama.so"])
     if need_mtmd:
         names.append("libmtmd.so")
@@ -640,7 +700,10 @@ class _LlamaEngine:
         if self.mtmd is not None:
             self.mtmd.mtmd_log_set(self._log_cb, None)
 
-        if use_gpu and hasattr(self.ggml, "ggml_backend_load_all_from_path"):
+        # Module backends are registered here: the best CPU variant for this machine, and Vulkan when
+        # the system has it (a missing libvulkan only leaves that backend out).
+        modules = _backends_are_modules(Path(lib_dir))
+        if (use_gpu or modules) and hasattr(self.ggml, "ggml_backend_load_all_from_path"):
             self.ggml.ggml_backend_load_all_from_path(lib_dir.encode("utf-8"))
         self.llama.llama_backend_init()
 
@@ -1454,7 +1517,7 @@ class Embedder:
         return resolve_model_dir(self._cfg)
 
     def _has_vulkan_lib(self) -> bool:
-        return (self._lib_dir() / "libggml-vulkan.so").exists()
+        return (self._lib_dir() / "libggml-vulkan.so").exists() and _system_has_vulkan()
 
     def _resolve_index_device_spec(self) -> tuple[bool, int | None, str, bool, bool]:
         return _parse_device_spec(self.requested_device, has_vulkan_lib=self._has_vulkan_lib())
