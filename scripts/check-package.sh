@@ -29,7 +29,8 @@ if ! ls "$models"/*.gguf > /dev/null 2>&1; then
 fi
 
 echo "checking $package on $image"
-"$engine" run --rm -v "$(realpath "$(dirname "$package")"):/pkg:ro,Z" -v "$models:/models:$mode,z" \
+"$engine" run --rm --security-opt label=disable -v "$(realpath "$(dirname "$package")"):/pkg:ro" \
+  -v "$models:/models:$mode" \
   -e SEMMA_MODEL_DIR=/models "$image" bash -c "
 set -euo pipefail
 $install"'
