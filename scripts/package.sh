@@ -10,7 +10,8 @@ cd "$(dirname "$0")/.."
 
 NFPM_VERSION=2.49.0
 NFPM_SHA256=2afaa5ffb5e3493402e31e7c67a5a1fb42133e3f66fc315ca0051934125561c7
-PYTHON_VERSION=3.13
+PYTHON=3.13.16
+PYTHON_VERSION=${PYTHON%.*}
 
 scripts/build-llama.sh
 
@@ -21,8 +22,8 @@ rm -rf "$stage"
 mkdir -p "$prefix" "$stage/usr/bin"
 
 # Python itself: a standalone build (it needs only glibc), without what a service never uses.
-uv python install --quiet --install-dir build/python "$PYTHON_VERSION"
-python_src=$(ls -d build/python/cpython-"$PYTHON_VERSION".*-linux-x86_64-gnu | grep -v -- '-gnu/' | sort -V | tail -1)
+uv python install --quiet --install-dir build/python "$PYTHON"
+python_src=build/python/cpython-$PYTHON-linux-x86_64-gnu
 cp -a "$(readlink -f "$python_src")" "$prefix/python"
 py=$prefix/python/bin/python$PYTHON_VERSION
 lib=$prefix/python/lib/python$PYTHON_VERSION
@@ -74,6 +75,9 @@ files = {
     f"share/applications/{names.GNOME_DESKTOP_ID}": install.render_gnome_desktop_file(python),
 }
 for name, text in files.items():
+    # -I: only the package's own modules, never a file in the folder Semma is started in, the
+    # user's own site-packages or PYTHONPATH.
+    text = text.replace(f"{python} -m semma", f"{python} -I -m semma")
     path = usr / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")

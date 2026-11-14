@@ -336,7 +336,19 @@ def cmd_ctl(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def _refuse_in_package() -> bool:
+    """A package already installs these files for every user; per-user copies would take
+    precedence over them and go stale at the next update."""
+    if Path(sys.base_prefix) != Path("/usr/lib/semma/python"):
+        return False
+    print("Semma was installed from a package, which already added it to KRunner and GNOME Shell "
+          "for every user: there is nothing to install.", file=sys.stderr)
+    return True
+
+
 def cmd_install_kde(args: argparse.Namespace, cfg: Config) -> int:
+    if _refuse_in_package():
+        return 1
     from .install import install_kde
 
     for path in install_kde(
@@ -381,6 +393,8 @@ def _print_integration_status(st: dict[str, object], home: Path) -> int:
 
 
 def cmd_install_gnome(args: argparse.Namespace, cfg: Config) -> int:
+    if _refuse_in_package():
+        return 1
     from .install import install_gnome
 
     res = install_gnome(python=getattr(args, "python", None), enable=not args.no_enable)

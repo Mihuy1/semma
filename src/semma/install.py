@@ -147,6 +147,7 @@ def render_systemd_unit_file(python_path: str) -> str:
         "Description=Semma semantic file search daemon\n"
         "After=graphical-session.target\n"
         "PartOf=graphical-session.target\n"
+        "ConditionUser=!@system\n"  # not for a login screen's own account
         "\n"
         "[Service]\n"
         "Type=dbus\n"
