@@ -16,6 +16,9 @@ Then log out and back in. The package adds Semma to KRunner and GNOME Shell sear
 - Everything Semma runs on is inside the package, under `/usr/lib/semma`: its own Python 3.13 with its libraries, and llama.cpp with the Vulkan and CPU backends. The system's Python is not used.
 - The model (865 MB) is not inside. The service downloads it to `~/.local/share/semma/models` the first time it runs, checks it, and continues an interrupted download where it stopped.
 - Vulkan (`vulkan-loader` / `libvulkan1`) and `ffmpeg` are recommended, not required: without Vulkan the model runs on the processor, without ffmpeg audio and video files are skipped.
+- The first search waits for that download; `journalctl --user -u semma -f` shows it. Offline, searches find nothing until the model is there.
+- After an update or a removal, log out and back in: a service that is already running keeps the old version until then. Removing the package leaves each user's index and model in `~/.local/share/semma`.
+- To turn it off for one user: `systemctl --user mask --now semma.service`.
 - If you ran `semma install` from a source checkout before, run `semma uninstall` there first: the files it wrote in your home folder take precedence over the package's.
 
 Build the packages with `scripts/package.sh` (needs `uv`, `curl`, and `podman` or `docker`); they land in `dist/`. `scripts/check-package.sh dist/<package> [image]` installs one in a clean container and runs an index and a search with the real model.
