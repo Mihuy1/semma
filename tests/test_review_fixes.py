@@ -1016,3 +1016,25 @@ def test_single_word_text_hit_ranks_after_strong_meaning_match(tmp_path: Path) -
     res = s.search_vector(q, "dog", limit=10)
     assert names(res)[:2] == ["photo.jpg", "thesis.md"]
     assert res[0].matched == ["vector"] and res[1].matched == ["text"]
+
+
+@pytest.mark.parametrize(("setting", "fallback"), [(None, True), ("auto", True), ("vulkan", False)])
+def test_query_model_keeps_cpu_fallback_of_auto_device(monkeypatch, setting, fallback) -> None:
+    """"auto" resolves to the label "vulkan" when the Vulkan loader is installed; loading the
+    query model with that label must still fall back to the processor on a machine without a
+    usable GPU (only an explicitly requested GPU may fail)."""
+    from types import SimpleNamespace
+
+    from semma.embedder import Embedder
+
+    emb = Embedder(device=setting)
+    monkeypatch.setattr(emb, "_has_vulkan_lib", lambda: True)
+    specs = []
+
+    def spawn(spec, text_only):
+        specs.append(spec)
+        return SimpleNamespace(device="cpu", dim=768)
+
+    monkeypatch.setattr(emb, "_spawn_worker", spawn)
+    emb._load_query_model(emb._resolve_query_device())
+    assert specs[0][2] == "vulkan" and specs[0][4] is fallback

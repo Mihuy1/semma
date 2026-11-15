@@ -1730,9 +1730,11 @@ class Embedder:
 
     def _load_query_model(self, device: str | None = None) -> None:
         started = time.monotonic()
-        if device is None:
-            spec = self._resolve_query_device_spec()
-        else:
+        # `device` is normally the label resolved from the setting. Parsing that label again would
+        # turn "auto" (Vulkan if it works, else the processor) into an explicit "vulkan" with no
+        # fallback, and a machine with the Vulkan loader but no usable GPU could not search.
+        spec = self._resolve_query_device_spec()
+        if device is not None and device != spec[2]:
             spec = _parse_device_spec(device, has_vulkan_lib=self._has_vulkan_lib())
         worker = self._spawn_worker(spec, text_only=True)
         self.query_device = worker.device
