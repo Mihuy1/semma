@@ -33,6 +33,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import sqlite_vec
@@ -426,6 +427,51 @@ class Store:
                 removed += len(doomed)
             db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_scan_at', ?)", (str(time.time()),))
         return removed
+
+    def forget_unconfigured(self, keep_roots: Iterable[Path], exclude_paths: Iterable[Path] = (),
+                            kinds: Iterable[str] | None = None, exclude_extensions: Iterable[str] = ()) -> int:
+        """Forget files the settings no longer cover, wherever they are. `finish_scan` only
+        looks under the roots a scan walked, so this catches what it cannot see: files outside
+        every one of `keep_roots` (a root removed from the settings, mounts once they are no
+        longer included), under an excluded path, of a kind not in `kinds` or with an excluded
+        extension. A root that is configured but unavailable right now (an unplugged drive)
+        belongs in `keep_roots`: its files stay.
+
+        `exclude_paths` at or above one of `keep_roots` are ignored (the scanner walks a root
+        even when it is excluded). Extensions are matched as the scanner does: the text after
+        the last dot of the name. Returns the number of files removed.
+        """
+        keep = sorted({str(r).rstrip("/") + "/" for r in keep_roots})
+        clauses: list[str] = []
+        args: list[Any] = []
+        if "/" not in keep:
+            inside = " OR ".join("substr(path, 1, ?) = ?" for _ in keep) or "0"
+            clauses.append(f"NOT ({inside})")
+            for prefix in keep:
+                args += [len(prefix), prefix]
+        for path in exclude_paths:
+            prefix = str(path).rstrip("/") + "/"
+            if prefix == "/" or any(k.startswith(prefix) for k in keep):
+                continue
+            clauses.append("substr(path, 1, ?) = ?")
+            args += [len(prefix), prefix]
+        if kinds is not None:
+            allowed = sorted(set(kinds))
+            clauses.append(f"kind NOT IN ({','.join('?' * len(allowed))})" if allowed else "1")
+            args += allowed
+        for ext in sorted(set(exclude_extensions)):
+            ext = ext.lstrip(".").lower()
+            if not ext or "." in ext or "/" in ext:
+                continue  # the scanner compares only what follows the last dot: never matches
+            clauses.append(r"lower(path) LIKE ? ESCAPE '\'")
+            args.append("%." + ext.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_"))
+        if not clauses:
+            return 0
+        with self.write() as (db, delta):
+            doomed = [r[0] for r in db.execute(f"SELECT id FROM files WHERE {' OR '.join(clauses)}", args)]
+            db.executemany("DELETE FROM files WHERE id = ?", [(d,) for d in doomed])
+            delta.removed_files.update(doomed)
+        return len(doomed)
 
     # -- queue ----------------------------------------------------------------
     def counts(self) -> dict[tuple[str, str], int]:
