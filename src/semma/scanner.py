@@ -71,9 +71,18 @@ class Scanner:
         self.scorer = Scorer(cfg)
         self.stats = ScanStats()
         self._exclude_paths = {str(p) for p in cfg.exclude_paths}
+        self._exclude_extensions = {e.lstrip(".").lower() for e in cfg.exclude_extensions}
         # Location anchors (~, ~/Documents, ~/Downloads, ...) are never treated as projects or
         # app installs: a dotfiles .git in ~ or an .exe+.dll in Downloads must not demote/prune them.
         self._anchors = {str(p) for p in cfg.locations}
+
+    def _classify(self, name: str) -> str | None:
+        kind = ft.classify(name)
+        if kind is None or kind not in self.cfg.kinds:
+            return None
+        if self._exclude_extensions and name[name.rfind(".") + 1 :].lower() in self._exclude_extensions:
+            return None
+        return kind
 
     def _prune_reason(self, name: str, full: str, in_project: bool, at_root: bool) -> str | None:
         cfg = self.cfg
@@ -100,6 +109,7 @@ class Scanner:
         roots = cfg.effective_roots() if roots is None else roots
         self.stats = stats = ScanStats(roots=list(roots))
         self._roots = {str(r) for r in roots}
+        self._exclude_extensions = {e.lstrip(".").lower() for e in cfg.exclude_extensions}
         started = time.monotonic()
         markers = cfg.project_markers
 
@@ -153,7 +163,7 @@ class Scanner:
                         stats.files_seen += 1
                         if cfg.skip_hidden and name.startswith("."):
                             continue
-                        kind = ft.classify(name)
+                        kind = self._classify(name)
                         if kind is None:
                             continue
                         st = entry.stat(follow_symlinks=False)

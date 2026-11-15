@@ -156,6 +156,8 @@ class Config:
     include_mounts: bool = True
     skip_hidden: bool = True
     skip_app_installs: bool = True  # prune installed Windows apps/games (see scanner._is_app_install)
+    kinds: frozenset[str] = frozenset(ft.KINDS)
+    exclude_extensions: frozenset[str] = frozenset()
     exclude_dir_names: frozenset[str] = frozenset(DEFAULT_EXCLUDE_DIR_NAMES)
     root_system_dir_names: frozenset[str] = frozenset(DEFAULT_ROOT_SYSTEM_DIR_NAMES)
     project_build_dir_names: frozenset[str] = frozenset(DEFAULT_PROJECT_BUILD_DIR_NAMES)
@@ -255,6 +257,12 @@ class Config:
             self.llama_lib_dir = canonical(self.llama_lib_dir)
         if self.model_dir is not None:
             self.model_dir = canonical(self.model_dir)
+        self.kinds = frozenset(self.kinds)
+        self.exclude_extensions = frozenset(
+            e.strip().lstrip(".").lower()
+            for e in self.exclude_extensions
+            if isinstance(e, str) and e.strip().lstrip(".")
+        )
         self.exclude_dir_names = frozenset(n.casefold() for n in self.exclude_dir_names)
         self.root_system_dir_names = frozenset(n.casefold() for n in self.root_system_dir_names)
         self.project_build_dir_names = frozenset(n.casefold() for n in self.project_build_dir_names)
@@ -303,7 +311,8 @@ def load_config(path: Path | None = None, home: Path | None = None) -> Config:
 
 KNOWN_KEYS: dict[str, frozenset[str]] = {
     "": frozenset({"db_path", "scan", "priority", "media", "model", "index", "search", "daemon"}),
-    "scan": frozenset({"roots", "include_mounts", "skip_hidden", "skip_app_installs", "exclude_dir_names",
+    "scan": frozenset({"roots", "include_mounts", "skip_hidden", "skip_app_installs", "kinds",
+                       "exclude_extensions", "exclude_dir_names",
                        "root_system_dir_names", "project_build_dir_names", "project_markers",
                        "extra_exclude_dir_names", "exclude_paths"}),
     "priority": frozenset({"locations", "type_weights", "other_location", "project_penalty",
@@ -379,6 +388,39 @@ def _parse_device(raw: Any, key_name: str) -> str | None:
     return None
 
 
+def _parse_kinds(raw: Any, default: frozenset[str]) -> frozenset[str]:
+    if not isinstance(raw, list):
+        _warn(f"scan.kinds must be a list of kinds (got {raw!r}); keeping default")
+        return default
+    out: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            _warn(f"scan.kinds entry must be a string (got {item!r}); ignored")
+            continue
+        if item not in ft.KINDS:
+            _warn(f"unknown kind {item!r} in scan.kinds ignored (valid: {', '.join(ft.KINDS)})")
+            continue
+        out.add(item)
+    return frozenset(out)
+
+
+def _parse_exclude_extensions(raw: Any, default: frozenset[str]) -> frozenset[str]:
+    if not isinstance(raw, list):
+        _warn(f"scan.exclude_extensions must be a list of extensions (got {raw!r}); keeping default")
+        return default
+    out: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            _warn(f"scan.exclude_extensions entry must be a string (got {item!r}); ignored")
+            continue
+        ext = item.strip().lstrip(".").lower()
+        if not ext:
+            _warn(f"empty extension {item!r} in scan.exclude_extensions ignored")
+            continue
+        out.add(ext)
+    return frozenset(out)
+
+
 def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
     home = cfg.home
     for key in check_unknown_keys(data):
@@ -404,6 +446,10 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
     for key in ("include_mounts", "skip_hidden", "skip_app_installs"):
         if key in scan:
             setattr(cfg, key, bool(scan[key]))
+    if "kinds" in scan:
+        cfg.kinds = _parse_kinds(scan["kinds"], cfg.kinds)
+    if "exclude_extensions" in scan:
+        cfg.exclude_extensions = _parse_exclude_extensions(scan["exclude_extensions"], cfg.exclude_extensions)
     for key in ("exclude_dir_names", "root_system_dir_names", "project_build_dir_names", "project_markers"):
         if key in scan:
             setattr(cfg, key, frozenset(scan[key]))

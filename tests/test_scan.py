@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 
 from semma import filetypes as ft
-from semma.config import Config, apply_overrides, load_config
+from semma.config import Config, apply_overrides, check_unknown_keys, load_config
 from semma.priority import Scorer
 from semma.scanner import Scanner
-from semma.store import Store
+from semma.store import ChunkRecord, Store
 
 NOW = 1_800_000_000.0
 DAY = 86_400
@@ -281,3 +281,129 @@ def test_symlinked_home_is_canonicalised(tmp_path: Path) -> None:
     files = list(Scanner(cfg).scan(now=NOW))
     assert [f.path for f in files] == [str(real / "Documents/a.md")]
     assert files[0].score.parts["loc"] == 40
+
+
+def test_scan_kinds_and_exclude_extensions_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cfg = make_cfg(tmp_path)
+    assert cfg.kinds == frozenset(ft.KINDS)
+    assert cfg.exclude_extensions == frozenset()
+    assert check_unknown_keys({"scan": {"kinds": ["text"], "exclude_extensions": ["gif"]}}) == []
+
+    apply_overrides(cfg, {
+        "scan": {
+            "kinds": ["text", "pdf", "office", "image"],
+            "exclude_extensions": ["GIF", ".wav", " .Mp4 "],
+        },
+    })
+    assert cfg.kinds == frozenset({"text", "pdf", "office", "image"})
+    assert cfg.exclude_extensions == frozenset({"gif", "wav", "mp4"})
+    assert capsys.readouterr().err == ""
+
+    # Unknown kind names and non-string entries warn and are ignored.
+    cfg_bad = make_cfg(tmp_path)
+    apply_overrides(cfg_bad, {
+        "scan": {
+            "kinds": ["text", "bogus_kind", 123],
+            "exclude_extensions": [".JPG", 456, "."],
+        },
+    })
+    err = capsys.readouterr().err
+    assert "bogus_kind" in err
+    assert "123" in err
+    assert "456" in err
+    assert cfg_bad.kinds == frozenset({"text"})
+    assert cfg_bad.exclude_extensions == frozenset({"jpg"})
+
+    # A non-list kinds or exclude_extensions value warns and keeps the default.
+    cfg_nonlist = make_cfg(tmp_path)
+    apply_overrides(cfg_nonlist, {
+        "scan": {
+            "kinds": "text",
+            "exclude_extensions": ".gif",
+        },
+    })
+    err = capsys.readouterr().err
+    assert "scan.kinds" in err
+    assert "scan.exclude_extensions" in err
+    assert cfg_nonlist.kinds == frozenset(ft.KINDS)
+    assert cfg_nonlist.exclude_extensions == frozenset()
+
+
+def test_scanner_skips_disabled_kinds_and_excluded_extensions(tmp_path: Path) -> None:
+    touch(tmp_path / "Documents/notes.md")
+    touch(tmp_path / "Documents/readme.txt")
+    touch(tmp_path / "Documents/paper.pdf")
+    touch(tmp_path / "Pictures/photo.jpg")
+    touch(tmp_path / "Pictures/anim.GIF")
+    touch(tmp_path / "Music/song.flac")
+    touch(tmp_path / "Videos/clip.mp4")
+
+    cfg = make_cfg(tmp_path)
+    apply_overrides(cfg, {
+        "scan": {
+            "kinds": ["text", "pdf", "image"],
+            "exclude_extensions": ["GIF", ".txt"],
+        },
+    })
+    assert scan_paths(cfg) == {
+        "Documents/notes.md",
+        "Documents/paper.pdf",
+        "Pictures/photo.jpg",
+    }
+    # filetypes.classify itself stays unfiltered for other callers.
+    assert ft.classify("anim.GIF") == ft.IMAGE
+    assert ft.classify("song.flac") == ft.AUDIO
+
+
+def test_disallowed_files_disappear_on_next_full_scan(tmp_path: Path) -> None:
+    import numpy as np
+
+    touch(tmp_path / "Documents/notes.md")
+    touch(tmp_path / "Documents/paper.pdf")
+    touch(tmp_path / "Pictures/photo.jpg")
+    touch(tmp_path / "Pictures/anim.gif")
+    touch(tmp_path / "Music/song.flac")
+
+    cfg = make_cfg(tmp_path)
+    store = Store(tmp_path / "db/index.db")
+
+    scanner = Scanner(cfg)
+    gen = store.begin_scan()
+    store.upsert_scanned(scanner.scan(now=NOW), gen)
+    assert store.finish_scan(gen, scanner.stats.roots, scanner.stats.failed_dirs) == 0
+
+    vec = np.zeros(768, dtype=np.float32)
+    vec[0] = 1.0
+    for row in store.db.execute("SELECT id, size, mtime, kind FROM files").fetchall():
+        store.replace_chunks(
+            row["id"], row["size"], row["mtime"], row["kind"],
+            [ChunkRecord("text", "", "s", None, "hello", vec)],
+        )
+    assert store.db.execute("SELECT count(*) FROM files WHERE status = 'indexed'").fetchone()[0] == 5
+    assert store.db.execute("SELECT count(*) FROM chunks").fetchone()[0] == 5
+
+    # Disable audio and exclude .gif, then run the next full scan.
+    apply_overrides(cfg, {
+        "scan": {
+            "kinds": ["text", "pdf", "office", "image", "video"],
+            "exclude_extensions": [".GIF"],
+        },
+    })
+    scanner2 = Scanner(cfg)
+    gen2 = store.begin_scan()
+    store.upsert_scanned(scanner2.scan(now=NOW), gen2)
+    removed = store.finish_scan(gen2, scanner2.stats.roots, scanner2.stats.failed_dirs)
+
+    assert removed == 2
+    remaining = {
+        Path(r["path"]).name: r["status"]
+        for r in store.db.execute("SELECT path, status FROM files")
+    }
+    assert remaining == {
+        "notes.md": "indexed",
+        "paper.pdf": "indexed",
+        "photo.jpg": "indexed",
+    }
+    assert store.db.execute("SELECT count(*) FROM chunks").fetchone()[0] == 3
+    assert store.db.execute("SELECT count(*) FROM vec_chunks").fetchone()[0] == 3
+    store.close()
