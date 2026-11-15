@@ -55,7 +55,7 @@ DEFAULT_TINY_BYTES: dict[str, int] = {
 # Files above this size are not indexed at all.
 DEFAULT_MAX_BYTES: dict[str, int] = {
     ft.TEXT: 20 * 2**20, ft.PDF: 500 * 2**20, ft.OFFICE: 200 * 2**20,
-    ft.IMAGE: 200 * 2**20, ft.AUDIO: 4 * 2**30, ft.VIDEO: 100 * 2**30,
+    ft.IMAGE: 200 * 2**20, ft.AUDIO: 4 * 2**30, ft.VIDEO: 5 * 2**30,
 }
 
 # (max age in days, bonus points); the first matching row wins.

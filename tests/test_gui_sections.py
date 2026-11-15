@@ -184,7 +184,7 @@ def test_priorities_add_duplicate_and_problems(home: Path) -> None:
 def test_media_load_changes_and_problems(home: Path) -> None:
     ctx = ctx_for(home)
     saved = mm.load(ctx)
-    assert saved == mm.MediaValues(30, 4.0, 100.0)
+    assert saved == mm.MediaValues(30, 4.0, 5.0)
     assert mm.changes(saved, saved.copy()) == {}
 
     edited = mm.MediaValues(45, 1.0, 20.0)
@@ -205,7 +205,7 @@ def test_media_load_changes_and_problems(home: Path) -> None:
     reloaded = mm.load(reloaded_ctx)
     assert reloaded == mm.MediaValues(45, 1.0, 20.0)
 
-    back = mm.MediaValues(30, 4.0, 100.0)
+    back = mm.MediaValues(30, 4.0, 5.0)
     assert mm.changes(reloaded, back) == {
         "media": {"max_minutes": None},
         "scan": {"max_file_mb": None},
@@ -213,7 +213,7 @@ def test_media_load_changes_and_problems(home: Path) -> None:
     update_config(ctx.config_path, mm.changes(reloaded, back))
     assert read_raw(ctx.config_path) == {}
 
-    assert mm.problems(mm.MediaValues(30, 4.0, 100.0), ctx) == []
+    assert mm.problems(mm.MediaValues(30, 4.0, 5.0), ctx) == []
     probs = mm.problems(mm.MediaValues(0, 0.0, 2000.0), ctx)
     assert len(probs) == 3 and all(p.blocking for p in probs)
 
@@ -221,7 +221,7 @@ def test_media_load_changes_and_problems(home: Path) -> None:
 def test_media_keeps_other_kind_overrides_in_max_file_mb(home: Path) -> None:
     ctx = ctx_for(home, "[scan]\nmax_file_mb = { pdf = 1000, audio = 2048 }\n")
     saved = mm.load(ctx)
-    assert saved == mm.MediaValues(30, 2.0, 100.0)
+    assert saved == mm.MediaValues(30, 2.0, 5.0)
     assert saved.other_max_file_mb == {"pdf": 1000}
 
     # Changing only max_minutes leaves scan.max_file_mb untouched in changes()
@@ -426,7 +426,7 @@ def test_media_section_widget(app: QtWidgets.QApplication, home: Path) -> None:
     assert not sec.is_modified()
     assert sec.max_minutes.value() == 30
     assert sec.max_audio_gb.value() == pytest.approx(4.0)
-    assert sec.max_video_gb.value() == pytest.approx(100.0)
+    assert sec.max_video_gb.value() == pytest.approx(5.0)
 
     sec.max_minutes.setValue(60)
     sec.max_audio_gb.setValue(1.5)
@@ -444,7 +444,7 @@ def test_media_section_widget(app: QtWidgets.QApplication, home: Path) -> None:
 
     sec.max_minutes.setValue(30)
     sec.max_audio_gb.setValue(4.0)
-    sec.max_video_gb.setValue(100.0)
+    sec.max_video_gb.setValue(5.0)
     assert sec.changes() == {
         "media": {"max_minutes": None},
         "scan": {"max_file_mb": {"pdf": 800}},
