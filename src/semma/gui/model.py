@@ -203,6 +203,11 @@ def headline(st: dict[str, Any], home: Path | str) -> Headline:
     indexed, pending = _int(st, "indexed"), _int(st, "pending")
     total = indexed + pending
 
+    if st.get("setup_pending"):
+        return Headline("Setup is not finished",
+                        detail="Indexing and desktop search are off. Finish setup with "
+                               "Settings → Run setup again, or run `semma setup` in a terminal.")
+
     if state == "downloading" or st.get("download_file"):
         done, size = _num(st, "download_all_done"), _num(st, "download_all_total")
         if size <= 0:
@@ -251,6 +256,43 @@ def headline(st: dict[str, Any], home: Path | str) -> Headline:
         return Headline("Nothing indexed yet")
 
     return Headline(state.capitalize())
+
+
+@dataclass
+class DownloadFooter:
+    """The model-download line kept under every page of the setup wizard."""
+
+    text: str
+    progress: tuple[int, int] | None = None
+    busy: bool = False
+    offer_start: bool = False
+
+
+def download_footer(st: dict[str, Any] | None) -> DownloadFooter:
+    """Progress for the wizard footer from a Status() dict, or None when the daemon is down."""
+    if st is None:
+        return DownloadFooter("The Semma service is not running.", offer_start=True)
+    if st.get("download_file"):
+        done, size = _num(st, "download_all_done"), _num(st, "download_all_total")
+        if size <= 0:
+            done, size = _num(st, "download_done"), _num(st, "download_total")
+        if size > 0:
+            return DownloadFooter(f"Downloading the model: {format_bytes_of(done, size)}",
+                                  progress=(int(done), int(size)))
+        return DownloadFooter("Downloading the model", busy=True)
+    if st.get("model_files_ready"):
+        total = _num(st, "model_bytes_total")
+        if total > 0:
+            return DownloadFooter("Model ready", progress=(int(total), int(total)))
+        return DownloadFooter("Model ready")
+    err = str(st.get("download_error") or "")
+    done, total = _num(st, "model_bytes_done"), _num(st, "model_bytes_total")
+    progress = (int(done), int(total)) if total > 0 else None
+    if err:
+        return DownloadFooter(f"Download failed: {err} Retrying.", progress=progress)
+    if progress is not None:
+        return DownloadFooter(f"Waiting to download the model: {format_bytes_of(done, total)}", progress=progress)
+    return DownloadFooter("Waiting for the model download", busy=True)
 
 
 def status_view(st: dict[str, Any], home: Path | str, now: float | None = None) -> StatusView:

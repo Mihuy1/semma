@@ -141,6 +141,18 @@ def _hold_lock(path: Path):
     return fh
 
 
+def test_model_files_status_counts_partial_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _two_files(monkeypatch)
+    assert emb.model_files_status(tmp_path / "missing") == {"ready": False, "done": 0, "total": 4000}
+    (tmp_path / "a.gguf.part").write_bytes(b"x" * 400)
+    assert emb.model_files_status(tmp_path) == {"ready": False, "done": 400, "total": 4000}
+    (tmp_path / "a.gguf").write_bytes(b"x" * 1000)
+    (tmp_path / "b.gguf").write_bytes(b"x" * 3000)
+    assert emb.model_files_status(tmp_path) == {"ready": True, "done": 4000, "total": 4000}
+    # Ready does not depend on the download lock: a complete file is ready with nobody downloading.
+    assert emb.download_progress(tmp_path) is None
+
+
 def test_no_download_progress_without_a_running_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _two_files(monkeypatch)
     assert emb.download_progress(tmp_path / "missing") is None

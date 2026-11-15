@@ -358,6 +358,24 @@ def download_progress(model_dir: Path) -> dict[str, Any] | None:
             "all_done": all_done, "all_total": all_total}
 
 
+def model_files_status(model_dir: Path) -> dict[str, Any]:
+    """Bytes of the model files on disk, whether or not a download is running.
+
+    `ready` is true when every file is present at its expected size. A `.part` file counts
+    toward `done` but not toward `ready`. Unlike `download_progress`, this is never None.
+    """
+    done = total = 0
+    ready = True
+    for filename, size, _sha in GGUF_SPECS.values():
+        total += size
+        if _file_size(model_dir / filename) == size:
+            done += size
+            continue
+        ready = False
+        done += min(_file_size(model_dir / f"{filename}.part"), size)
+    return {"ready": ready and total > 0, "done": done, "total": total}
+
+
 def _download_resumable(url: str, part: Path, expected_size: int) -> None:
     """Download `url` into `part`, continuing after the bytes `part` already holds.
 
@@ -1604,6 +1622,10 @@ class Embedder:
     def download_progress(self) -> dict[str, Any] | None:
         """The model download in progress, if any (see `download_progress`)."""
         return download_progress(self._model_dir())
+
+    def model_files_status(self) -> dict[str, Any]:
+        """Bytes of the model files on disk (see `model_files_status`)."""
+        return model_files_status(self._model_dir())
 
     def _has_vulkan_lib(self) -> bool:
         lib_dir = self._lib_dir()

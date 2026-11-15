@@ -13,7 +13,9 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QTabWidget
 
 from .. import dbus_names
 from ..config import load_config
+from ..onboarding import onboarding_done
 from .client import DaemonClient
+from .onboarding import OnboardingWindow
 from .qtasync import Relay
 from .settings.page import SettingsPage
 from .status_page import StatusPage
@@ -47,18 +49,54 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
         self.resize(*DEFAULT_SIZE)
         self.activate_requested.connect(self.bring_forward)
+        self._wizard: OnboardingWindow | None = None
+        self.settings_page.setup_requested.connect(self.open_setup)
         self._closing_after_apply = False
         self._in_close_event = False
         self._apply_close_result: bool | None = None
         self.settings_page.reload_finished.connect(self._on_reload_finished)
 
     def bring_forward(self, token: str = "") -> None:
+        wizard = self._wizard
+        if wizard is not None and wizard.isVisible():
+            wizard.bring_forward(token)
+            return
         if token:
             os.environ["XDG_ACTIVATION_TOKEN"] = token  # used by Qt's Wayland activation
         self.setWindowState((self.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive)
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def open_setup(self) -> None:
+        """Open the wizard over this window. The caller has already cleared the completion flag."""
+        if self._wizard is not None and self._wizard.isVisible():
+            self._wizard.raise_()
+            self.hide()
+            return
+        if self._wizard is not None:
+            self._wizard.deleteLater()  # the closed one from an earlier run
+        wizard = OnboardingWindow(self.client, self.settings_page.config_path, self.settings_page.home,
+                                  rerun=True)
+        self._wizard = wizard
+        wizard.finished_ok.connect(self._setup_finished)
+        wizard.closed_early.connect(self._setup_closed)
+        wizard.show()
+        self.hide()
+
+    def _setup_finished(self) -> None:
+        self.settings_page.reload()
+        self.show()
+        self.raise_()
+        wizard = self._wizard
+        if wizard is not None:
+            wizard.close()
+
+    def _setup_closed(self) -> None:
+        self.tabs.setCurrentWidget(self.status_page)  # it says that setup is not finished
+        if not self.isVisible():
+            self.show()
+            self.raise_()
 
     def _show_settings_section(self) -> None:
         self.tabs.setCurrentWidget(self.settings_page)
@@ -164,14 +202,27 @@ def make_app(argv: list[str] | None = None) -> QApplication:
     return app
 
 
+def _setup_required(config_path: Path | None) -> bool:
+    """True when the user still has to finish the wizard. A broken config opens the main window."""
+    try:
+        cfg = load_config(config_path)
+    except Exception:
+        return False
+    return not onboarding_done(cfg)
+
+
 def run(config_path: Path | None = None) -> int:
     app = make_app()
     client = DaemonClient()
     relay = Relay()
-    window: MainWindow | None = None
+    current: dict[str, MainWindow | OnboardingWindow | None] = {"window": None}
 
     def on_activate(token: str) -> None:  # on the client's thread
-        relay.post(lambda: window.activate_requested.emit(token) if window is not None else None)
+        def raise_current() -> None:
+            window = current["window"]
+            if window is not None:
+                window.bring_forward(token)  # the wizard or the main window
+        relay.post(raise_current)
 
     from .single import claim
 
@@ -182,10 +233,28 @@ def run(config_path: Path | None = None) -> int:
     if owned is False:  # another window came forward
         client.close()
         return 0
-    window = MainWindow(client, config_path)
-    window.setWindowIcon(app_icon())
+
+    def show_main() -> MainWindow:
+        window = MainWindow(client, config_path)
+        window.setWindowIcon(app_icon())
+        current["window"] = window
+        window.show()
+        return window
+
+    if _setup_required(config_path):
+        wizard = OnboardingWindow(client, config_path)
+        wizard.setWindowIcon(app_icon())
+        current["window"] = wizard
+
+        def started() -> None:
+            show_main()
+            wizard.close()
+
+        wizard.finished_ok.connect(started)
+        wizard.show()
+    else:
+        show_main()
     app.setWindowIcon(app_icon())
-    window.show()
     try:
         return app.exec()
     finally:

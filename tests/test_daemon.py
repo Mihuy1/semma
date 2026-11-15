@@ -215,6 +215,7 @@ def make_cfg(home: Path) -> Config:
     cfg.gpu_check_seconds = 0.05
     cfg.model_idle_unload_minutes = 0  # tests that need it set it
     cfg.index_model_unload_seconds = 0  # tests that need it set it
+    cfg.onboarding_complete = True  # these tests are past first-run setup
     cfg.canonicalize()
     return cfg
 
@@ -230,6 +231,7 @@ def make_daemon(cfg: Config, *, embedder: Any = None, extractor: FakeExtractor |
                 gpu: StubGpu | None = None, watcher: bool = True, **kw: Any) -> Daemon:
     kw.setdefault("runner_factory", None)
     kw.setdefault("gnome_factory", None)
+    kw.setdefault("model_download", None)  # don't fetch the real model
     d = Daemon(cfg, embedder=embedder or LifecycleEmbedder(), extract_fn=extractor or FakeExtractor(),
                gpu_monitor=gpu, watcher_factory=StubWatcher if watcher else None, **kw)
     d.gpu_busy_recheck_s = 0.05
@@ -1056,6 +1058,8 @@ def test_ctl_status_output(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     idle = {**st, "download_file": "", "run_total": 0, "run_done": 0, "scan_dir": "", "scan_dirs": 0}
     text = "\n".join(cli.format_daemon_status(idle, home))
     assert "Downloading" not in text and "Scanning" not in text and "Indexing run" not in text
+    failed = {**idle, "download_error": "network unreachable"}
+    assert "Model download failed: network unreachable" in "\n".join(cli.format_daemon_status(failed, home))
 
     monkeypatch.setattr(daemon_mod, "daemon_status", lambda: st)
     import argparse
@@ -1134,7 +1138,7 @@ def test_krunner_match_over_dbus(home: Path) -> None:
     async def main() -> None:
         name = test_bus_name()
         d = Daemon(make_cfg(home), embedder=LifecycleEmbedder(), extract_fn=FakeExtractor(), gpu_monitor=None,
-                   watcher_factory=None, runner_factory=KRunnerService, bus_name=name)
+                   watcher_factory=None, runner_factory=KRunnerService, model_download=None, bus_name=name)
         stop = asyncio.Event()
         task = asyncio.ensure_future(serve(d, stop_event=stop))
         bus = await MessageBus().connect()
@@ -1212,8 +1216,9 @@ def test_sigterm_exits_cleanly(tmp_path: Path) -> None:
     conf = tmp_path / "config.toml"
     conf.write_text(f'db_path = "{tmp_path}/db/index.db"\n[scan]\nroots = ["{tmp_path}/empty"]\n'
                     f"include_mounts = false\n", encoding="utf-8")
-    code = ("import sys\nfrom pathlib import Path\nfrom semma.config import load_config\n"
+    code = ("import os, sys\nfrom pathlib import Path\nfrom semma.config import load_config\n"
             "from semma.daemon import run_daemon\n"
+            f"os.environ['SEMMA_MODEL_DIR'] = {str(tmp_path / 'models')!r}\n"
             f"cfg = load_config(path=Path({str(conf)!r}), home=Path({str(tmp_path)!r}))\n"
             f"sys.exit(run_daemon(cfg, bus_name={name!r}))\n")
     proc = subprocess.Popen([sys.executable, "-c", code], stderr=subprocess.PIPE, text=True)

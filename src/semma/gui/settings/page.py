@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
@@ -35,6 +37,7 @@ RESTART_NOTICE = "Restart the service to apply these changes."
 
 class SettingsPage(QWidget):
     reload_finished = Signal(bool)  # True when applied cleanly (or daemon stopped); False if restart needed or error
+    setup_requested = Signal()  # Run setup again: the flag is already false and the daemon was told
 
     def __init__(self, client: Any, config_path: Path | None = None, home: Path | None = None,
                  sections: list[type[SettingsSection]] | None = None, parent: QWidget | None = None) -> None:
@@ -80,16 +83,24 @@ class SettingsPage(QWidget):
         self.revert_button.setText("Revert")
         self.apply_button.clicked.connect(self.apply)
         self.revert_button.clicked.connect(self.revert)
+        self.setup_button = QPushButton("Run setup again", self)
+        self.setup_button.setToolTip("Pause indexing and choose folders, file types and the processor again. "
+                                     "Files already indexed are kept.")
+        self.setup_button.clicked.connect(self.run_setup_again)
 
         top = QHBoxLayout()
         top.addWidget(self.nav)
         top.addWidget(self.stack, 1)
+        actions = QHBoxLayout()
+        actions.addWidget(self.setup_button)
+        actions.addStretch(1)
+        actions.addWidget(self.buttons)
         lay = QVBoxLayout(self)
         lay.addLayout(top, 1)
         lay.addWidget(self.problems_label)
         lay.addWidget(self.error)
         lay.addWidget(self.notice)
-        lay.addWidget(self.buttons)
+        lay.addLayout(actions)
         self.reload()
 
     # -- loading and state ----------------------------------------------------------------
@@ -132,6 +143,7 @@ class SettingsPage(QWidget):
         blocking = any(p.blocking for p in problems)
         self.apply_button.setEnabled(modified and not blocking)
         self.revert_button.setEnabled(modified or self.ctx is None)
+        self.setup_button.setEnabled(self.ctx is not None)
         for i, s in enumerate(self.sections):
             item = self.nav.item(i)
             font = item.font()
@@ -203,6 +215,50 @@ class SettingsPage(QWidget):
         self.notice.action_button().setEnabled(True)
         self.notice.show_message("error", f"The service could not be restarted: {describe_error(exc)}",
                                  "Restart service", self.restart_service)
+
+    def run_setup_again(self) -> None:
+        """Set onboarding_complete = false, tell the daemon, and ask the window to open setup.
+
+        The index is not deleted. Indexing stays paused until setup finishes and sets the flag true.
+        """
+        if self.ctx is None or not self._confirm_setup_again():
+            return
+        try:
+            update_config(self.ctx.config_path, {"": {"onboarding_complete": False}})
+        except ConfigWriteError as exc:
+            self.error.show_message("error", f"Setup was not started: {exc}")
+            return
+        self.notice.clear()
+        if not self.reload():
+            return
+        self._relay.when_done(self.client.reload_config(), self._setup_paused, self._setup_pause_failed)
+
+    def _confirm_setup_again(self) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Run setup again")
+        box.setText("Indexing pauses until you finish setup.")
+        extra = ("Unapplied edits on this page are not included until you apply them.\n\n"
+                 if self.is_modified() else "")
+        box.setInformativeText(f"{extra}Files already indexed are kept.")
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        yes = box.button(QMessageBox.StandardButton.Yes)
+        if yes is not None:
+            yes.setText("Run setup again")
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        return box.exec() == QMessageBox.StandardButton.Yes
+
+    def _setup_paused(self, needs_restart: list[str] | None) -> None:
+        if needs_restart is None:
+            self.notice.show_message(
+                "warning", "Restart the service so it pauses indexing. Setup will open now.")
+        self.setup_requested.emit()
+
+    def _setup_pause_failed(self, exc: BaseException) -> None:
+        if not isinstance(exc, DaemonNotRunning):
+            self.notice.show_message(
+                "warning", f"Saved, but the service could not be told: {describe_error(exc)}")
+        self.setup_requested.emit()
 
     def select(self, key: str) -> SettingsSection:
         for i, s in enumerate(self.sections):

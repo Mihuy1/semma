@@ -62,6 +62,9 @@ def _inside(path: Path, parent: Path) -> bool:
     return path == parent or parent in path.parents
 
 
+NOTHING_INDEXED = "nothing_indexed"  # Problem.code: no folder and no external drives
+
+
 def problems(values: FoldersValues, ctx: SettingsContext) -> list[Problem]:
     out: list[Problem] = []
     roots = [ctx.resolve(r) for r in values.roots]
@@ -73,7 +76,7 @@ def problems(values: FoldersValues, ctx: SettingsContext) -> list[Problem]:
                 out.append(Problem(f"{text} is in the {label} folders twice."))
             seen.add(p)
     if not roots and not values.include_mounts:
-        out.append(Problem("Nothing is indexed: add a folder, or index external drives."))
+        out.append(Problem("Nothing is indexed: add a folder, or index external drives.", code=NOTHING_INDEXED))
     mounts = [Path(m) for m in MOUNT_PARENTS] if values.include_mounts else []
     for text, p in zip(values.exclude_paths, excludes, strict=True):
         if p in roots:

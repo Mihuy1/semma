@@ -59,6 +59,7 @@ class Problem:
     """A note under a section's form. A blocking one keeps Apply disabled."""
     text: str
     blocking: bool = False
+    code: str = ""  # a stable name for callers that treat one problem specially; not shown
 
 
 def merge_changes(*parts: Changes) -> Changes:
