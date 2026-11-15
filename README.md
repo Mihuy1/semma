@@ -11,12 +11,12 @@ sudo dnf install ./semma-0.2.0-1.x86_64.rpm     # Fedora
 sudo apt install ./semma_0.2.0-1_amd64.deb      # Ubuntu, Debian
 ```
 
-Then log out and back in. The package adds Semma to the application menu, KRunner, and GNOME Shell search for every user and starts its service with the session; nothing else needs to be set up. Opening **Semma** from the application menu (or `semma gui` in a graphical session) shows the status of the model download and indexing, and the settings.
+Then log out and back in. The package adds Semma to the application menu, KRunner, and GNOME Shell search for every user and starts its service with the session; nothing else needs to be set up. The service starts downloading the model immediately. It does not scan or index until you open **Semma** and finish the setup wizard (folders, file types, audio and video limits, and whether the model runs on the graphics card or the processor). The download progress stays on screen for the whole wizard. Closing the wizard before the end discards those choices and leaves indexing off; opening Semma again starts the wizard over. An upgrade keeps indexing and does not show the wizard when you already have an index. **Run setup again** in Settings pauses indexing until you finish, and keeps the index you already have. After setup, the window shows the status of the download and indexing, and the settings.
 
 - Everything Semma runs on is inside the package, under `/usr/lib/semma`: its own Python 3.13 with its libraries (including a trimmed Qt Widgets runtime for `semma gui`), and llama.cpp with the Vulkan and CPU backends. The system's Python is not used.
-- The model (865 MB) is not inside. The service downloads it to `~/.local/share/semma/models` the first time it runs, checks it, and continues an interrupted download where it stopped.
+- The model (865 MB) is not inside. The service downloads it to `~/.local/share/semma/models` the first time it runs, checks it, and continues an interrupted download where it stopped. Indexing starts after setup, and waits if the download has not finished.
 - Vulkan (`vulkan-loader` / `libvulkan1`), `ffmpeg`, and the Wayland/X11 system libraries for the window are recommended, not required: without Vulkan the model runs on the processor, without ffmpeg audio and video files are skipped, and a minimal or headless install (`--no-install-recommends` / `install_weak_deps=False`) skips the desktop libraries while keeping the daemon and CLI.
-- The first search waits for that download; `journalctl --user -u semma -f` shows it. Offline, searches find nothing until the model is there.
+- Until setup is finished, desktop search returns nothing and does not load the model. After that, the first search waits for the download; `journalctl --user -u semma -f` shows it. Offline, the download retries and searches find nothing until the model is there.
 - After an update or a removal, log out and back in: a service that is already running keeps the old version until then. Removing the package leaves each user's index and model in `~/.local/share/semma`.
 - To turn it off for one user: `systemctl --user mask --now semma.service`.
 - If you ran `semma install` from a source checkout before, run `semma uninstall` there first: the files it wrote in your home folder take precedence over the package's.
@@ -32,14 +32,14 @@ Build the packages with `scripts/package.sh` (needs `uv`, `curl`, and `podman` o
 - Explicit GNOME: `uv run semma install-gnome [--python PATH] [--no-enable]`, `uv run semma uninstall-gnome`
 - Status: `uv run semma kde-status`, `uv run semma gnome-status`
 
-Both `install-kde` and `install-gnome` also add **Semma** to the application menu (`~/.local/share/applications/io.github.Semma.desktop`) to open the window (status of the model download and indexing; settings for folders and file types).
+Both `install-kde` and `install-gnome` also add **Semma** to the application menu (`~/.local/share/applications/io.github.Semma.desktop`). Opening it runs the setup wizard the first time, then shows the status of the model download and indexing and the settings (folders, file types, and the rest).
 
 ## CLI
 
 - Build and inspect the index: `uv run semma scan`, `uv run semma index`, `uv run semma status [--failed]`
 - Query from the terminal: `uv run semma search <query> [-n N] [--kind KIND] [--json]`
 - Run or control the daemon: `uv run semma daemon`, `uv run semma ctl status|pause|resume|rescan|retry-failed`
-- Open the window with the daemon's status and the settings: `uv run semma gui` (needs PySide6; closing it does not stop indexing)
+- Open the window with the daemon's status and the settings: `uv run semma gui` (needs PySide6; the first launch is the setup wizard; closing the window does not stop the service)
 
 ## GNOME notes
 

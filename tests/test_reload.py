@@ -29,6 +29,7 @@ from semma.store import Store
 def base_settings(home: Path) -> dict[str, Any]:
     """The settings of test_daemon.make_cfg, as config.toml."""
     return {
+        "onboarding_complete": True,
         "db_path": str(home / "db" / "index.db"),
         "scan": {"roots": [str(home / "Documents")], "include_mounts": False},
         "priority": {"locations": {str(home / "Documents"): 40}},
@@ -78,7 +79,8 @@ def home(tmp_path: Path) -> Path:
 
 def test_every_config_field_has_a_reload_rule() -> None:
     groups = [daemon_mod.RESTART_FIELDS, daemon_mod.SCAN_FIELDS, daemon_mod.PRIORITY_FIELDS,
-              daemon_mod.NEXT_FILE_FIELDS, daemon_mod.LIVE_FIELDS, dict.fromkeys(daemon_mod.FIXED_FIELDS)]
+              daemon_mod.NEXT_FILE_FIELDS, daemon_mod.LIVE_FIELDS, daemon_mod.ONBOARDING_FIELDS,
+              dict.fromkeys(daemon_mod.FIXED_FIELDS)]
     names = [attr for g in groups for attr in g]
     assert len(names) == len(set(names))
     assert set(names) == {f.name for f in dataclasses.fields(Config)}
@@ -267,6 +269,7 @@ def test_restart_keys_are_reported_and_not_applied(home: Path) -> None:
             settings["search"]["vector_cache_max_chunks"] = 5
             settings["daemon"]["krunner_max_results"] = 3  # live, applied
             restart = await reload_and_settle(d, home, settings, rescan=False)
+            # Indexing has loaded the model, so the device still waits for a restart.
             assert sorted(restart) == ["db_path", "index.batch_sizes", "model.device", "model.name",
                                        "search.vector_cache_max_chunks"]
             assert d.cfg.db_path == cfg.db_path and d.cfg.device is None and d.cfg.model_name == cfg.model_name
@@ -275,6 +278,48 @@ def test_restart_keys_are_reported_and_not_applied(home: Path) -> None:
             assert sorted(await d.reload_config()) == sorted(restart)
             # Back to the started values: nothing to restart for.
             assert await reload_and_settle(d, home, base_settings(home), rescan=False) == []
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
+def test_device_applies_without_a_restart_before_the_model_is_loaded(home: Path) -> None:
+    async def main() -> None:
+        cfg = start_cfg(home)
+        from test_daemon import LifecycleEmbedder
+        emb = LifecycleEmbedder()
+        emb.requested_device = None
+        emb.requested_query_device = "auto"
+        d = make_daemon(cfg, embedder=emb)
+        settings = base_settings(home)
+        settings["model"] = {"device": "cpu"}
+        write_config(home, settings)
+        restart = await d.reload_config()
+        assert "model.device" not in restart
+        assert d.cfg.device is None  # not swapped in until the worker applies it
+        assert d._pending_cfg is not None and d._pending_cfg.device == "cpu"
+        d._apply_config(d._pending_cfg)
+        assert d.cfg.device == "cpu" and emb.requested_device == "cpu"
+        # A second reload of the same file does not ask for a restart again.
+        assert "model.device" not in await d.reload_config()
+
+    asyncio.run(main())
+
+
+def test_device_change_needs_a_restart_once_the_model_is_loaded(home: Path) -> None:
+    async def main() -> None:
+        cfg = start_cfg(home)
+        d = make_daemon(cfg)
+        d.start()
+        try:
+            await until_idle(d)
+            d.embedder.load()
+            settings = base_settings(home)
+            settings["model"] = {"device": "cpu"}
+            restart = await reload_and_settle(d, home, settings, rescan=False)
+            assert restart == ["model.device"]
+            assert d.cfg.device is None
         finally:
             await d.stop()
 

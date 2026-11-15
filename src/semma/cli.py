@@ -343,6 +343,8 @@ def format_daemon_status(st: dict[str, object], home: Path) -> list[str]:
             all_done, all_total = num("download_all_done"), num("download_all_total")
             lines.append(f"  all model files: {_human(all_done)} of {_human(all_total)} "
                          f"({_percent(all_done, all_total)})")
+    elif st.get("download_error"):
+        lines += ["", f"Model download failed: {st['download_error']}"]
     if st.get("scan_dir") or num("scan_dirs"):
         lines += ["", f"Scanning: {num('scan_dirs'):,.0f} folders, {num('scan_files'):,.0f} files seen, "
                       f"{num('scan_matched'):,.0f} to index"]

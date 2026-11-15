@@ -232,6 +232,10 @@ class Config:
     krunner_max_results: int = 10
     query_debounce_ms: float = 100  # search-as-you-type: only the last keystroke is searched
 
+    # None: the key is absent. The daemon then indexes only when this user already has an
+    # index (see onboarding.onboarding_done). False pauses indexing until setup finishes.
+    onboarding_complete: bool | None = None
+
     # Where `load_config` read this from (the file, which need not exist, and the home it
     # expanded ~ against), so the daemon can read the same file again. Not settings.
     source_path: Path | None = field(default=None, compare=False, repr=False)
@@ -342,7 +346,8 @@ def load_config(path: Path | None = None, home: Path | None = None, *, strict: b
 
 
 KNOWN_KEYS: dict[str, frozenset[str]] = {
-    "": frozenset({"db_path", "scan", "priority", "media", "model", "index", "search", "daemon"}),
+    "": frozenset({"db_path", "onboarding_complete", "scan", "priority", "media", "model", "index",
+                   "search", "daemon"}),
     "scan": frozenset({"roots", "include_mounts", "skip_hidden", "skip_app_installs", "kinds",
                        "exclude_extensions", "exclude_dir_names",
                        "root_system_dir_names", "project_build_dir_names", "project_markers",
@@ -489,6 +494,12 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
 
     if "db_path" in data:
         cfg.db_path = _expand(data["db_path"], home)
+    if "onboarding_complete" in data:
+        flag = data["onboarding_complete"]
+        if isinstance(flag, bool):
+            cfg.onboarding_complete = flag
+        else:
+            _warn(f"onboarding_complete must be true or false (got {flag!r}); ignored")
     if "roots" in scan:
         cfg.roots = [_expand(p, home) for p in scan["roots"]]
     for key in ("include_mounts", "skip_hidden", "skip_app_installs"):

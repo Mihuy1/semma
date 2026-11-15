@@ -351,6 +351,18 @@ def test_top_level_key_added_before_existing_sections_and_scalar_updates(tmp_pat
     }
 
 
+def test_onboarding_complete_round_trips(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text("[scan]\nroots = [\"~/Documents\"]\n", encoding="utf-8")
+    update_config(cfg_path, {"": {"onboarding_complete": False}})
+    assert read_raw(cfg_path)["onboarding_complete"] is False
+    assert "roots" in read_raw(cfg_path)["scan"]
+    loaded = config.load_config(cfg_path, home=tmp_path)
+    assert loaded.onboarding_complete is False
+    update_config(cfg_path, {"": {"onboarding_complete": True}})
+    assert config.load_config(cfg_path, home=tmp_path).onboarding_complete is True
+
+
 def test_unserializable_value_raises_without_modifying_file(tmp_path: Path) -> None:
     cfg_path = tmp_path / "config.toml"
     original = b"[scan]\nskip_hidden = true\n"

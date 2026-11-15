@@ -152,6 +152,21 @@ def test_headline_unknown_state() -> None:
     assert m.headline(status(state="defragmenting"), HOME).text == "Defragmenting"
 
 
+def test_download_footer() -> None:
+    assert m.download_footer(None).offer_start
+    assert m.download_footer(None).text == "The Semma service is not running."
+    view = m.download_footer(status(download_file="a.gguf", download_all_done=412_000_000,
+                                    download_all_total=865_000_000))
+    assert view.text == "Downloading the model: 412 of 865 MB"
+    assert view.progress == (412_000_000, 865_000_000)
+    ready = m.download_footer(status(model_files_ready=True, model_bytes_done=100, model_bytes_total=100))
+    assert ready.text == "Model ready" and ready.progress == (100, 100)
+    failed = m.download_footer(status(download_error="offline", model_bytes_done=10, model_bytes_total=100))
+    assert failed.text == "Download failed: offline Retrying." and failed.progress == (10, 100)
+    waiting = m.download_footer(status(model_bytes_done=0, model_bytes_total=4000))
+    assert waiting.text.startswith("Waiting to download") and waiting.progress == (0, 4000)
+
+
 def test_status_view_of_an_older_daemon_without_the_new_keys() -> None:
     old = {"state": "indexing", "paused": False, "pause_reason": "", "pending": 3, "indexed": 7, "failed": 1,
            "chunks": 20, "current_file": "/home/u/a.md", "last_scan_at": 940.0, "uptime": 5.0,

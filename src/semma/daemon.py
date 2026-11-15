@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import ctypes
 import logging
 import os
@@ -58,6 +59,7 @@ from . import dbus_names
 from . import filetypes as ft
 from .config import Config, ConfigError, canonical, load_config
 from .indexer import Indexer, IndexStats, ModelMismatch
+from .onboarding import onboarding_done
 from .scanner import Scanner, _is_app_install
 from .search import Searcher, SearchResult
 from .store import Store
@@ -72,6 +74,8 @@ GPU_BUSY_UNLOAD_S = 60.0  # unload after 1 min without queries while another app
 # pending; don't spin on them, wait for the rescan their change triggers (or this long).
 NO_PROGRESS_RETRY_S = 300.0
 WORKER_BACKOFF_S = (5.0, 600.0)  # after an unexpected error: first wait, maximum wait
+DOWNLOAD_BACKOFF_S = (5.0, 300.0)  # model download failed: first wait, maximum wait
+DOWNLOAD_JOIN_S = 2.0  # don't let a stuck transfer hold up shutdown; the part file resumes
 SHUTDOWN_JOIN_S = 60.0
 MAX_PARTIAL_SCAN_DIRS = 64  # more changed directories than this: one full scan instead
 
@@ -120,6 +124,8 @@ LIVE_FIELDS: dict[str, str] = {
     "gpu_busy_threshold": "daemon.gpu_busy_threshold", "gpu_check_seconds": "daemon.gpu_check_seconds",
     "krunner_max_results": "daemon.krunner_max_results", "query_debounce_ms": "daemon.query_debounce_ms",
 }
+# First-run setup. false stops scanning and indexing; true starts a full scan. The index is kept.
+ONBOARDING_FIELDS: dict[str, str] = {"onboarding_complete": "onboarding_complete"}
 # Not settings: always those the daemon started with.
 FIXED_FIELDS: tuple[str, ...] = ("home", "source_path", "source_home")
 
@@ -271,6 +277,7 @@ class Daemon:
                  watcher_factory: WatcherFactory | None = _DEFAULT,
                  runner_factory: RunnerFactory | None = _DEFAULT,
                  gnome_factory: RunnerFactory | None = _DEFAULT,
+                 model_download: Callable[[Config], None] | None = _DEFAULT,
                  bus_name: str = dbus_names.BUS_NAME,
                  config_loader: Callable[[], Config] | None = None) -> None:
         self.cfg = cfg
@@ -283,6 +290,13 @@ class Daemon:
         self.bus_name = bus_name
         self.store = store if store is not None else Store(
             cfg.db_path, vector_cache=True, cache_max_chunks=cfg.vector_cache_max_chunks)
+        # None: the caller disabled the download (tests). `_DEFAULT`: download the GGUF files.
+        self._model_download = download_model_files if model_download is _DEFAULT else model_download
+        self._download_error = ""
+        self._download_thread: threading.Thread | None = None
+        self._setup_done = onboarding_done(cfg, self.store)
+        self._logged_wait_setup = False
+        self._logged_wait_model = False
         if embedder is None:
             from .embedder import Embedder
 
@@ -344,12 +358,16 @@ class Daemon:
     # -- lifecycle ------------------------------------------------------------------------
     def start(self) -> None:
         """Start the background threads and timers (call from the running event loop).
-        The first thing the worker does is a full scan."""
+
+        The model download starts immediately. A full scan starts only once setup is finished;
+        until then the worker waits and searches return nothing.
+        """
         if self._running:
             return
         self._running = True
         self._loop = asyncio.get_running_loop()
         self._started = time.monotonic()
+        self._setup_done = onboarding_done(self.cfg, self.store)
         if self._watcher_factory is not None:
             try:
                 self.watcher = self._watcher_factory(self._on_watch_change, self.cfg.watch_debounce_seconds)
@@ -357,10 +375,15 @@ class Daemon:
             except Exception:
                 log.exception("file watcher unavailable; relying on the daily rescan")
                 self.watcher = None
-        with self._cv:
-            self._scan_full = True
+        if self._setup_done:
+            with self._cv:
+                self._scan_full = True
         self._worker = threading.Thread(target=self._worker_main, name="semma-worker", daemon=True)
         self._worker.start()
+        if self._model_download is not None:
+            self._download_thread = threading.Thread(
+                target=self._download_main, name="semma-download", daemon=True)
+            self._download_thread.start()
         if self.gpu_monitor is not None:
             self._gpu_thread = threading.Thread(target=self._gpu_main, name="semma-gpumon", daemon=True)
             self._gpu_thread.start()
@@ -384,12 +407,17 @@ class Daemon:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(self.watcher.stop)
         clean = True
-        for thread in (self._worker, self._gpu_thread):
+        for thread, timeout in (
+            (self._download_thread, DOWNLOAD_JOIN_S),
+            (self._worker, SHUTDOWN_JOIN_S),
+            (self._gpu_thread, SHUTDOWN_JOIN_S),
+        ):
             if thread is not None:
-                await asyncio.to_thread(thread.join, SHUTDOWN_JOIN_S)
+                await asyncio.to_thread(thread.join, timeout)
                 if thread.is_alive():
-                    log.warning("%s did not stop within %.0fs", thread.name, SHUTDOWN_JOIN_S)
-                    clean = False
+                    log.warning("%s did not stop within %.0fs", thread.name, timeout)
+                    if thread is not self._download_thread:
+                        clean = False
         await asyncio.to_thread(self._search_exec.shutdown, True, cancel_futures=True)
         await asyncio.to_thread(self._model_exec.shutdown, True, cancel_futures=True)
         await asyncio.to_thread(self._status_exec.shutdown, True, cancel_futures=True)
@@ -421,6 +449,9 @@ class Daemon:
         try:
             q = query.strip()
             if len(q) < MIN_QUERY_CHARS or self._closed:
+                return []
+            # Setup is still open: don't load the model (that would pin the device) and don't search.
+            if not self._setup_done:
                 return []
             debounce = self.cfg.query_debounce_ms / 1000
             if debounce > 0:
@@ -631,7 +662,7 @@ class Daemon:
         """Everything `Control.Status` reports; see STATUS_SIGNATURES for the types. The keys are
         always all present (zero or empty when that part is not running)."""
         loop = asyncio.get_running_loop()
-        by_kind, chunks, dl = await loop.run_in_executor(self._status_exec, self._status_sync)
+        by_kind, chunks, dl, files = await loop.run_in_executor(self._status_exec, self._status_sync)
         counts = {status: sum(kinds.values()) for status, kinds in by_kind.items()}
         q_loaded = self._query_model_loaded()
         i_loaded = self._index_model_loaded()
@@ -662,6 +693,10 @@ class Daemon:
             "download_total": dl.get("total", 0),
             "download_all_done": dl.get("all_done", 0),
             "download_all_total": dl.get("all_total", 0),
+            "download_error": self._download_error,
+            "model_files_ready": bool(files.get("ready")),
+            "model_bytes_done": int(files.get("done") or 0),
+            "model_bytes_total": int(files.get("total") or 0),
             "run_done": run_done,
             "run_total": run_total,
             "run_failed": run_failed,
@@ -672,14 +707,33 @@ class Daemon:
             "scan_matched": scan.matched if scan is not None else 0,
         }
 
-    def _status_sync(self) -> tuple[dict[str, dict[str, int]], int, dict[str, Any] | None]:
+    def _status_sync(self) -> tuple[dict[str, dict[str, int]], int, dict[str, Any] | None, dict[str, Any]]:
         """On the status thread: file counts per status and kind, chunks, the model download."""
         db = self.store.reader()
         by_kind: dict[str, dict[str, int]] = {s: dict.fromkeys(ft.KINDS, 0) for s in ("pending", "indexed", "failed")}
         for status, kind, n in db.execute("SELECT status, kind, count(*) FROM files GROUP BY status, kind"):
             by_kind.setdefault(status, dict.fromkeys(ft.KINDS, 0))[kind] = n
         chunks = db.execute("SELECT count(*) FROM chunks").fetchone()[0]
-        return by_kind, chunks, self._download_sync()
+        return by_kind, chunks, self._download_sync(), self._model_files_status()
+
+    def _model_files_status(self) -> dict[str, Any]:
+        """Bytes on disk. A test double with no probe is treated as ready so indexing is not blocked."""
+        probe = getattr(self.embedder, "model_files_status", None)
+        if probe is None:
+            return {"ready": True, "done": 0, "total": 0}
+        try:
+            status = probe()
+        except Exception:
+            log.debug("model file status unavailable", exc_info=True)
+            return {"ready": True, "done": 0, "total": 0}
+        return {
+            "ready": bool(status.get("ready")),
+            "done": int(status.get("done") or 0),
+            "total": int(status.get("total") or 0),
+        }
+
+    def _model_files_ready(self) -> bool:
+        return bool(self._model_files_status().get("ready"))
 
     def _download_sync(self) -> dict[str, Any] | None:
         probe = getattr(self.embedder, "download_progress", None)  # test doubles have none
@@ -698,6 +752,27 @@ class Daemon:
         rows = await loop.run_in_executor(
             self._status_exec, lambda: self.store.failed_files(limit or None, db=self.store.reader()))
         return [(r["path"], r["error"] or "") for r in rows]
+
+    # -- model download -------------------------------------------------------------------
+    def _download_main(self) -> None:
+        """Fetch the GGUF files without loading them. Retries until they verify or we stop."""
+        backoff = DOWNLOAD_BACKOFF_S[0]
+        while not self._stopping.is_set():
+            try:
+                assert self._model_download is not None
+                self._model_download(self.cfg)
+            except Exception as exc:
+                self._download_error = str(exc)
+                log.warning("model download failed: %s; retrying in %.0fs", exc, backoff)
+                if self._stopping.wait(backoff):
+                    return
+                backoff = min(backoff * 2, DOWNLOAD_BACKOFF_S[1])
+                continue
+            self._download_error = ""
+            self._logged_wait_model = False
+            self._wake()
+            log.info("model files are ready")
+            return
 
     # -- worker ---------------------------------------------------------------------------
     def _wake(self, stop_slice: bool = False) -> None:
@@ -756,6 +831,15 @@ class Daemon:
             self._scan_full, self._scan_dirs = False, set()
         if new_cfg is not None:
             self._apply_config(new_cfg)
+        if not self._setup_done:
+            if not self._logged_wait_setup:
+                log.info("indexing waits until setup is finished")
+                self._logged_wait_setup = True
+            self._current_file = ""
+            self._set_phase("idle")
+            self._wait(5)
+            return
+        self._logged_wait_setup = False
         if full or dirs:
             self._scan(None if full else dirs)
             return
@@ -775,6 +859,14 @@ class Daemon:
             self._wait(min(sleep, self._no_progress_until - now))
             return
         pending = self.indexer.count_pending()
+        if pending and not self._model_files_ready():
+            if not self._logged_wait_model:
+                log.info("indexing waits until the model has been downloaded")
+                self._logged_wait_model = True
+            self._set_phase("idle")
+            self._wait(min(sleep, 2.0))
+            return
+        self._logged_wait_model = False
         if pending == 0:
             if self._phase != "idle":
                 self._went_idle()
@@ -979,26 +1071,52 @@ class Daemon:
         start = self._start_cfg
         with self._reload_lock:
             base = self._accepted_cfg
+            # The device is read when the model is loaded. Until then a new choice applies now,
+            # so first-run setup does not restart the service (and does not interrupt the download).
+            chosen_device = {attr: getattr(new, attr) for attr in ("device", "query_device")}
             restart = [name for attr, name in RESTART_FIELDS.items() if getattr(new, attr) != getattr(start, attr)]
+            models_loaded = self._index_model_loaded() or self._query_model_loaded()
+            hot: list[str] = []
+            if not models_loaded:
+                restart = [name for name in restart if name not in ("model.device", "model.query_device")]
+                hot = [RESTART_FIELDS[attr] for attr, value in chosen_device.items()
+                       if value != getattr(base, attr)]
             for attr in (*RESTART_FIELDS, *FIXED_FIELDS):
                 setattr(new, attr, getattr(start, attr))  # keep running with what we started with
+            if not models_loaded:
+                for attr, value in chosen_device.items():
+                    setattr(new, attr, value)
+                if hot:
+                    # `_start_cfg` may be the live Config. Copy before changing it so a device
+                    # choice does not show up on the running settings before the worker swaps them.
+                    if self._start_cfg is self.cfg or self._start_cfg is base:
+                        self._start_cfg = copy.copy(self._start_cfg)
+                    for attr, value in chosen_device.items():
+                        setattr(self._start_cfg, attr, value)
 
             def diff(fields: dict[str, str]) -> list[str]:
                 return [name for attr, name in fields.items() if getattr(new, attr) != getattr(base, attr)]
 
             rescan = diff(SCAN_FIELDS) + diff(PRIORITY_FIELDS)
-            changed = rescan + diff(NEXT_FILE_FIELDS) + diff(LIVE_FIELDS)
+            setup = diff(ONBOARDING_FIELDS)
+            changed = rescan + diff(NEXT_FILE_FIELDS) + diff(LIVE_FIELDS) + setup + hot
+            setup_done = onboarding_done(new, self.store) if setup else None
             if changed:
                 self._accepted_cfg = new
                 with self._cv:
                     self._pending_cfg = new
-                    if rescan:
+                    if rescan or setup_done:
                         self._scan_full = True
+                    if setup_done is False:
+                        self._scan_full = False
+                        self._scan_dirs = set()
                     self._wakeup = True
                     self._cv.notify_all()
+            if setup_done is False:
+                self._slice_stop.set()
         if changed or restart:
             log.info("settings reloaded: %s%s%s", ", ".join(changed) or "nothing changed",
-                     "; rescanning" if rescan else "",
+                     "; rescanning" if rescan or setup_done else "",
                      f"; need a restart: {', '.join(restart)}" if restart else "")
         else:
             log.info("settings reloaded: nothing changed")
@@ -1009,6 +1127,14 @@ class Daemon:
         (the next scan builds its Scanner and Scorer from it)."""
         self.cfg = cfg
         self.indexer.cfg = cfg
+        self._setup_done = onboarding_done(cfg, self.store)
+        if self._setup_done:
+            self._logged_wait_setup = False
+        embedder = self.embedder
+        if hasattr(embedder, "requested_device"):
+            embedder.requested_device = cfg.device
+        if hasattr(embedder, "requested_query_device"):
+            embedder.requested_query_device = cfg.query_device
         self._no_progress_until = 0.0
         if not cfg.pause_when_gpu_busy:
             self._gpu_busy = False
@@ -1071,6 +1197,15 @@ def _default_watcher_factory() -> WatcherFactory | None:
     return lambda on_change, debounce: DirWatcher(on_change, debounce=debounce)
 
 
+def download_model_files(cfg: Config) -> None:
+    """Download both GGUF files if they are missing. Does not load the model into memory."""
+    from .embedder import ensure_model_file, resolve_model_dir
+
+    model_dir = resolve_model_dir(cfg)
+    ensure_model_file("text", model_dir)
+    ensure_model_file("mmproj", model_dir)
+
+
 def _default_runner_factory() -> RunnerFactory | None:
     try:
         from .krunner import KRunnerService
@@ -1101,6 +1236,7 @@ STATUS_SIGNATURES = {
     # expected, and the same over every model file
     "download_file": "s", "download_done": "x", "download_total": "x",
     "download_all_done": "x", "download_all_total": "x",
+    "download_error": "s", "model_files_ready": "b", "model_bytes_done": "x", "model_bytes_total": "x",
     # the running indexing slice (0 when not indexing): files done (indexed, failed, skipped or
     # deferred) of the files queued when it started, failed among them, files per second
     "run_done": "x", "run_total": "x", "run_failed": "x", "run_rate": "d",
