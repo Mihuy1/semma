@@ -978,6 +978,47 @@ def test_embedder_download_progress_uses_its_model_dir(tmp_path: Path, monkeypat
                                          "all_done": 10, "all_total": 1000}
 
 
+def test_ctl_status_output(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from semma import cli
+
+    plain = {"state": "indexing", "pending": 3, "indexed": 10, "failed": 1, "last_scan_at": 0.0, "uptime": 600.0}
+    # An older daemon: only the plain keys, printed as before.
+    assert cli.format_daemon_status(plain, home) == [
+        "state         indexing", "pending       3", "indexed       10", "failed        1",
+        "last_scan_at  0.0", "uptime        10 min"]
+    kinds = dict.fromkeys(daemon_mod.ft.KINDS, 0)
+    st = {**plain, "pending_by_kind": {**kinds, "text": 3}, "indexed_by_kind": {**kinds, "text": 8, "pdf": 2},
+          "failed_by_kind": {**kinds, "pdf": 1},
+          "download_file": "m.gguf", "download_done": 512 * 1024**2, "download_total": 1024**3,
+          "download_all_done": 1024**3, "download_all_total": 2 * 1024**3,
+          "run_done": 5, "run_total": 40, "run_failed": 1, "run_rate": 2.345,
+          "scan_dir": str(home / "Documents" / "x"), "scan_dirs": 12, "scan_files": 300, "scan_matched": 120}
+    lines = cli.format_daemon_status(st, home)
+    assert lines[:6] == cli.format_daemon_status(plain, home)
+    text = "\n".join(lines)
+    assert "Downloading m.gguf: 512.0M of 1.0G (50%)" in text
+    assert "all model files: 1.0G of 2.0G (50%)" in text
+    assert "Scanning: 12 folders, 300 files seen, 120 to index" in text
+    assert "  in ~/Documents/x" in text
+    assert "Indexing run: 5 of 40 files (12%), 1 failed, 2.3 files/s" in text
+    assert lines[-3].split() == ["kind", "pending", "indexed", "failed"]
+    assert lines[-2].split() == ["text", "3", "8", "0"] and lines[-1].split() == ["pdf", "0", "2", "1"]
+    # Nothing running: no progress sections.
+    idle = {**st, "download_file": "", "run_total": 0, "run_done": 0, "scan_dir": "", "scan_dirs": 0}
+    text = "\n".join(cli.format_daemon_status(idle, home))
+    assert "Downloading" not in text and "Scanning" not in text and "Indexing run" not in text
+
+    monkeypatch.setattr(daemon_mod, "daemon_status", lambda: st)
+    import argparse
+    import contextlib
+    import io
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert cli.cmd_ctl(argparse.Namespace(action="status"), make_cfg(home)) == 0
+    assert "Indexing run: 5 of 40" in out.getvalue()
+
+
 # -- D-Bus (session bus, throwaway names) --------------------------------------------------
 
 @needs_bus

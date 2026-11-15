@@ -310,6 +310,64 @@ def _quiet_runner(cmd: list[str]) -> int:
     return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode
 
 
+# Status keys `format_daemon_status` shows in their own sections instead of as key/value lines.
+_STATUS_DETAIL_PREFIXES = ("download_", "run_", "scan_")
+_STATUS_BY_KIND = ("pending_by_kind", "indexed_by_kind", "failed_by_kind")
+
+
+def _percent(done: float, total: float) -> str:
+    return f"{100 * done / total:.0f}%" if total > 0 else "-"
+
+
+def format_daemon_status(st: dict[str, object], home: Path) -> list[str]:
+    """`semma ctl status`: the daemon's Status as lines. The plain keys come first, as key/value
+    lines; then what is running now (download, scan, indexing run) and the counts per kind.
+    A daemon of an older version reports only the plain keys."""
+    plain = {k: v for k, v in st.items() if not k.startswith(_STATUS_DETAIL_PREFIXES) and k not in _STATUS_BY_KIND}
+    width = max(map(len, plain)) if plain else 0
+    lines = []
+    for key, value in plain.items():
+        if key == "last_scan_at" and value:
+            value = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(value)))  # type: ignore[arg-type]
+        elif key == "uptime":
+            value = f"{float(value) / 60:.0f} min"  # type: ignore[arg-type]
+        lines.append(f"{key:<{width}}  {value}")
+
+    def num(key: str) -> float:
+        return float(st.get(key) or 0)  # type: ignore[arg-type]
+
+    if st.get("download_file"):
+        done, total = num("download_done"), num("download_total")
+        lines += ["", f"Downloading {st['download_file']}: {_human(done)} of {_human(total)} ({_percent(done, total)})"]
+        if num("download_all_total") > total:
+            all_done, all_total = num("download_all_done"), num("download_all_total")
+            lines.append(f"  all model files: {_human(all_done)} of {_human(all_total)} "
+                         f"({_percent(all_done, all_total)})")
+    if st.get("scan_dir") or num("scan_dirs"):
+        lines += ["", f"Scanning: {num('scan_dirs'):,.0f} folders, {num('scan_files'):,.0f} files seen, "
+                      f"{num('scan_matched'):,.0f} to index"]
+        if st.get("scan_dir"):
+            lines.append(f"  in {_short(str(st['scan_dir']), home)}")
+    if num("run_total"):
+        done, total = num("run_done"), num("run_total")
+        line = f"Indexing run: {done:,.0f} of {total:,.0f} files ({_percent(done, total)})"
+        if num("run_failed"):
+            line += f", {num('run_failed'):,.0f} failed"
+        if num("run_rate"):
+            line += f", {num('run_rate'):.1f} files/s"
+        lines += ["", line]
+    by_kind = {k: st[k] for k in _STATUS_BY_KIND if isinstance(st.get(k), dict)}
+    if by_kind:
+        kinds = [k for k in ft.KINDS if any(d.get(k) for d in by_kind.values())]  # type: ignore[union-attr]
+        kinds += sorted({k for d in by_kind.values() for k in d if k not in ft.KINDS and d[k]})  # type: ignore[union-attr]
+        if kinds:
+            heads = [k.removesuffix("_by_kind") for k in by_kind]
+            lines += ["", f"{'kind':<8}" + "".join(f"{h:>10}" for h in heads)]
+            for kind in kinds:
+                lines.append(f"{kind:<8}" + "".join(f"{d.get(kind, 0):>10,}" for d in by_kind.values()))  # type: ignore[union-attr]
+    return lines
+
+
 def cmd_ctl(args: argparse.Namespace, cfg: Config) -> int:
     from .daemon import DaemonNotRunning, daemon_call, daemon_status
 
@@ -318,13 +376,7 @@ def cmd_ctl(args: argparse.Namespace, cfg: Config) -> int:
         if st is None:
             print("The daemon is not running (systemctl --user start semma).")
             return 1
-        width = max(map(len, st))
-        for key, value in st.items():
-            if key == "last_scan_at" and value:
-                value = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(value)))
-            elif key == "uptime":
-                value = f"{float(value) / 60:.0f} min"
-            print(f"{key:<{width}}  {value}")
+        print("\n".join(format_daemon_status(st, cfg.home)))
         return 0
     method = {"pause": "Pause", "resume": "Resume", "rescan": "Rescan", "retry-failed": "RetryFailed"}[args.action]
     try:
