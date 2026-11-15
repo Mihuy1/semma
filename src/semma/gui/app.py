@@ -74,6 +74,8 @@ class MainWindow(QMainWindow):
             self._wizard.raise_()
             self.hide()
             return
+        if self._wizard is not None:
+            self._wizard.deleteLater()  # the closed one from an earlier run
         wizard = OnboardingWindow(self.client, self.settings_page.config_path, self.settings_page.home,
                                   rerun=True)
         self._wizard = wizard

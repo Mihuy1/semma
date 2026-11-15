@@ -380,10 +380,7 @@ class Daemon:
                 self._scan_full = True
         self._worker = threading.Thread(target=self._worker_main, name="semma-worker", daemon=True)
         self._worker.start()
-        if self._model_download is not None:
-            self._download_thread = threading.Thread(
-                target=self._download_main, name="semma-download", daemon=True)
-            self._download_thread.start()
+        self._start_download()
         if self.gpu_monitor is not None:
             self._gpu_thread = threading.Thread(target=self._gpu_main, name="semma-gpumon", daemon=True)
             self._gpu_thread.start()
@@ -450,8 +447,9 @@ class Daemon:
             q = query.strip()
             if len(q) < MIN_QUERY_CHARS or self._closed:
                 return []
-            # Setup is still open: don't load the model (that would pin the device) and don't search.
-            if not self._setup_done:
+            # Setup is still open: don't load the model (that would pin the device). Run setup
+            # again keeps the index, so a model that is loaded already still answers.
+            if not self._setup_done and not self._can_search_during_setup():
                 return []
             debounce = self.cfg.query_debounce_ms / 1000
             if debounce > 0:
@@ -501,6 +499,11 @@ class Daemon:
         if seq != self._query_seq:
             return None
         return self.searcher.search_vector(qvec, query, self.cfg.krunner_max_results)
+
+    def _can_search_during_setup(self) -> bool:
+        """Only after Run setup again (the flag is false, not absent), and only with a model
+        that is in memory already: the query model, or the index model, which answers too."""
+        return self.cfg.onboarding_complete is False and self._model_ready()
 
     def _model_ready(self) -> bool:
         return bool(getattr(self.embedder, "query_ready", getattr(self.embedder, "loaded", True)))
@@ -758,6 +761,15 @@ class Daemon:
         return [(r["path"], r["error"] or "") for r in rows]
 
     # -- model download -------------------------------------------------------------------
+    def _start_download(self) -> None:
+        """Start the download thread unless one is running (or the download is disabled)."""
+        thread = self._download_thread
+        if self._model_download is None or (thread is not None and thread.is_alive()):
+            return
+        self._download_thread = threading.Thread(
+            target=self._download_main, name="semma-download", daemon=True)
+        self._download_thread.start()
+
     def _download_main(self) -> None:
         """Fetch the GGUF files without loading them. Retries until they verify or we stop."""
         backoff = DOWNLOAD_BACKOFF_S[0]
@@ -867,6 +879,7 @@ class Daemon:
             if not self._logged_wait_model:
                 log.info("indexing waits until the model has been downloaded")
                 self._logged_wait_model = True
+            self._start_download()  # the files were there and are gone again: fetch them
             self._set_phase("idle")
             self._wait(min(sleep, 2.0))
             return
@@ -1079,7 +1092,10 @@ class Daemon:
             # so first-run setup does not restart the service (and does not interrupt the download).
             chosen_device = {attr: getattr(new, attr) for attr in ("device", "query_device")}
             restart = [name for attr, name in RESTART_FIELDS.items() if getattr(new, attr) != getattr(start, attr)]
-            models_loaded = self._index_model_loaded() or self._query_model_loaded()
+            # A load that has started has read the device already.
+            loading = ((self._load_task is not None and not self._load_task.done())
+                       or bool(getattr(self.embedder, "loading", False)))
+            models_loaded = self._index_model_loaded() or self._query_model_loaded() or loading
             hot: list[str] = []
             if not models_loaded:
                 restart = [name for name in restart if name not in ("model.device", "model.query_device")]

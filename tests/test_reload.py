@@ -307,6 +307,21 @@ def test_device_applies_without_a_restart_before_the_model_is_loaded(home: Path)
     asyncio.run(main())
 
 
+def test_device_change_needs_a_restart_while_the_model_is_loading(home: Path) -> None:
+    async def main() -> None:
+        cfg = start_cfg(home)
+        from test_daemon import LifecycleEmbedder
+        emb = LifecycleEmbedder()
+        emb.loading = True  # the load has read the device already
+        d = make_daemon(cfg, embedder=emb)
+        settings = base_settings(home)
+        settings["model"] = {"device": "cpu"}
+        write_config(home, settings)
+        assert await d.reload_config() == ["model.device"]
+
+    asyncio.run(main())
+
+
 def test_device_change_needs_a_restart_once_the_model_is_loaded(home: Path) -> None:
     async def main() -> None:
         cfg = start_cfg(home)

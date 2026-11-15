@@ -227,3 +227,62 @@ def test_status_reports_pending_setup_and_rescan_waits(tmp_path: Path) -> None:
             await d.stop()
 
     asyncio.run(main())
+
+
+def test_running_setup_again_keeps_search_while_the_model_is_loaded(tmp_path: Path) -> None:
+    write_docs(tmp_path, DOCS)
+
+    async def main() -> None:
+        settings = base_settings(tmp_path)
+        settings["onboarding_complete"] = True
+        cfg = start_cfg(tmp_path, settings)
+        emb = LifecycleEmbedder()
+        d = make_daemon(cfg, embedder=emb)
+        d.start()
+        try:
+            await until_idle(d)
+            assert await d.search("rocket launch")
+            settings["onboarding_complete"] = False
+            assert await reload_and_settle(d, tmp_path, settings, rescan=False) == []
+            await wait_until(lambda: d._setup_done is False, what="setup paused")
+            assert await d.search("rocket launch")  # the index is kept and the model is loaded
+            loads = emb.load_calls + emb.query_load_calls
+            emb.unload()
+            assert await d.search("rocket launch") == []  # not loaded: setup may change the device
+            assert emb.load_calls + emb.query_load_calls == loads
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
+def test_download_starts_again_when_the_model_files_are_gone(tmp_path: Path) -> None:
+    write_docs(tmp_path, DOCS)
+
+    class Gated(FakeEmbedder):
+        ready = False
+
+        def model_files_status(self) -> dict[str, object]:
+            return {"ready": self.ready, "done": 0, "total": 10}
+
+    calls: list[int] = []
+
+    async def main() -> None:
+        cfg = make_cfg(tmp_path)
+        emb = Gated()
+
+        def download(config: object) -> None:
+            calls.append(1)
+            if len(calls) >= 2:
+                emb.ready = True  # the first run "finished" but the files are not there
+
+        d = make_daemon(cfg, embedder=emb, model_download=download)
+        d.start()
+        try:
+            await wait_until(lambda: len(calls) >= 2, what="download started again")
+            await until_idle(d)
+            assert counts(cfg.db_path).get("indexed", 0) > 0
+        finally:
+            await d.stop()
+
+    asyncio.run(main())

@@ -9,6 +9,7 @@ shown on every page; it is started by the daemon, not by this window.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -36,9 +37,10 @@ from ..daemon import DaemonNotRunning
 from . import model
 from .client import describe_error
 from .qtasync import Relay
-from .settings.context import Problem, SettingsContext, merge_changes
+from .settings.context import SettingsContext, merge_changes
 from .settings.filetypes import FiletypesSection
 from .settings.folders import FoldersSection
+from .settings.folders_model import NOTHING_INDEXED
 from .settings.media import MediaSection
 from .settings.page import RESTART_NOTICE
 from .settings.performance_model import changes as device_changes
@@ -335,7 +337,7 @@ class OnboardingWindow(QMainWindow):
         if getattr(self._form(), "key", "") != "folders":
             return found
         # The settings page only warns when nothing would be indexed. Setup refuses to continue.
-        return [Problem(p.text, blocking=True) if "Nothing is indexed" in p.text else p for p in found]
+        return [replace(p, blocking=True) if p.code == NOTHING_INDEXED else p for p in found]
 
     def _blocked(self) -> bool:
         return any(getattr(p, "blocking", False) for p in self._page_problems())
