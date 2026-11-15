@@ -72,15 +72,21 @@ def _target_paths(home: Path | None = None) -> tuple[Path, Path, Path]:
     return desktop_path, dbus_service_path, systemd_unit_path
 
 
+def _app_desktop_path(home: Path | None = None) -> Path:
+    base_home = home or Path.home()
+    return xdg_data_home(base_home) / "applications" / dbus_names.GNOME_DESKTOP_ID
+
+
 def _gnome_target_paths(
     home: Path | None = None,
-    system_data_dir: Path = DEFAULT_SYSTEM_DATA_DIR,
+    system_data_dir: Path | None = None,
 ) -> tuple[Path, Path, Path]:
     base_home = home or Path.home()
     data_home = xdg_data_home(base_home)
+    sys_data = DEFAULT_SYSTEM_DATA_DIR if system_data_dir is None else Path(system_data_dir)
     ini_name = f"{dbus_names.BUS_NAME}.search-provider.ini"
-    desktop_path = data_home / "applications" / dbus_names.GNOME_DESKTOP_ID
-    ini_path = Path(system_data_dir) / "gnome-shell" / "search-providers" / ini_name
+    desktop_path = _app_desktop_path(base_home)
+    ini_path = sys_data / "gnome-shell" / "search-providers" / ini_name
     staged_ini_path = data_home / "semma" / ini_name
     return desktop_path, ini_path, staged_ini_path
 
@@ -103,20 +109,23 @@ def render_desktop_file() -> str:
     )
 
 
-def render_gnome_desktop_file(python_path: str | None = None) -> str:
-    """Render the GNOME .desktop entry required by GNOME Shell's SearchProvider2 DesktopId."""
+def render_app_desktop_file(python_path: str | None = None) -> str:
+    """Render the shared .desktop entry for the Semma window and GNOME Shell SearchProvider2."""
     quoted_py = _quote_exec_path(_resolve_python(python_path))
     return (
         "[Desktop Entry]\n"
         "Type=Application\n"
         "Name=Semma\n"
-        "Comment=Semantic search of your files with EmbeddingGemma\n"
+        "Comment=Semantic file search: status and settings\n"
         "Icon=system-search\n"
-        f"Exec={quoted_py} -m semma ctl status\n"
+        f"Exec={quoted_py} -m semma gui\n"
         "Terminal=false\n"
-        "OnlyShowIn=GNOME;\n"
         "Categories=Utility;\n"
+        "StartupNotify=true\n"
     )
+
+
+render_gnome_desktop_file = render_app_desktop_file
 
 
 def render_gnome_search_provider_ini() -> str:
@@ -276,15 +285,17 @@ def install_kde(
     restart_krunner: bool = True,
     runner: Callable[[list[str]], int] | None = None,
 ) -> list[Path]:
-    """Write KRunner desktop file, D-Bus activation file, and systemd user unit, then reload."""
+    """Write KRunner desktop file, application entry, D-Bus activation file, and systemd unit, then reload."""
     run = runner or _default_runner
     py_path = _resolve_python(python)
     desktop_path, dbus_service_path, systemd_unit_path = _target_paths()
+    app_desktop_path = _app_desktop_path()
 
     _atomic_write(desktop_path, render_desktop_file())
+    _atomic_write(app_desktop_path, render_app_desktop_file(py_path))
     _write_shared_service_files(py_path, dbus_service_path, systemd_unit_path)
 
-    written = [desktop_path, dbus_service_path, systemd_unit_path]
+    written = [desktop_path, app_desktop_path, dbus_service_path, systemd_unit_path]
 
     _reload_and_enable(run, enable=enable)
     if restart_krunner:
@@ -293,14 +304,19 @@ def install_kde(
     return written
 
 
-def shared_service_kept_for_kde() -> bool:
-    """Return True if the shared service is kept because the GNOME integration is installed."""
-    gnome_desktop_path, _, _ = _gnome_target_paths()
-    return gnome_desktop_path.exists() or gnome_desktop_path.is_symlink()
+def shared_service_kept_for_kde(system_data_dir: Path | None = None) -> bool:
+    """Return True if shared files are kept because the GNOME integration is installed."""
+    _, ini_path, staged_ini_path = _gnome_target_paths(system_data_dir=system_data_dir)
+    return (
+        ini_path.exists()
+        or ini_path.is_symlink()
+        or staged_ini_path.exists()
+        or staged_ini_path.is_symlink()
+    )
 
 
 def shared_service_kept_for_gnome() -> bool:
-    """Return True if the shared service is kept because the KDE integration is installed."""
+    """Return True if shared files are kept because the KDE integration is installed."""
     kde_desktop_path, _, _ = _target_paths()
     return kde_desktop_path.exists() or kde_desktop_path.is_symlink()
 
@@ -308,20 +324,22 @@ def shared_service_kept_for_gnome() -> bool:
 def uninstall_kde(
     *,
     restart_krunner: bool = True,
+    system_data_dir: Path | None = None,
     runner: Callable[[list[str]], int] | None = None,
 ) -> list[Path]:
     """Disable the systemd user unit, remove the installed KDE/D-Bus/systemd files, and reload."""
     run = runner or _default_runner
     desktop_path, dbus_service_path, systemd_unit_path = _target_paths()
-    # The service and its D-Bus/systemd files are shared with the GNOME provider: keep them
+    app_desktop_path = _app_desktop_path()
+    # The application entry and D-Bus/systemd files are shared with the GNOME provider: keep them
     # while that is still installed.
-    gnome_installed = shared_service_kept_for_kde()
+    gnome_installed = shared_service_kept_for_kde(system_data_dir=system_data_dir)
 
     if gnome_installed:
         removed = _remove_existing((desktop_path,))
     else:
         run(["systemctl", "--user", "disable", "--now", dbus_names.SYSTEMD_UNIT])
-        removed = _remove_existing((desktop_path, dbus_service_path, systemd_unit_path))
+        removed = _remove_existing((desktop_path, app_desktop_path, dbus_service_path, systemd_unit_path))
         run(["systemctl", "--user", "daemon-reload"])
     if restart_krunner:
         run(["kquitapp6", "krunner"])
@@ -336,9 +354,11 @@ def status_kde(
     """Report which KDE/systemd integration files exist and whether the user unit is enabled/active."""
     run = runner or _default_runner
     desktop_path, dbus_service_path, systemd_unit_path = _target_paths()
+    app_desktop_path = _app_desktop_path()
     return _build_status(
         {
             "desktop": desktop_path,
+            "app_desktop": app_desktop_path,
             "dbus_service": dbus_service_path,
             "systemd_unit": systemd_unit_path,
         },
@@ -350,7 +370,7 @@ def install_gnome(
     *,
     python: str | None = None,
     enable: bool = True,
-    system_data_dir: Path = DEFAULT_SYSTEM_DATA_DIR,
+    system_data_dir: Path | None = None,
     runner: Callable[[list[str]], int] | None = None,
 ) -> GnomeInstallResult:
     """Write GNOME desktop/search-provider files, D-Bus service, and systemd unit, then reload."""
@@ -359,7 +379,7 @@ def install_gnome(
     _, dbus_service_path, systemd_unit_path = _target_paths()
     gnome_desktop_path, ini_path, staged_ini_path = _gnome_target_paths(system_data_dir=system_data_dir)
 
-    _atomic_write(gnome_desktop_path, render_gnome_desktop_file(py_path))
+    _atomic_write(gnome_desktop_path, render_app_desktop_file(py_path))
     written = [gnome_desktop_path]
 
     desired_dbus = render_dbus_service_file(py_path)
@@ -410,10 +430,10 @@ def install_gnome(
 
 def uninstall_gnome(
     *,
-    system_data_dir: Path = DEFAULT_SYSTEM_DATA_DIR,
+    system_data_dir: Path | None = None,
     runner: Callable[[list[str]], int] | None = None,
 ) -> GnomeUninstallResult:
-    """Remove GNOME files and, if KDE is not installed, disable and remove shared service files."""
+    """Remove GNOME files and, if KDE is not installed, disable and remove shared files."""
     run = runner or _default_runner
     _, dbus_service_path, systemd_unit_path = _target_paths()
     gnome_desktop_path, ini_path, staged_ini_path = _gnome_target_paths(system_data_dir=system_data_dir)
@@ -422,7 +442,8 @@ def uninstall_gnome(
     if not kde_installed:
         run(["systemctl", "--user", "disable", "--now", dbus_names.SYSTEMD_UNIT])
 
-    removed = _remove_existing((gnome_desktop_path, staged_ini_path))
+    to_remove = (staged_ini_path,) if kde_installed else (gnome_desktop_path, staged_ini_path)
+    removed = _remove_existing(to_remove)
     sudo_command: str | None = None
     try:
         removed.extend(_remove_existing((ini_path,)))
@@ -444,7 +465,7 @@ def uninstall_gnome(
 
 def status_gnome(
     *,
-    system_data_dir: Path = DEFAULT_SYSTEM_DATA_DIR,
+    system_data_dir: Path | None = None,
     runner: Callable[[list[str]], int] | None = None,
 ) -> dict[str, Any]:
     """Report which GNOME/systemd integration files exist and whether the user unit is enabled/active."""

@@ -15,6 +15,7 @@ from semma.install import (
     detect_desktop,
     install_gnome,
     install_kde,
+    render_app_desktop_file,
     render_gnome_desktop_file,
     render_gnome_search_provider_ini,
     shared_service_kept_for_gnome,
@@ -28,6 +29,8 @@ from semma.install import (
 
 @pytest.fixture()
 def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    from semma import install as install_mod
+
     home = tmp_path / "home"
     data_home = home / ".local" / "share"
     config_home = home / ".config"
@@ -35,6 +38,7 @@ def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path,
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setattr(install_mod, "DEFAULT_SYSTEM_DATA_DIR", tmp_path / "default_sys_share")
     return data_home, config_home
 
 
@@ -52,10 +56,11 @@ def test_install_kde_writes_files_and_runs_commands_in_order(
     written = install_kde(python=fake_py, runner=fake_runner)
 
     expected_desktop = data_home / "krunner" / "dbusplugins" / "semma.desktop"
+    expected_app_desktop = data_home / "applications" / dbus_names.GNOME_DESKTOP_ID
     expected_dbus = data_home / "dbus-1" / "services" / f"{dbus_names.BUS_NAME}.service"
     expected_unit = config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT
 
-    assert written == [expected_desktop, expected_dbus, expected_unit]
+    assert written == [expected_desktop, expected_app_desktop, expected_dbus, expected_unit]
     for p in written:
         assert p.is_file()
 
@@ -77,6 +82,23 @@ def test_install_kde_writes_files_and_runs_commands_in_order(
     assert entry["X-KDE-PluginInfo-EnabledByDefault"] == "true"
     assert entry["X-Plasma-Runner-Min-Letter-Count"] == "3"
     assert entry["X-Plasma-Request-Actions-Once"] == "true"
+
+    # Check shared application menu entry
+    app_cp = configparser.ConfigParser(interpolation=None)
+    app_cp.optionxform = str  # type: ignore[assignment]
+    app_cp.read(expected_app_desktop, encoding="utf-8")
+    assert "Desktop Entry" in app_cp
+    app_entry = app_cp["Desktop Entry"]
+    assert app_entry["Type"] == "Application"
+    assert app_entry["Name"] == "Semma"
+    assert app_entry["Comment"] == "Semantic file search: status and settings"
+    assert app_entry["Icon"] == "system-search"
+    assert app_entry["Exec"] == f"{fake_py} -m semma gui"
+    assert app_entry["Terminal"] == "false"
+    assert app_entry["Categories"] == "Utility;"
+    assert app_entry["StartupNotify"] == "true"
+    assert "OnlyShowIn" not in app_entry
+    assert "NoDisplay" not in app_entry
 
     # Check D-Bus activation file
     dbus_cp = configparser.ConfigParser(interpolation=None)
@@ -156,14 +178,16 @@ def test_paths_with_spaces_are_quoted_in_unit_and_dbus_service(
         restart_krunner=False,
         runner=lambda cmd: 0,
     )
-    _, dbus_path, unit_path = written
+    _, app_desktop_path, dbus_path, unit_path = written
     assert unit_path == config_home / "systemd" / "user" / "semma.service"
 
     unit_text = unit_path.read_text(encoding="utf-8")
     dbus_text = dbus_path.read_text(encoding="utf-8")
+    app_desktop_text = app_desktop_path.read_text(encoding="utf-8")
     expected_exec = f'"{spaced_py}" -m semma daemon'
     assert f"ExecStart={expected_exec}\n" in unit_text
     assert f"Exec={expected_exec}\n" in dbus_text
+    assert f'Exec="{spaced_py}" -m semma gui\n' in app_desktop_text
 
 
 def test_status_kde_reports_files_and_service_state(
@@ -175,20 +199,29 @@ def test_status_kde_reports_files_and_service_state(
     assert st_before["active"] is False
     assert st_before["files"] == {
         "desktop": False,
+        "app_desktop": False,
         "dbus_service": False,
         "systemd_unit": False,
     }
 
-    install_kde(runner=lambda cmd: 0)
+    written = install_kde(runner=lambda cmd: 0)
     st_after = status_kde(runner=lambda cmd: 0)
     assert st_after["installed"] is True
     assert st_after["enabled"] is True
     assert st_after["active"] is True
     assert st_after["files"] == {
         "desktop": True,
+        "app_desktop": True,
         "dbus_service": True,
         "systemd_unit": True,
     }
+
+    # Missing application entry marks KDE integration incomplete.
+    app_desktop = written[1]
+    app_desktop.unlink()
+    st_missing_app = status_kde(runner=lambda cmd: 0)
+    assert st_missing_app["installed"] is False
+    assert st_missing_app["files"]["app_desktop"] is False
 
 
 def test_python_m_semma_help() -> None:
@@ -203,6 +236,7 @@ def test_python_m_semma_help() -> None:
 
 
 def test_gnome_renderers_contents() -> None:
+    assert render_gnome_desktop_file is render_app_desktop_file
     desktop_text = render_gnome_desktop_file("/opt/semma/venv/bin/python")
     cp = configparser.ConfigParser(interpolation=None)
     cp.optionxform = str  # type: ignore[assignment]
@@ -211,17 +245,19 @@ def test_gnome_renderers_contents() -> None:
     entry = cp["Desktop Entry"]
     assert entry["Type"] == "Application"
     assert entry["Name"] == "Semma"
-    assert entry["Comment"] == "Semantic search of your files with EmbeddingGemma"
+    assert entry["Comment"] == "Semantic file search: status and settings"
     assert entry["Icon"] == "system-search"
-    assert entry["Exec"] == "/opt/semma/venv/bin/python -m semma ctl status"
+    assert entry["Exec"] == "/opt/semma/venv/bin/python -m semma gui"
     assert entry["Terminal"] == "false"
-    assert entry["OnlyShowIn"] == "GNOME;"
     assert entry["Categories"] == "Utility;"
+    assert entry["StartupNotify"] == "true"
+    assert "OnlyShowIn" not in entry
     assert "NoDisplay" not in entry
+    assert "StartupWMClass" not in entry
 
     spaced = "/home/user/My Projects/Semma Search/.venv/bin/python"
     spaced_desktop = render_gnome_desktop_file(spaced)
-    assert f'Exec="{spaced}" -m semma ctl status\n' in spaced_desktop
+    assert f'Exec="{spaced}" -m semma gui\n' in spaced_desktop
 
     ini_text = render_gnome_search_provider_ini()
     ini_cp = configparser.ConfigParser(interpolation=None)
@@ -340,13 +376,20 @@ def test_uninstall_gnome_keeps_shared_service_when_kde_present(
 
     assert res.sudo_command is None
     assert res.service_kept is True
-    assert res.removed == [gnome_desktop, gnome_ini]
-    assert not gnome_desktop.exists()
+    assert res.removed == [gnome_ini]
+    assert gnome_desktop.is_file()
     assert not gnome_ini.exists()
     assert kde_desktop.is_file()
     assert dbus_path.is_file()
     assert unit_path.is_file()
     assert commands == []
+
+    # Uninstalling KDE afterwards removes the shared application entry and service files too.
+    kde_removed = uninstall_kde(system_data_dir=sys_data, runner=lambda cmd: commands.append(cmd) or 0)
+    assert kde_removed == [kde_desktop, gnome_desktop, dbus_path, unit_path]
+    assert not gnome_desktop.exists()
+    assert not dbus_path.exists()
+    assert not unit_path.exists()
 
 
 def test_uninstall_gnome_removes_shared_service_when_kde_absent_and_handles_ro_ini(
@@ -480,11 +523,11 @@ def test_uninstall_kde_keeps_shared_service_when_gnome_present(
     install_kde(python="/usr/bin/python3", runner=lambda cmd: 0)
     install_gnome(python="/usr/bin/python3", system_data_dir=sys_data, runner=lambda cmd: 0)
 
-    assert shared_service_kept_for_kde() is True
+    assert shared_service_kept_for_kde(system_data_dir=sys_data) is True
     assert shared_service_kept_for_gnome() is True
 
     commands: list[list[str]] = []
-    removed = uninstall_kde(runner=lambda cmd: commands.append(cmd) or 0)
+    removed = uninstall_kde(system_data_dir=sys_data, runner=lambda cmd: commands.append(cmd) or 0)
 
     kde_desktop = data_home / "krunner" / "dbusplugins" / f"{dbus_names.RUNNER_ID}.desktop"
     assert removed == [kde_desktop]
@@ -494,6 +537,30 @@ def test_uninstall_kde_keeps_shared_service_when_gnome_present(
     assert (config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT).is_file()
     assert commands == [["kquitapp6", "krunner"]]
     assert shared_service_kept_for_gnome() is False
+
+
+def test_uninstall_kde_keeps_shared_files_when_only_staged_gnome_ini_present(
+    isolated_xdg: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    data_home, config_home = isolated_xdg
+    sys_data = tmp_path / "ro_sys_share"
+    sys_data.mkdir()
+    sys_data.chmod(0o555)
+    try:
+        install_kde(python="/usr/bin/python3", runner=lambda cmd: 0)
+        res = install_gnome(python="/usr/bin/python3", system_data_dir=sys_data, runner=lambda cmd: 0)
+        assert res.pending_ini is not None
+        assert shared_service_kept_for_kde(system_data_dir=sys_data) is True
+
+        removed = uninstall_kde(system_data_dir=sys_data, runner=lambda cmd: 0)
+        kde_desktop = data_home / "krunner" / "dbusplugins" / f"{dbus_names.RUNNER_ID}.desktop"
+        assert removed == [kde_desktop]
+        assert (data_home / "applications" / dbus_names.GNOME_DESKTOP_ID).is_file()
+        assert (data_home / "dbus-1" / "services" / f"{dbus_names.BUS_NAME}.service").is_file()
+        assert (config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT).is_file()
+    finally:
+        sys_data.chmod(0o755)
 
 
 def test_atomic_write_sets_mode_0644(tmp_path: Path) -> None:
@@ -617,18 +684,10 @@ def test_cli_uninstall_reports_kept_shared_service(
 ) -> None:
     from semma import install as install_mod
 
+    data_home, _ = isolated_xdg
     sys_data = tmp_path / "sys_share"
     monkeypatch.setattr(install_mod, "_default_runner", lambda cmd: 0)
-
-    orig_uninstall_gnome = install_mod.uninstall_gnome
-    monkeypatch.setattr(
-        install_mod,
-        "uninstall_gnome",
-        lambda *, system_data_dir=sys_data, runner=None: orig_uninstall_gnome(
-            system_data_dir=sys_data,
-            runner=lambda cmd: 0,
-        ),
-    )
+    monkeypatch.setattr(install_mod, "DEFAULT_SYSTEM_DATA_DIR", sys_data)
 
     install_kde(python="/usr/bin/python3", runner=lambda cmd: 0)
     install_gnome(python="/usr/bin/python3", system_data_dir=sys_data, runner=lambda cmd: 0)
@@ -640,6 +699,7 @@ def test_cli_uninstall_reports_kept_shared_service(
         "The semma service was kept because the GNOME search provider is still installed; "
         "run `semma uninstall-gnome` to remove it."
     ) in out_kde
+    assert (data_home / "applications" / dbus_names.GNOME_DESKTOP_ID).is_file()
 
     install_kde(python="/usr/bin/python3", runner=lambda cmd: 0)
     rc_gnome = cli_main(["uninstall-gnome"])
@@ -649,6 +709,30 @@ def test_cli_uninstall_reports_kept_shared_service(
         "The semma service was kept because the KDE KRunner integration is still installed; "
         "run `semma uninstall-kde` to remove it."
     ) in out_gnome
+    assert (data_home / "applications" / dbus_names.GNOME_DESKTOP_ID).is_file()
+
+
+def test_cli_kde_and_gnome_status_report_app_desktop(
+    isolated_xdg: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from semma import install as install_mod
+
+    sys_data = tmp_path / "sys_share"
+    monkeypatch.setattr(install_mod, "DEFAULT_SYSTEM_DATA_DIR", sys_data)
+    monkeypatch.setattr("semma.cli._quiet_runner", lambda cmd: 0)
+
+    install_kde(python="/usr/bin/python3", runner=lambda cmd: 0)
+    assert cli_main(["kde-status"]) == 0
+    out_kde = capsys.readouterr().out
+    assert "app_desktop   present  ~/.local/share/applications/io.github.Semma.desktop" in out_kde
+
+    install_gnome(python="/usr/bin/python3", system_data_dir=sys_data, runner=lambda cmd: 0)
+    assert cli_main(["gnome-status"]) == 0
+    out_gnome = capsys.readouterr().out
+    assert "desktop       present  ~/.local/share/applications/io.github.Semma.desktop" in out_gnome
 
 
 def test_cli_install_gnome_kept_service_notice_and_python_flag(
