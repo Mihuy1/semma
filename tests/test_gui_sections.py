@@ -250,7 +250,7 @@ def test_media_keeps_other_kind_overrides_in_max_file_mb(home: Path) -> None:
 def test_performance_load_defaults_and_custom_device(home: Path) -> None:
     ctx = ctx_for(home)
     saved = pfm.load(ctx)
-    assert saved == pfm.PerformanceValues(30, None, 24, 10)
+    assert saved == pfm.PerformanceValues(30, None, 24, 10, True)
     assert pfm.device_choices(None) == [
         ("Automatic", None),
         ("Graphics card", "gpu"),
@@ -259,11 +259,11 @@ def test_performance_load_defaults_and_custom_device(home: Path) -> None:
 
     ctx_custom = ctx_for(
         home,
-        '[model]\ndevice = "vulkan:1"\n[daemon]\ngpu_busy_threshold = 45\n'
-        "rescan_hours = 12\nkrunner_max_results = 15\n",
+        '[model]\ndevice = "vulkan:1"\n[daemon]\npause_when_gpu_busy = false\n'
+        "gpu_busy_threshold = 45\nrescan_hours = 12\nkrunner_max_results = 15\n",
     )
     loaded = pfm.load(ctx_custom)
-    assert loaded == pfm.PerformanceValues(45, "vulkan:1", 12, 15)
+    assert loaded == pfm.PerformanceValues(45, "vulkan:1", 12, 15, False)
     assert ("vulkan:1", "vulkan:1") in pfm.device_choices(loaded.device)
     assert pfm.changes(loaded, loaded.copy()) == {}
 
@@ -271,16 +271,24 @@ def test_performance_load_defaults_and_custom_device(home: Path) -> None:
 def test_performance_changes_and_back_to_default(home: Path) -> None:
     ctx = ctx_for(home)
     saved = pfm.load(ctx)
+
+    # Turning pause_when_gpu_busy off without touching threshold writes only pause_when_gpu_busy.
+    pause_off = saved.copy()
+    pause_off.pause_when_gpu_busy = False
+    assert pfm.changes(saved, pause_off) == {"daemon": {"pause_when_gpu_busy": False}}
+
     edited = pfm.PerformanceValues(
         gpu_busy_threshold=50,
         device="cpu",
         rescan_hours=6,
         krunner_max_results=20,
+        pause_when_gpu_busy=False,
     )
     ch = pfm.changes(saved, edited)
     assert ch == {
         "model": {"device": "cpu"},
         "daemon": {
+            "pause_when_gpu_busy": False,
             "gpu_busy_threshold": 50,
             "rescan_hours": 6,
             "krunner_max_results": 20,
@@ -297,6 +305,7 @@ def test_performance_changes_and_back_to_default(home: Path) -> None:
     assert ch_back == {
         "model": {"device": None},
         "daemon": {
+            "pause_when_gpu_busy": None,
             "gpu_busy_threshold": None,
             "rescan_hours": None,
             "krunner_max_results": None,
@@ -451,14 +460,30 @@ def test_performance_section_widget(app: QtWidgets.QApplication, home: Path) -> 
     assert not sec.is_modified()
     assert sec.selected_device() == "vulkan:1"
     assert sec.device_combo.count() == 4
+    assert sec.pause_when_gpu_busy.isChecked()
+    assert sec.gpu_busy_threshold.isEnabled()
 
-    # Keep custom device while editing daemon fields
+    # Unchecking pause_when_gpu_busy disables the spin box and writes pause_when_gpu_busy = false
+    sec.pause_when_gpu_busy.setChecked(False)
+    assert not sec.gpu_busy_threshold.isEnabled()
+    assert sec.changes() == {"daemon": {"pause_when_gpu_busy": False}}
+    page.apply()
+    assert read_raw(config_path(home)) == {
+        "model": {"device": "vulkan:1"},
+        "daemon": {"pause_when_gpu_busy": False},
+    }
+    assert not sec.gpu_busy_threshold.isEnabled()
+
+    # Re-checking enables the spin box and removes pause_when_gpu_busy; keep custom device while editing daemon fields
+    sec.pause_when_gpu_busy.setChecked(True)
+    assert sec.gpu_busy_threshold.isEnabled()
     sec.gpu_busy_threshold.setValue(40)
     sec.rescan_hours.setValue(12)
     sec.krunner_max_results.setValue(15)
     assert sec.is_modified()
     assert sec.changes() == {
         "daemon": {
+            "pause_when_gpu_busy": None,
             "gpu_busy_threshold": 40,
             "rescan_hours": 12,
             "krunner_max_results": 15,

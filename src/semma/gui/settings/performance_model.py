@@ -1,5 +1,6 @@
-"""The Performance section's settings (daemon.gpu_busy_threshold, model.device,
-daemon.rescan_hours, daemon.krunner_max_results) as plain values. No Qt here."""
+"""The Performance section's settings (daemon.pause_when_gpu_busy,
+daemon.gpu_busy_threshold, model.device, daemon.rescan_hours,
+daemon.krunner_max_results) as plain values. No Qt here."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ from .context import Changes, Problem, SettingsContext
 DAEMON_SECTION = "daemon"
 MODEL_SECTION = "model"
 
+DEFAULT_PAUSE_WHEN_GPU_BUSY = True
 DEFAULT_GPU_BUSY_THRESHOLD = 30
 MIN_GPU_BUSY_THRESHOLD = 1
 MAX_GPU_BUSY_THRESHOLD = 100
@@ -57,6 +59,7 @@ class PerformanceValues:
     device: str | None = DEFAULT_DEVICE
     rescan_hours: int = DEFAULT_RESCAN_HOURS
     krunner_max_results: int = DEFAULT_KRUNNER_MAX_RESULTS
+    pause_when_gpu_busy: bool = DEFAULT_PAUSE_WHEN_GPU_BUSY
 
     def copy(self) -> PerformanceValues:
         return replace(self)
@@ -75,6 +78,7 @@ def load(ctx: SettingsContext) -> PerformanceValues:
         device=normalise_device(cfg.device),
         rescan_hours=rescan,
         krunner_max_results=max_results,
+        pause_when_gpu_busy=bool(cfg.pause_when_gpu_busy),
     )
 
 
@@ -82,6 +86,13 @@ def changes(saved: PerformanceValues, edited: PerformanceValues) -> Changes:
     """Only keys the user changed; returning a key to its default yields None."""
     daemon_out: dict[str, object] = {}
     model_out: dict[str, object] = {}
+
+    old_pause = bool(saved.pause_when_gpu_busy)
+    new_pause = bool(edited.pause_when_gpu_busy)
+    if new_pause != old_pause:
+        daemon_out["pause_when_gpu_busy"] = (
+            None if new_pause is DEFAULT_PAUSE_WHEN_GPU_BUSY else new_pause
+        )
 
     old_thresh = round(float(saved.gpu_busy_threshold))
     new_thresh = round(float(edited.gpu_busy_threshold))

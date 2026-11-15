@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QGroupBox,
     QHBoxLayout,
@@ -51,14 +52,23 @@ class PerformanceSection(SettingsSection):
 
         hl.addSpacing(4)
 
+        self.pause_when_gpu_busy = QCheckBox(
+            "Pause indexing while other programs use the graphics card", hw_box
+        )
+        self.pause_when_gpu_busy.setChecked(pfm.DEFAULT_PAUSE_WHEN_GPU_BUSY)
+        self.pause_when_gpu_busy.toggled.connect(self._on_pause_toggled)
+        hl.addWidget(self.pause_when_gpu_busy)
+
         gpu_row = QHBoxLayout()
-        gpu_label = QLabel("Pause indexing while other programs use the graphics card above:", hw_box)
+        gpu_row.setContentsMargins(24, 0, 0, 0)
+        self.gpu_busy_label = QLabel("when they use more than", hw_box)
         self.gpu_busy_threshold = QSpinBox(hw_box)
         self.gpu_busy_threshold.setRange(pfm.MIN_GPU_BUSY_THRESHOLD, pfm.MAX_GPU_BUSY_THRESHOLD)
+        self.gpu_busy_threshold.setValue(pfm.DEFAULT_GPU_BUSY_THRESHOLD)
         self.gpu_busy_threshold.setSuffix("%")
         self.gpu_busy_threshold.valueChanged.connect(self._edited)
-        gpu_label.setBuddy(self.gpu_busy_threshold)
-        gpu_row.addWidget(gpu_label)
+        self.gpu_busy_label.setBuddy(self.gpu_busy_threshold)
+        gpu_row.addWidget(self.gpu_busy_label)
         gpu_row.addWidget(self.gpu_busy_threshold)
         gpu_row.addStretch(1)
         hl.addLayout(gpu_row)
@@ -110,6 +120,10 @@ class PerformanceSection(SettingsSection):
         super().load(ctx)
         self._saved = pfm.load(ctx)
         self._populate_devices(self._saved.device)
+        self.pause_when_gpu_busy.blockSignals(True)
+        self.pause_when_gpu_busy.setChecked(self._saved.pause_when_gpu_busy)
+        self.pause_when_gpu_busy.blockSignals(False)
+        self._set_gpu_threshold_enabled(self._saved.pause_when_gpu_busy)
         for spin, val in (
             (self.gpu_busy_threshold, self._saved.gpu_busy_threshold),
             (self.rescan_hours, self._saved.rescan_hours),
@@ -137,6 +151,7 @@ class PerformanceSection(SettingsSection):
             device=self.selected_device(),
             rescan_hours=self.rescan_hours.value(),
             krunner_max_results=self.krunner_max_results.value(),
+            pause_when_gpu_busy=self.pause_when_gpu_busy.isChecked(),
         )
 
     def changes(self) -> Changes:
@@ -144,6 +159,14 @@ class PerformanceSection(SettingsSection):
 
     def problems(self) -> list[Problem]:
         return pfm.problems(self.values(), self.ctx) if self.ctx is not None else []
+
+    def _set_gpu_threshold_enabled(self, enabled: bool) -> None:
+        self.gpu_busy_label.setEnabled(enabled)
+        self.gpu_busy_threshold.setEnabled(enabled)
+
+    def _on_pause_toggled(self, checked: bool) -> None:
+        self._set_gpu_threshold_enabled(checked)
+        self._edited()
 
     def _edited(self, *_args: object) -> None:
         self.edited.emit()
