@@ -226,6 +226,7 @@ class Config:
     watch_debounce_seconds: float = 5
     # Indexing pauses while processes other than ours use more than this % of the GPU's SMs
     # (sampled every gpu_check_seconds while indexing; every 60 s while paused).
+    pause_when_gpu_busy: bool = True
     gpu_busy_threshold: float = 30
     gpu_check_seconds: float = 30
     krunner_max_results: int = 10
@@ -354,8 +355,8 @@ KNOWN_KEYS: dict[str, frozenset[str]] = {
     "index": frozenset({"batch_sizes", "prefetch_chunks"}),
     "search": frozenset({"z_gate", "z_floor", "knn_k", "location_prior", "duplicate_similarity", "vector_cache_max_chunks"}),
     "daemon": frozenset({"model_idle_unload_minutes", "index_model_unload_seconds", "rescan_hours",
-                         "watch_debounce_seconds", "gpu_busy_threshold", "gpu_check_seconds", "krunner_max_results",
-                         "query_debounce_ms", "query_device"}),
+                         "watch_debounce_seconds", "pause_when_gpu_busy", "gpu_busy_threshold", "gpu_check_seconds",
+                         "krunner_max_results", "query_debounce_ms", "query_device"}),
 }
 
 # Settings of earlier versions that are accepted with a warning and ignored.
@@ -557,6 +558,11 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
         cfg.duplicate_similarity.update({k: float(v) for k, v in search["duplicate_similarity"].items()})
     if "vector_cache_max_chunks" in search:
         cfg.vector_cache_max_chunks = max(0, int(search["vector_cache_max_chunks"]))
+    if "pause_when_gpu_busy" in daemon:
+        if isinstance(daemon["pause_when_gpu_busy"], bool):
+            cfg.pause_when_gpu_busy = daemon["pause_when_gpu_busy"]
+        else:
+            _warn(f"daemon.pause_when_gpu_busy must be a boolean (got {daemon['pause_when_gpu_busy']!r}); ignored")
     for key in ("model_idle_unload_minutes", "index_model_unload_seconds", "rescan_hours", "watch_debounce_seconds",
                 "gpu_busy_threshold", "gpu_check_seconds", "query_debounce_ms"):
         if key in daemon:

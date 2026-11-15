@@ -552,6 +552,55 @@ def test_config_vulkan_query_device_and_llama_paths(tmp_path: Path, capsys: pyte
 
 # -- GPU pause -----------------------------------------------------------------------------
 
+def test_config_pause_when_gpu_busy(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from semma.config import apply_overrides, check_unknown_keys
+
+    cfg = make_cfg(tmp_path)
+    assert cfg.pause_when_gpu_busy is True
+    assert check_unknown_keys({"daemon": {"pause_when_gpu_busy": False}}) == []
+
+    conf = tmp_path / "gpu.toml"
+    conf.write_text("[daemon]\npause_when_gpu_busy = false\n", encoding="utf-8")
+    loaded = load_config(conf, home=tmp_path)
+    assert loaded.pause_when_gpu_busy is False
+    assert capsys.readouterr().err == ""
+
+    apply_overrides(loaded, {"daemon": {"pause_when_gpu_busy": True}})
+    assert loaded.pause_when_gpu_busy is True
+    assert capsys.readouterr().err == ""
+
+    for bad_val in ("false", 0, 1, ["yes"]):
+        apply_overrides(loaded, {"daemon": {"pause_when_gpu_busy": bad_val}})
+        assert loaded.pause_when_gpu_busy is True
+        err = capsys.readouterr().err
+        assert "daemon.pause_when_gpu_busy" in err
+
+
+def test_indexing_continues_when_gpu_busy_and_pause_disabled(home: Path) -> None:
+    async def main() -> None:
+        cfg = make_cfg(home)
+        cfg.pause_when_gpu_busy = False
+        gpu = StubGpu(busy=True)
+        d = make_daemon(cfg, gpu=gpu)
+        d.start()
+        try:
+            await until_idle(d)
+            st = await d.status()
+            assert st["indexed"] == 3 and not st["paused"] and st["pause_reason"] == ""
+            assert gpu.calls == 0
+            # User pause is unaffected by pause_when_gpu_busy=False.
+            d.pause()
+            await wait_until(lambda: d._phase == "paused", what="user pause")
+            st_paused = await d.status()
+            assert st_paused["paused"] and st_paused["pause_reason"] == "paused by request"
+            d.resume()
+            await until_idle(d)
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
 def test_indexing_waits_while_gpu_busy_then_resumes(home: Path) -> None:
     async def main() -> None:
         gpu = StubGpu(busy=True)

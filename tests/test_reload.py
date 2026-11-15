@@ -312,6 +312,48 @@ def test_live_settings_reach_every_holder_without_a_rescan(home: Path) -> None:
     asyncio.run(main())
 
 
+def test_reload_toggles_pause_when_gpu_busy_live(home: Path) -> None:
+    from test_daemon import StubGpu
+
+    async def main() -> None:
+        settings = base_settings(home)
+        settings["daemon"]["gpu_check_seconds"] = 60.0
+        cfg = start_cfg(home, settings)
+        gpu = StubGpu(busy=True)
+        d = make_daemon(cfg, gpu=gpu)
+        d.start()
+        try:
+            await wait_until(lambda: d._phase == "paused", what="initial GPU pause")
+            st = await d.status()
+            assert st["paused"] and "GPU" in st["pause_reason"] and st["indexed"] == 0
+
+            # Turning pause_when_gpu_busy off during a GPU pause resumes indexing without a restart.
+            settings["daemon"]["pause_when_gpu_busy"] = False
+            assert await reload_and_settle(d, home, settings, rescan=False) == []
+            await until_idle(d)
+            st2 = await d.status()
+            assert not st2["paused"] and st2["pause_reason"] == "" and st2["indexed"] == 3
+
+            # Turning it back on makes the next sample count immediately (despite gpu_check_seconds=60).
+            calls_before = gpu.calls
+            settings["daemon"]["pause_when_gpu_busy"] = True
+            assert await reload_and_settle(d, home, settings, rescan=False) == []
+            write_docs(home, {"extra.md": "bright nebula in the night sky"})
+            d.rescan()
+            await wait_until(lambda: d._phase == "paused", what="GPU pause after re-enabling")
+            assert gpu.calls > calls_before
+            st3 = await d.status()
+            assert st3["paused"] and "GPU" in st3["pause_reason"] and st3["pending"] == 1
+
+            gpu.is_busy = False
+            await until_idle(d)
+            assert counts(cfg.db_path) == {"indexed": 4}
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
 def test_reload_during_a_slice_applies_at_a_file_boundary(home: Path) -> None:
     async def main() -> None:
         write_docs(home, {f"note{i}.md": f"note number {i} about gardens" for i in range(6)})

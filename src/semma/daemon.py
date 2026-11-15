@@ -116,6 +116,7 @@ LIVE_FIELDS: dict[str, str] = {
     "model_idle_unload_minutes": "daemon.model_idle_unload_minutes",
     "index_model_unload_seconds": "daemon.index_model_unload_seconds",
     "rescan_hours": "daemon.rescan_hours", "watch_debounce_seconds": "daemon.watch_debounce_seconds",
+    "pause_when_gpu_busy": "daemon.pause_when_gpu_busy",
     "gpu_busy_threshold": "daemon.gpu_busy_threshold", "gpu_check_seconds": "daemon.gpu_check_seconds",
     "krunner_max_results": "daemon.krunner_max_results", "query_debounce_ms": "daemon.query_debounce_ms",
 }
@@ -842,6 +843,10 @@ class Daemon:
 
     # -- GPU ------------------------------------------------------------------------------
     def _sample_gpu(self) -> bool:
+        if not self.cfg.pause_when_gpu_busy:
+            self._gpu_busy = False
+            self._gpu_checked_at = float("-inf")
+            return False
         busy = False
         mon = self.gpu_monitor
         if mon is not None:
@@ -857,7 +862,9 @@ class Daemon:
         return busy
 
     def _gpu_is_busy(self) -> bool:
-        if self.gpu_monitor is None:
+        if self.gpu_monitor is None or not self.cfg.pause_when_gpu_busy:
+            self._gpu_busy = False
+            self._gpu_checked_at = float("-inf")
             return False
         if self._gpu_busy or time.monotonic() - self._gpu_checked_at >= self.cfg.gpu_check_seconds:
             return self._sample_gpu()
@@ -868,10 +875,18 @@ class Daemon:
         while not self._stopping.is_set():
             interval = max(0.01, self.cfg.gpu_check_seconds)  # a reload may change it
             with self._cv:
-                self._cv.wait_for(lambda: self._phase == "indexing" or self._stopping.is_set(), timeout=5)
+                self._cv.wait_for(
+                    lambda: (self._phase == "indexing" and self.cfg.pause_when_gpu_busy)
+                    or self._stopping.is_set(),
+                    timeout=5,
+                )
             if self._stopping.wait(interval):
                 return
-            if self._phase != "indexing" or time.monotonic() - self._gpu_checked_at < interval * 0.9:
+            if (
+                self._phase != "indexing"
+                or not self.cfg.pause_when_gpu_busy
+                or time.monotonic() - self._gpu_checked_at < interval * 0.9
+            ):
                 continue
             if self._sample_gpu():
                 self._slice_stop.set()
@@ -995,6 +1010,9 @@ class Daemon:
         self.cfg = cfg
         self.indexer.cfg = cfg
         self._no_progress_until = 0.0
+        if not cfg.pause_when_gpu_busy:
+            self._gpu_busy = False
+        self._gpu_checked_at = float("-inf")
         with contextlib.suppress(RuntimeError):  # shutting down
             # On the search thread, between queries: a query sees one Config throughout.
             self._search_exec.submit(setattr, self.searcher, "cfg", cfg)
