@@ -303,6 +303,61 @@ def ensure_model_file(kind: str, model_dir: Path) -> Path:
             return dest
 
 
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _lock_held(path: Path) -> bool:
+    """True if some process (this one included) holds the download lock `path`. Never waits and
+    never creates the file."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def download_progress(model_dir: Path) -> dict[str, Any] | None:
+    """The model download running now, in this or any other process, or None.
+
+    `ensure_model_file` holds `<name>.lock` while it downloads into `<name>.part` and checks the
+    result, so a held lock means a download in progress and the part file's size is its progress
+    (it equals the total while the finished file is checked). A part file nobody holds the lock
+    for is an interrupted download, not a running one.
+
+    Returns {"file": name, "done": bytes, "total": bytes, "all_done": bytes, "all_total": bytes}:
+    the file being downloaded, and the bytes on disk and expected over every model file.
+    """
+    current: tuple[str, int, int] | None = None
+    all_done = all_total = 0
+    for filename, size, _sha in GGUF_SPECS.values():
+        all_total += size
+        if _file_size(model_dir / filename) == size:
+            all_done += size
+            continue
+        have = min(_file_size(model_dir / f"{filename}.part"), size)
+        all_done += have
+        if current is None and _lock_held(model_dir / f"{filename}.lock"):
+            current = (filename, have, size)
+    if current is None:
+        return None
+    return {"file": current[0], "done": current[1], "total": current[2],
+            "all_done": all_done, "all_total": all_total}
+
+
 def _download_resumable(url: str, part: Path, expected_size: int) -> None:
     """Download `url` into `part`, continuing after the bytes `part` already holds.
 
@@ -1545,6 +1600,10 @@ class Embedder:
 
     def _model_dir(self) -> Path:
         return resolve_model_dir(self._cfg)
+
+    def download_progress(self) -> dict[str, Any] | None:
+        """The model download in progress, if any (see `download_progress`)."""
+        return download_progress(self._model_dir())
 
     def _has_vulkan_lib(self) -> bool:
         lib_dir = self._lib_dir()

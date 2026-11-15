@@ -124,3 +124,86 @@ def test_partial_file_longer_than_servers_restarts(tmp_path: Path, serve) -> Non
         emb.ensure_model_file("text", tmp_path)
     assert server.ranges == [f"bytes={len(DATA) + 5}-", None]
     assert (tmp_path / f"{NAME}.part").read_bytes() == DATA
+
+
+# -- progress (what the daemon's Status reports) ------------------------------------------
+
+def _two_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(emb, "GGUF_SPECS", {"text": ("a.gguf", 1000, "0" * 64),
+                                            "mmproj": ("b.gguf", 3000, "0" * 64)})
+
+
+def _hold_lock(path: Path):
+    import fcntl
+
+    fh = path.open("w")
+    fcntl.flock(fh, fcntl.LOCK_EX)
+    return fh
+
+
+def test_no_download_progress_without_a_running_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _two_files(monkeypatch)
+    assert emb.download_progress(tmp_path / "missing") is None
+    assert emb.download_progress(tmp_path) is None
+    # An interrupted download (part file and lock file, nobody holds the lock) is not running.
+    (tmp_path / "a.gguf.part").write_bytes(b"x" * 400)
+    (tmp_path / "a.gguf.lock").touch()
+    assert emb.download_progress(tmp_path) is None
+    assert not (tmp_path / "b.gguf.lock").exists()  # probing creates no files
+
+
+def test_download_progress_while_the_lock_is_held(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _two_files(monkeypatch)
+    (tmp_path / "a.gguf").write_bytes(b"x" * 1000)  # complete
+    (tmp_path / "b.gguf.part").write_bytes(b"x" * 1200)
+    with _hold_lock(tmp_path / "b.gguf.lock"):
+        assert emb.download_progress(tmp_path) == {
+            "file": "b.gguf", "done": 1200, "total": 3000, "all_done": 2200, "all_total": 4000}
+        # Started, no bytes yet.
+        (tmp_path / "b.gguf.part").unlink()
+        assert emb.download_progress(tmp_path)["done"] == 0
+    assert emb.download_progress(tmp_path) is None
+
+
+def test_download_progress_during_a_real_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ensure_model_file against a local server that stalls half-way: progress is the bytes written."""
+    half = len(DATA) // 2
+    sent_half, go_on = threading.Event(), threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(DATA)))
+            self.end_headers()
+            self.wfile.write(DATA[:half])
+            self.wfile.flush()
+            sent_half.set()
+            go_on.wait(10)
+            self.wfile.write(DATA[half:])
+
+        def log_message(self, *args) -> None:
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    monkeypatch.setattr(emb, "GGUF_BASE_URL", f"http://127.0.0.1:{httpd.server_address[1]}")
+    monkeypatch.setattr(emb, "GGUF_SPECS", {"text": (NAME, len(DATA), hashlib.sha256(DATA).hexdigest())})
+    monkeypatch.setattr(emb, "DOWNLOAD_CHUNK", 64 * 1024)
+    result: list[Path] = []
+    t = threading.Thread(target=lambda: result.append(emb.ensure_model_file("text", tmp_path)))
+    t.start()
+    try:
+        assert sent_half.wait(10)
+        tick = threading.Event()
+        for _ in range(200):  # the client writes what it has read
+            p = emb.download_progress(tmp_path)
+            if p and p["done"] == half:
+                break
+            tick.wait(0.01)
+        assert p == {"file": NAME, "done": half, "total": len(DATA), "all_done": half, "all_total": len(DATA)}
+    finally:
+        go_on.set()
+        t.join(10)
+        httpd.shutdown()
+    assert result and result[0].read_bytes() == DATA
+    assert emb.download_progress(tmp_path) is None
