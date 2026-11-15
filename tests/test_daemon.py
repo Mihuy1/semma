@@ -23,7 +23,8 @@ from fakes import FakeEmbedder, FakeExtractor
 
 from semma import daemon as daemon_mod
 from semma.config import Config, load_config
-from semma.daemon import Daemon, DaemonNotRunning, control_call, daemon_status, partial_scan_roots, serve
+from semma.daemon import (Daemon, DaemonNotRunning, control_call, daemon_failed, daemon_status, partial_scan_roots,
+                          serve)
 from semma.store import Store
 
 DOCS = {
@@ -787,6 +788,196 @@ def test_indexing_slices_do_not_leak_connections(tmp_path: Path) -> None:
         store.close()
 
 
+# -- status details (what a status window polls every second) ------------------------------
+
+def test_status_counts_per_kind_and_failed_files(home: Path) -> None:
+    async def main() -> None:
+        (home / "Documents" / "report.pdf").write_text("quarterly figures", encoding="utf-8")
+        ext = FakeExtractor({"report.pdf": RuntimeError("broken pdf"), "bread.txt": RuntimeError("bad text")})
+        d = make_daemon(make_cfg(home), extractor=ext)
+        d.start()
+        try:
+            await until_idle(d)
+            st = await d.status()
+            kinds = set(daemon_mod.ft.KINDS)
+            for key in ("pending_by_kind", "indexed_by_kind", "failed_by_kind"):
+                assert set(st[key]) == kinds
+            assert st["indexed_by_kind"]["text"] == 2 and st["failed_by_kind"] == {
+                **dict.fromkeys(kinds, 0), "text": 1, "pdf": 1}
+            assert sum(st["failed_by_kind"].values()) == st["failed"] == 2
+            assert sum(st["indexed_by_kind"].values()) == st["indexed"]
+            failed = dict(await d.failed())
+            assert set(failed) == {str(home / "Documents" / "report.pdf"), str(home / "Documents" / "bread.txt")}
+            assert "broken pdf" in failed[str(home / "Documents" / "report.pdf")]
+            assert len(await d.failed(1)) == 1
+            # The per-kind counts read only the (status, kind) index, not the table.
+            plan = " ".join(r[3] for r in d.store.reader().execute(
+                "EXPLAIN QUERY PLAN SELECT status, kind, count(*) FROM files GROUP BY status, kind"))
+            assert "files_status_kind" in plan, plan
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
+def test_status_does_not_wait_for_the_search_thread(home: Path) -> None:
+    """A query can sit on the search thread for minutes (the model downloading); Status must not."""
+    async def main() -> None:
+        d = make_daemon(make_cfg(home))
+        release = threading.Event()
+        blocked = d._search_exec.submit(release.wait, 10)
+        try:
+            st = await asyncio.wait_for(d.status(), 2)
+            assert st["state"] == "idle"
+            assert await asyncio.wait_for(d.failed(), 2) == []
+        finally:
+            release.set()
+            blocked.result()
+            await d.stop()
+
+    asyncio.run(main())
+
+
+def test_status_reports_indexing_run_progress(tmp_path: Path) -> None:
+    async def main() -> None:
+        write_docs(tmp_path, {f"doc{i:02d}.md": f"note number {i} about gardening" for i in range(20)})
+        ext = FakeExtractor({"doc05.md": RuntimeError("unreadable")}, on_chunk=lambda p, i: time.sleep(0.03))
+        d = make_daemon(make_cfg(tmp_path), extractor=ext)
+        d.start()
+        try:
+            await wait_until(lambda: d._phase == "indexing", what="indexing")
+            st = await d.status()
+            assert st["state"] == "indexing" and st["run_total"] == 20
+            await wait_until(lambda: d._run_progress[0] >= 8, what="files done")
+            st = await d.status()
+            assert st["run_total"] == 20 and 8 <= st["run_done"] < 20
+            assert st["run_rate"] > 0
+            await until_idle(d, 10)
+            st = await d.status()
+            assert (st["run_done"], st["run_total"], st["run_failed"], st["run_rate"]) == (0, 0, 0, 0.0)
+        finally:
+            await d.stop()
+        assert counts(d.cfg.db_path) == {"indexed": 19, "failed": 1}
+
+    asyncio.run(main())
+
+
+def test_status_run_progress_counts_failures(tmp_path: Path) -> None:
+    async def main() -> None:
+        write_docs(tmp_path, {f"doc{i:02d}.md": f"note number {i}" for i in range(6)})
+        seen: list[tuple[int, int, int, float]] = []
+        ext = FakeExtractor({"doc00.md": RuntimeError("x"), "doc01.md": RuntimeError("y")})
+        d = make_daemon(make_cfg(tmp_path), extractor=ext)
+        orig = d._on_progress
+
+        def spy(st: Any) -> None:
+            orig(st)
+            seen.append(d._run_progress)
+
+        d._on_progress = spy  # type: ignore[method-assign]
+        d.start()
+        try:
+            await until_idle(d)
+        finally:
+            await d.stop()
+        assert seen[-1][:3] == (6, 6, 2)
+
+    asyncio.run(main())
+
+
+class SlowScanner(daemon_mod.Scanner):
+    def scan(self, roots=None, now=None):
+        for f in super().scan(roots, now):
+            time.sleep(0.05)  # the walk is suspended here, inside f's directory
+            yield f
+
+
+def test_status_reports_scan_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def main() -> None:
+        write_docs(tmp_path, {f"a{i}.md": "alpha" for i in range(5)}, sub="one")
+        write_docs(tmp_path, {f"b{i}.md": "beta" for i in range(5)}, sub="two")
+        (tmp_path / "Documents" / "two" / "notes.bin").write_bytes(b"x")  # seen, not indexable
+        monkeypatch.setattr(daemon_mod, "Scanner", SlowScanner)
+        d = make_daemon(make_cfg(tmp_path))
+        d.start()
+        try:
+            await wait_until(lambda: d._scanner is not None and d._scanner.stats.matched >= 2, what="scanning")
+            st = await d.status()
+            assert st["state"] == "scanning"
+            assert Path(st["scan_dir"]).parent == tmp_path / "Documents"
+            assert st["scan_dirs"] >= 2 and st["scan_files"] >= st["scan_matched"] >= 2
+            await until_idle(d, 10)
+            st = await d.status()
+            assert (st["scan_dir"], st["scan_dirs"], st["scan_files"], st["scan_matched"]) == ("", 0, 0, 0)
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
+class DownloadingEmbedder(LifecycleEmbedder):
+    def __init__(self, model_dir: Path) -> None:
+        super().__init__()
+        self.model_dir = model_dir
+
+    def download_progress(self):
+        from semma import embedder as emb
+
+        return emb.download_progress(self.model_dir)
+
+
+def test_status_reports_model_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import fcntl
+
+    from semma import embedder as emb
+
+    monkeypatch.setattr(emb, "GGUF_SPECS", {"text": ("t.gguf", 1000, "0" * 64), "mmproj": ("m.gguf", 3000, "0" * 64)})
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "t.gguf.part").write_bytes(b"x" * 250)
+
+    async def main() -> None:
+        d = make_daemon(make_cfg(tmp_path), embedder=DownloadingEmbedder(models))
+        try:
+            st = await d.status()  # an interrupted download is not running
+            assert st["state"] == "idle" and st["download_file"] == ""
+            assert (st["download_done"], st["download_total"], st["download_all_total"]) == (0, 0, 0)
+            with (models / "t.gguf.lock").open("w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                st = await d.status()
+            assert st["state"] == "downloading" and st["download_file"] == "t.gguf"
+            assert (st["download_done"], st["download_total"]) == (250, 1000)
+            assert (st["download_all_done"], st["download_all_total"]) == (250, 4000)
+            st = await d.status()
+            assert st["state"] == "idle" and st["download_file"] == ""
+            # A probe that fails only hides the download.
+            d.embedder.download_progress = lambda: 1 / 0
+            assert (await d.status())["download_file"] == ""
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
+def test_embedder_download_progress_uses_its_model_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import fcntl
+
+    from semma import embedder as emb
+
+    monkeypatch.delenv("SEMMA_MODEL_DIR", raising=False)
+    monkeypatch.setattr(emb, "GGUF_SPECS", {"text": ("t.gguf", 1000, "0" * 64)})
+    cfg = make_cfg(tmp_path)
+    cfg.model_dir = tmp_path / "models"
+    cfg.model_dir.mkdir()
+    (cfg.model_dir / "t.gguf.part").write_bytes(b"x" * 10)
+    e = emb.Embedder(cfg)
+    assert e.download_progress() is None
+    with (cfg.model_dir / "t.gguf.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        assert e.download_progress() == {"file": "t.gguf", "done": 10, "total": 1000,
+                                         "all_done": 10, "all_total": 1000}
+
+
 # -- D-Bus (session bus, throwaway names) --------------------------------------------------
 
 @needs_bus
@@ -807,6 +998,17 @@ def test_control_interface_over_dbus(home: Path) -> None:
                                "pause_reason", "pending", "indexed", "failed", "chunks", "current_file",
                                "last_scan_at", "uptime"}
             assert st["last_scan_at"] > 0 and st["chunks"] == 2
+            assert set(st) == set(daemon_mod.STATUS_SIGNATURES)
+            assert st["indexed_by_kind"]["text"] == 2 and st["failed_by_kind"]["text"] == 1
+            assert st["pending_by_kind"] == dict.fromkeys(daemon_mod.ft.KINDS, 0)
+            assert st["download_file"] == "" and st["run_total"] == 0 and st["scan_dir"] == ""
+            assert isinstance(st["run_rate"], float)
+            bread = str(home / "Documents" / "bread.txt")
+            failed = await control_call("Failed", 10, signature="u", bus_name=name)
+            assert len(failed) == 1 and failed[0][0] == bread and "corrupt file" in failed[0][1]
+            assert await control_call("Failed", 0, signature="u", bus_name=name) == failed
+            rows = await asyncio.to_thread(daemon_failed, 5, bus_name=name)
+            assert rows == [(bread, failed[0][1])]
             await control_call("Pause", bus_name=name)
             st = await control_call("Status", bus_name=name)
             assert st["paused"] is True
@@ -823,6 +1025,7 @@ def test_control_interface_over_dbus(home: Path) -> None:
             stop.set()
             assert await asyncio.wait_for(task, 10) == 0
         assert await asyncio.to_thread(daemon_status, bus_name=name) is None
+        assert await asyncio.to_thread(daemon_failed, bus_name=name) is None
         with pytest.raises(DaemonNotRunning):
             await control_call("Status", bus_name=name)
 

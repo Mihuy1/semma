@@ -11,7 +11,11 @@ Threads and what runs where:
                              Never touches SQLite or the model directly.
   semma-search (1)     every query: embed_query + Searcher.search_vector on this one
                              thread (its read-only connection and the in-memory vector cache);
-                             also Status counts and RetryFailed.
+                             also RetryFailed.
+  semma-status (1)     Status counts and Failed() (its own read-only connection), so a status
+                             window polling every second never waits behind a query, and a
+                             query never waits behind it. A query can sit on the search thread
+                             for minutes while the model downloads.
   semma-model (1)      model load (shared by all queries waiting for it) and unload.
   semma-worker         scans (startup, inotify, daily, Rescan()) and indexing slices.
                              nice 10 + idle IO class; the indexer's extraction thread and the
@@ -48,6 +52,7 @@ from dbus_fast.aio import MessageBus
 from dbus_fast.service import ServiceInterface, dbus_method
 
 from . import dbus_names
+from . import filetypes as ft
 from .config import Config
 from .indexer import Indexer, IndexStats, ModelMismatch
 from .scanner import Scanner, _is_app_install
@@ -239,8 +244,12 @@ class Daemon:
         self._gpu_busy = False
         self._gpu_checked_at = float("-inf")
         self._gpu_sample_lock = threading.Lock()
-        self._run_stats: IndexStats | None = None
         self._run_logged = 0
+        # Progress for Status, each replaced whole by the worker (one attribute write) and read
+        # by the event loop: (done, total, failed, files per second) of the running slice, and
+        # the scanner of the running scan (its stats are only read).
+        self._run_progress: tuple[int, int, int, float] = (0, 0, 0, 0.0)
+        self._scanner: Scanner | None = None
         self._worker: threading.Thread | None = None
         self._gpu_thread: threading.Thread | None = None
 
@@ -254,6 +263,7 @@ class Daemon:
         self._idle_task: asyncio.Task[None] | None = None
         self._search_exec = ThreadPoolExecutor(1, thread_name_prefix="semma-search")
         self._model_exec = ThreadPoolExecutor(1, thread_name_prefix="semma-model")
+        self._status_exec = ThreadPoolExecutor(1, thread_name_prefix="semma-status")
         self._started = time.monotonic()
         self._running = False
         self._closed = False
@@ -309,6 +319,7 @@ class Daemon:
                     clean = False
         await asyncio.to_thread(self._search_exec.shutdown, True, cancel_futures=True)
         await asyncio.to_thread(self._model_exec.shutdown, True, cancel_futures=True)
+        await asyncio.to_thread(self._status_exec.shutdown, True, cancel_futures=True)
         if clean:
             self.store.close()
         self._running = False
@@ -537,7 +548,9 @@ class Daemon:
         log.info("retrying %d failed files", n)
         return n
 
-    def state(self) -> str:
+    def state(self, downloading: bool = False) -> str:
+        if downloading:
+            return "downloading"
         if self._phase == "scanning":
             return "scanning"
         if (self._load_task is not None and not self._load_task.done()) or getattr(self.embedder, "loading", False):
@@ -545,12 +558,19 @@ class Daemon:
         return self._phase
 
     async def status(self) -> dict[str, Any]:
+        """Everything `Control.Status` reports; see STATUS_SIGNATURES for the types. The keys are
+        always all present (zero or empty when that part is not running)."""
         loop = asyncio.get_running_loop()
-        counts, chunks = await loop.run_in_executor(self._search_exec, self._counts_sync)
+        by_kind, chunks, dl = await loop.run_in_executor(self._status_exec, self._status_sync)
+        counts = {status: sum(kinds.values()) for status, kinds in by_kind.items()}
         q_loaded = self._query_model_loaded()
         i_loaded = self._index_model_loaded()
+        run_done, run_total, run_failed, run_rate = self._run_progress
+        scanner = self._scanner
+        scan = scanner.stats if scanner is not None else None
+        dl = dl or {}
         return {
-            "state": self.state(),
+            "state": self.state(downloading=bool(dl)),
             "model_loaded": q_loaded or i_loaded,
             "query_model_loaded": q_loaded,
             "index_model_loaded": i_loaded,
@@ -564,13 +584,50 @@ class Daemon:
             "last_scan_at": self._last_scan_at,
             "uptime": time.monotonic() - self._started,
             "watched_dirs": len(self._watched),
+            "pending_by_kind": by_kind["pending"],
+            "indexed_by_kind": by_kind["indexed"],
+            "failed_by_kind": by_kind["failed"],
+            "download_file": dl.get("file", ""),
+            "download_done": dl.get("done", 0),
+            "download_total": dl.get("total", 0),
+            "download_all_done": dl.get("all_done", 0),
+            "download_all_total": dl.get("all_total", 0),
+            "run_done": run_done,
+            "run_total": run_total,
+            "run_failed": run_failed,
+            "run_rate": run_rate,
+            "scan_dir": scan.current_dir if scan is not None else "",
+            "scan_dirs": scan.dirs if scan is not None else 0,
+            "scan_files": scan.files_seen if scan is not None else 0,
+            "scan_matched": scan.matched if scan is not None else 0,
         }
 
-    def _counts_sync(self) -> tuple[dict[str, int], int]:
+    def _status_sync(self) -> tuple[dict[str, dict[str, int]], int, dict[str, Any] | None]:
+        """On the status thread: file counts per status and kind, chunks, the model download."""
         db = self.store.reader()
-        counts = {r[0]: r[1] for r in db.execute("SELECT status, count(*) FROM files GROUP BY status")}
+        by_kind: dict[str, dict[str, int]] = {s: dict.fromkeys(ft.KINDS, 0) for s in ("pending", "indexed", "failed")}
+        for status, kind, n in db.execute("SELECT status, kind, count(*) FROM files GROUP BY status, kind"):
+            by_kind.setdefault(status, dict.fromkeys(ft.KINDS, 0))[kind] = n
         chunks = db.execute("SELECT count(*) FROM chunks").fetchone()[0]
-        return counts, chunks
+        return by_kind, chunks, self._download_sync()
+
+    def _download_sync(self) -> dict[str, Any] | None:
+        probe = getattr(self.embedder, "download_progress", None)  # test doubles have none
+        if probe is None:
+            return None
+        try:
+            return probe()
+        except Exception:
+            log.debug("download progress unavailable", exc_info=True)
+            return None
+
+    async def failed(self, limit: int = 0) -> list[tuple[str, str]]:
+        """(path, error) of failed files, the most important first (as `semma status --failed`);
+        limit 0: all of them."""
+        loop = asyncio.get_running_loop()
+        rows = await loop.run_in_executor(
+            self._status_exec, lambda: self.store.failed_files(limit or None, db=self.store.reader()))
+        return [(r["path"], r["error"] or "") for r in rows]
 
     # -- worker ---------------------------------------------------------------------------
     def _wake(self, stop_slice: bool = False) -> None:
@@ -677,6 +734,7 @@ class Daemon:
                 return
         if self._phase != "indexing":
             log.info("indexing %d pending files", pending)
+        self._run_progress = (0, pending, 0, 0.0)  # before the phase: Status sees both together
         self._set_phase("indexing")
         self._run_logged = 0
         try:
@@ -687,6 +745,7 @@ class Daemon:
             return
         finally:
             self._current_file = ""
+            self._run_progress = (0, 0, 0, 0.0)
             self._last_work = time.monotonic()
         if st.done:
             log.info("indexing %s: %d indexed, %d failed, %d skipped, %d deferred, %d chunks in %.0fs",
@@ -699,9 +758,10 @@ class Daemon:
         """Indexer callback, after every file (a file boundary)."""
         self._current_file = st.current
         self._last_work = time.monotonic()
+        rate = st.done / st.seconds if st.seconds > 0 else 0.0
+        self._run_progress = (st.done, st.total, st.failed, rate)
         if st.done - self._run_logged >= PROGRESS_LOG_EVERY:
             self._run_logged = st.done
-            rate = st.done / st.seconds if st.seconds > 0 else 0.0
             log.info("indexed %d/%d files (%d failed), %.1f files/s", st.indexed, st.total, st.failed, rate)
         with self._cv:
             scan_wanted = self._scan_full or bool(self._scan_dirs)
@@ -756,6 +816,13 @@ class Daemon:
         full = roots is None
         self._set_phase("scanning")
         scanner = Scanner(self.cfg)
+        self._scanner = scanner  # Status reads its stats until the scan is done
+        try:
+            self._scan_roots(scanner, roots, full)
+        finally:
+            self._scanner = None
+
+    def _scan_roots(self, scanner: Scanner, roots: list[Path] | None, full: bool) -> None:
         gen = self.store.begin_scan()
 
         def files() -> Any:
@@ -848,6 +915,18 @@ STATUS_SIGNATURES = {
     "state": "s", "model_loaded": "b", "query_model_loaded": "b", "index_model_loaded": "b",
     "paused": "b", "pause_reason": "s", "pending": "x", "indexed": "x", "failed": "x",
     "chunks": "x", "current_file": "s", "last_scan_at": "d", "uptime": "d", "watched_dirs": "x",
+    # file counts per kind (every kind in filetypes.KINDS, 0 if none)
+    "pending_by_kind": "a{sx}", "indexed_by_kind": "a{sx}", "failed_by_kind": "a{sx}",
+    # the model download in progress ("" / 0 when none): the file, its bytes on disk and
+    # expected, and the same over every model file
+    "download_file": "s", "download_done": "x", "download_total": "x",
+    "download_all_done": "x", "download_all_total": "x",
+    # the running indexing slice (0 when not indexing): files done (indexed, failed, skipped or
+    # deferred) of the files queued when it started, failed among them, files per second
+    "run_done": "x", "run_total": "x", "run_failed": "x", "run_rate": "d",
+    # the running scan ("" / 0 when not scanning): the directory being listed, directories
+    # listed, regular files seen and indexable files among them
+    "scan_dir": "s", "scan_dirs": "x", "scan_files": "x", "scan_matched": "x",
 }
 
 
@@ -878,6 +957,11 @@ class Control(ServiceInterface):
     @dbus_method()
     async def RetryFailed(self) -> "u":  # noqa: F821, N802
         return await self._daemon.retry_failed()
+
+    @dbus_method()
+    async def Failed(self, limit: "u") -> "a(ss)":  # noqa: F821, N802
+        """(path, error) of failed files, the most important first; limit 0: all."""
+        return [[path, error] for path, error in await self._daemon.failed(limit)]
 
 
 async def serve(daemon: Daemon, *, bus_address: str | None = None, stop_event: asyncio.Event | None = None) -> int:
@@ -1045,3 +1129,14 @@ def daemon_status(*, bus_address: str | None = None, bus_name: str = dbus_names.
         return daemon_call("Status", bus_address=bus_address, bus_name=bus_name, timeout=timeout)
     except (DaemonNotRunning, TimeoutError):
         return None
+
+
+def daemon_failed(limit: int = 0, *, bus_address: str | None = None, bus_name: str = dbus_names.BUS_NAME,
+                  timeout: float = 10.0) -> list[tuple[str, str]] | None:
+    """The daemon's Failed(limit) as (path, error) pairs, or None if it is not running."""
+    try:
+        rows = daemon_call("Failed", limit, signature="u", bus_address=bus_address, bus_name=bus_name,
+                           timeout=timeout)
+    except (DaemonNotRunning, TimeoutError):
+        return None
+    return [(path, error) for path, error in rows or []]
