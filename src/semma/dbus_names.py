@@ -9,6 +9,8 @@ RUNNER_INTERFACE = "org.kde.krunner1"
 # Our own control interface (status, pause/resume, rescan), used by the CLI.
 CONTROL_PATH = "/control"
 CONTROL_INTERFACE = "io.github.Semma.Control1"
+# D-Bus error of ReloadConfig when the config file cannot be read or is not valid.
+CONFIG_ERROR = "io.github.Semma.Error.InvalidConfig"
 
 # KRunner plugin id (X-KDE-PluginInfo-Name) and systemd user unit.
 RUNNER_ID = "semma"

@@ -3,7 +3,9 @@
 Runs as a systemd user service (Type=dbus) that owns `dbus_names.BUS_NAME` on the session bus,
 answers KRunner queries (`krunner.KRunnerService` at RUNNER_PATH) and GNOME Shell overview
 searches (`gnome_search.GnomeSearchService` at GNOME_PATH) and keeps the index current in the
-background. `Control` at CONTROL_PATH reports status and takes pause/resume/rescan.
+background. `Control` at CONTROL_PATH reports status, takes pause/resume/rescan and
+ReloadConfig (read config.toml again: the worker swaps the new Config in at a file boundary,
+then rescans if what is indexed or its priority changed).
 
 Threads and what runs where:
 
@@ -15,7 +17,8 @@ Threads and what runs where:
   semma-status (1)     Status counts and Failed() (its own read-only connection), so a status
                              window polling every second never waits behind a query, and a
                              query never waits behind it. A query can sit on the search thread
-                             for minutes while the model downloads.
+                             for minutes while the model downloads. Also reads the config file
+                             for ReloadConfig.
   semma-model (1)      model load (shared by all queries waiting for it) and unload.
   semma-worker         scans (startup, inotify, daily, Rescan()) and indexing slices.
                              nice 10 + idle IO class; the indexer's extraction thread and the
@@ -53,7 +56,7 @@ from dbus_fast.service import ServiceInterface, dbus_method
 
 from . import dbus_names
 from . import filetypes as ft
-from .config import Config
+from .config import Config, ConfigError, canonical, load_config
 from .indexer import Indexer, IndexStats, ModelMismatch
 from .scanner import Scanner, _is_app_install
 from .search import Searcher, SearchResult
@@ -73,6 +76,66 @@ SHUTDOWN_JOIN_S = 60.0
 MAX_PARTIAL_SCAN_DIRS = 64  # more changed directories than this: one full scan instead
 
 _DEFAULT: Any = object()  # "construct the real collaborator"; None means "none"
+
+# How `Daemon.reload_config` applies each Config field, with the config.toml name it reports.
+# Taken over only by a restart (the embedder, the store and its vector cache are built from them):
+RESTART_FIELDS: dict[str, str] = {
+    "db_path": "db_path", "model_name": "model.name", "device": "model.device",
+    "query_device": "model.query_device", "llama_lib_dir": "model.llama_lib_dir",
+    "model_dir": "model.model_dir", "batch_sizes": "index.batch_sizes",
+    "vector_cache_max_chunks": "search.vector_cache_max_chunks",
+}
+# Decide what is indexed: a change runs a full rescan.
+SCAN_FIELDS: dict[str, str] = {
+    "roots": "scan.roots", "include_mounts": "scan.include_mounts", "skip_hidden": "scan.skip_hidden",
+    "skip_app_installs": "scan.skip_app_installs", "kinds": "scan.kinds",
+    "exclude_extensions": "scan.exclude_extensions", "exclude_dir_names": "scan.exclude_dir_names",
+    "root_system_dir_names": "scan.root_system_dir_names",
+    "project_build_dir_names": "scan.project_build_dir_names", "project_markers": "scan.project_markers",
+    "exclude_paths": "scan.exclude_paths", "max_bytes": "scan.max_bytes",
+}
+# Priority scores: a full rescan stores the new score of every file, changed or not.
+PRIORITY_FIELDS: dict[str, str] = {
+    "locations": "priority.locations", "other_location": "priority.other_location",
+    "type_weights": "priority.type_weights", "project_penalty": "priority.project_penalty",
+    "depth_free_levels": "priority.depth_free_levels",
+    "depth_penalty_per_level": "priority.depth_penalty_per_level",
+    "depth_penalty_max": "priority.depth_penalty_max", "recency": "priority.recency",
+    "tiny_bytes": "priority.tiny_bytes", "tiny_penalty": "priority.tiny_penalty",
+    "huge_video_bytes": "priority.huge_video_bytes", "huge_video_penalty": "priority.huge_video_penalty",
+}
+# Read when a file is indexed (or a slice starts): files indexed from then on; nothing re-indexed.
+NEXT_FILE_FIELDS: dict[str, str] = {
+    "max_media_seconds": "media.max_minutes", "media_segment_seconds": "media.segment_seconds",
+    "prefetch_chunks": "index.prefetch_chunks",
+}
+# Read at use time (or pushed to the component that copied them).
+LIVE_FIELDS: dict[str, str] = {
+    "z_gate": "search.z_gate", "z_floor": "search.z_floor", "knn_k": "search.knn_k",
+    "location_prior": "search.location_prior", "duplicate_similarity": "search.duplicate_similarity",
+    "model_idle_unload_minutes": "daemon.model_idle_unload_minutes",
+    "index_model_unload_seconds": "daemon.index_model_unload_seconds",
+    "rescan_hours": "daemon.rescan_hours", "watch_debounce_seconds": "daemon.watch_debounce_seconds",
+    "gpu_busy_threshold": "daemon.gpu_busy_threshold", "gpu_check_seconds": "daemon.gpu_check_seconds",
+    "krunner_max_results": "daemon.krunner_max_results", "query_debounce_ms": "daemon.query_debounce_ms",
+}
+# Not settings: always those the daemon started with.
+FIXED_FIELDS: tuple[str, ...] = ("home", "source_path", "source_home")
+
+# Parents of the drives `include_mounts` adds (config.detect_mounts). With it on, files below
+# them are "configured": a drive that is unplugged keeps its index.
+MOUNT_PARENTS: tuple[Path, ...] = (Path("/mnt"), Path("/media"), Path("/run/media"))
+
+
+def configured_areas(cfg: Config, scanned_roots: Iterable[Path] = ()) -> list[Path]:
+    """Where indexed files may be under these settings, available right now or not: the
+    configured roots (even when missing or unmounted), the roots just scanned and, with
+    include_mounts, everything below the mount parents."""
+    areas = [canonical(r) for r in cfg.roots] + list(scanned_roots)
+    if cfg.include_mounts:
+        for parent in MOUNT_PARENTS:
+            areas += [parent, canonical(parent)]
+    return areas
 
 
 class GpuMonitorLike(Protocol):
@@ -207,8 +270,15 @@ class Daemon:
                  watcher_factory: WatcherFactory | None = _DEFAULT,
                  runner_factory: RunnerFactory | None = _DEFAULT,
                  gnome_factory: RunnerFactory | None = _DEFAULT,
-                 bus_name: str = dbus_names.BUS_NAME) -> None:
+                 bus_name: str = dbus_names.BUS_NAME,
+                 config_loader: Callable[[], Config] | None = None) -> None:
         self.cfg = cfg
+        # ReloadConfig: the settings the daemon started with (restart-only settings compare
+        # against these), the newest settings accepted, and the loader of the config file.
+        self._start_cfg = cfg
+        self._accepted_cfg = cfg
+        self._reload_lock = threading.Lock()
+        self._config_loader = config_loader or self._load_config_file
         self.bus_name = bus_name
         self.store = store if store is not None else Store(
             cfg.db_path, vector_cache=True, cache_max_chunks=cfg.vector_cache_max_chunks)
@@ -224,6 +294,7 @@ class Daemon:
         self._runner_factory = _default_runner_factory() if runner_factory is _DEFAULT else runner_factory
         self._gnome_factory = _default_gnome_factory() if gnome_factory is _DEFAULT else gnome_factory
         self.watcher: WatcherLike | None = None
+        self._services: list[Any] = []  # the KRunner / GNOME interfaces (serve sets them)
 
         # Worker state, guarded by _cv (simple reads of single attributes are fine without it).
         self._cv = threading.Condition()
@@ -233,6 +304,7 @@ class Daemon:
         self._user_paused = False
         self._scan_full = False
         self._scan_dirs: set[str] = set()
+        self._pending_cfg: Config | None = None  # accepted by a reload, applied by the worker
         self._phase = "idle"  # idle | scanning | indexing | paused
         self._pause_reason = ""
         self._current_file = ""
@@ -436,13 +508,10 @@ class Daemon:
         return self.cfg.index_model_unload_seconds
 
     async def _idle_loop(self) -> None:
-        q_idle = self._idle_seconds()
-        i_idle = self._index_unload_seconds()
-        candidates = [x for x in (q_idle, i_idle) if x > 0]
-        if not candidates:
-            return  # 0: never unload
-        interval = min(60.0, max(0.02, min(candidates) / 4))
         while True:
+            # Re-read every round: a reload may change the times (0: never unload).
+            candidates = [x for x in (self._idle_seconds(), self._index_unload_seconds()) if x > 0]
+            interval = min(60.0, max(0.02, min(candidates) / 4)) if candidates else 60.0
             await asyncio.sleep(interval)
             try:
                 await self.check_idle()
@@ -681,8 +750,11 @@ class Daemon:
 
     def _worker_step(self) -> None:
         with self._cv:
+            new_cfg, self._pending_cfg = self._pending_cfg, None
             full, dirs = self._scan_full, self._scan_dirs
             self._scan_full, self._scan_dirs = False, set()
+        if new_cfg is not None:
+            self._apply_config(new_cfg)
         if full or dirs:
             self._scan(None if full else dirs)
             return
@@ -730,7 +802,7 @@ class Daemon:
         if self._stopping.is_set() or self._user_paused:
             return
         with self._cv:
-            if self._scan_full or self._scan_dirs:
+            if self._scan_full or self._scan_dirs or self._pending_cfg is not None:
                 return
         if self._phase != "indexing":
             log.info("indexing %d pending files", pending)
@@ -764,7 +836,7 @@ class Daemon:
             self._run_logged = st.done
             log.info("indexed %d/%d files (%d failed), %.1f files/s", st.indexed, st.total, st.failed, rate)
         with self._cv:
-            scan_wanted = self._scan_full or bool(self._scan_dirs)
+            scan_wanted = self._scan_full or bool(self._scan_dirs) or self._pending_cfg is not None
         if scan_wanted or self._user_paused or self._stopping.is_set():
             self._slice_stop.set()
 
@@ -793,8 +865,8 @@ class Daemon:
 
     def _gpu_main(self) -> None:
         """While a slice runs, sample every gpu_check_seconds; stop the slice when busy."""
-        interval = max(0.01, self.cfg.gpu_check_seconds)
         while not self._stopping.is_set():
+            interval = max(0.01, self.cfg.gpu_check_seconds)  # a reload may change it
             with self._cv:
                 self._cv.wait_for(lambda: self._phase == "indexing" or self._stopping.is_set(), timeout=5)
             if self._stopping.wait(interval):
@@ -827,17 +899,33 @@ class Daemon:
 
         def files() -> Any:
             for f in scanner.scan(roots):
-                if self._stopping.is_set():
+                if self._stopping.is_set() or self._pending_cfg is not None:
                     raise _ScanAborted
                 yield f
 
         try:
             upserted = self.store.upsert_scanned(files(), gen)
         except _ScanAborted:
-            log.info("scan aborted")  # files not seen keep their old generation: nothing lost
+            # Files not seen keep their old generation: nothing lost.
+            if self._stopping.is_set():
+                log.info("scan aborted")
+                return
+            log.info("scan stopped: the settings changed; it starts again with the new ones")
+            with self._cv:
+                if full or roots is None:
+                    self._scan_full = True
+                else:
+                    self._scan_dirs |= {str(r) for r in roots}
             return
         st = scanner.stats
+        cfg = scanner.cfg
         removed = self.store.finish_scan(gen, st.roots, st.failed_dirs)
+        if full:
+            # finish_scan only cleans below the roots just walked: forget what the settings no
+            # longer cover anywhere else (a removed root, mounts no longer included, a kind
+            # turned off on an unplugged drive). Configured but unavailable roots are kept.
+            removed += self.store.forget_unconfigured(configured_areas(cfg, st.roots), cfg.exclude_paths,
+                                                      cfg.kinds, cfg.exclude_extensions)
         self._last_scan_at = time.time()
         if full:
             self._last_full_scan = time.monotonic()
@@ -847,6 +935,80 @@ class Daemon:
                 "%s scan of %s in %.1fs: %d dirs, %d indexable files, %d removed, %d unreadable",
                 "full" if full else "partial", ", ".join(map(str, st.roots)) if not full or len(st.roots) < 4
                 else f"{len(st.roots)} roots", st.seconds, st.dirs, upserted, removed, st.errors)
+
+    # -- settings reload ------------------------------------------------------------------
+    def _load_config_file(self) -> Config:
+        """Read the config file the daemon was started with again (raises ConfigError)."""
+        path = self._start_cfg.source_path
+        if path is None:
+            raise ConfigError("the service was not started from a config file; restart it instead")
+        return load_config(path, self._start_cfg.source_home, strict=True)
+
+    async def reload_config(self) -> list[str]:
+        """`Control.ReloadConfig`: read the config file again and apply what can be applied
+        while running. Returns the config.toml names of settings that differ from those the
+        service started with but only take effect after a restart ([]: everything applied).
+        Raises ConfigError (and keeps the current settings) when the file cannot be read or
+        is not valid."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._status_exec, self._reload_sync)
+
+    def _reload_sync(self) -> list[str]:
+        """Off the event loop. The new Config is handed to the worker, which swaps it in at a
+        file boundary (`_apply_config`): nothing reads a half-updated Config."""
+        try:
+            new = self._config_loader()
+        except ConfigError as exc:
+            log.warning("settings not reloaded: %s", exc)
+            raise
+        start = self._start_cfg
+        with self._reload_lock:
+            base = self._accepted_cfg
+            restart = [name for attr, name in RESTART_FIELDS.items() if getattr(new, attr) != getattr(start, attr)]
+            for attr in (*RESTART_FIELDS, *FIXED_FIELDS):
+                setattr(new, attr, getattr(start, attr))  # keep running with what we started with
+
+            def diff(fields: dict[str, str]) -> list[str]:
+                return [name for attr, name in fields.items() if getattr(new, attr) != getattr(base, attr)]
+
+            rescan = diff(SCAN_FIELDS) + diff(PRIORITY_FIELDS)
+            changed = rescan + diff(NEXT_FILE_FIELDS) + diff(LIVE_FIELDS)
+            if changed:
+                self._accepted_cfg = new
+                with self._cv:
+                    self._pending_cfg = new
+                    if rescan:
+                        self._scan_full = True
+                    self._wakeup = True
+                    self._cv.notify_all()
+        if changed or restart:
+            log.info("settings reloaded: %s%s%s", ", ".join(changed) or "nothing changed",
+                     "; rescanning" if rescan else "",
+                     f"; need a restart: {', '.join(restart)}" if restart else "")
+        else:
+            log.info("settings reloaded: nothing changed")
+        return restart
+
+    def _apply_config(self, cfg: Config) -> None:
+        """On the worker, between scans and slices: every holder of the Config gets the new one
+        (the next scan builds its Scanner and Scorer from it)."""
+        self.cfg = cfg
+        self.indexer.cfg = cfg
+        self._no_progress_until = 0.0
+        with contextlib.suppress(RuntimeError):  # shutting down
+            # On the search thread, between queries: a query sees one Config throughout.
+            self._search_exec.submit(setattr, self.searcher, "cfg", cfg)
+        watcher = self.watcher
+        if watcher is not None and hasattr(watcher, "debounce"):
+            watcher.debounce = float(cfg.watch_debounce_seconds)
+        loop = self._loop
+        if loop is not None:
+            n = max(1, int(cfg.krunner_max_results))
+            for svc in self._services:
+                if hasattr(svc, "_max_results"):
+                    with contextlib.suppress(RuntimeError):  # loop closed
+                        loop.call_soon_threadsafe(setattr, svc, "_max_results", n)
+        log.debug("new settings applied")
 
     def _update_watches(self, partial_roots: list[Path] | None, walked: list[str] | None) -> None:
         if walked is None:
@@ -963,6 +1125,15 @@ class Control(ServiceInterface):
         """(path, error) of failed files, the most important first; limit 0: all."""
         return [[path, error] for path, error in await self._daemon.failed(limit)]
 
+    @dbus_method()
+    async def ReloadConfig(self) -> "as":  # noqa: F821, N802
+        """Read the config file again and apply it; returns the changed settings that need a
+        restart. An unreadable or invalid file: CONFIG_ERROR, the settings stay as they were."""
+        try:
+            return await self._daemon.reload_config()
+        except ConfigError as exc:
+            raise DBusError(dbus_names.CONFIG_ERROR, str(exc)) from exc
+
 
 async def serve(daemon: Daemon, *, bus_address: str | None = None, stop_event: asyncio.Event | None = None) -> int:
     """Export the interfaces, take the bus name and run until `stop_event` or the bus goes
@@ -992,6 +1163,7 @@ async def serve(daemon: Daemon, *, bus_address: str | None = None, stop_event: a
         except Exception:
             log.exception("could not export the GNOME Shell search provider interface")
             gnome = None
+    daemon._services = [svc for svc in (runner, gnome) if svc is not None]
     bus.export(dbus_names.CONTROL_PATH, Control(daemon))
     try:
         reply = await bus.request_name(daemon.bus_name, NameFlag.DO_NOT_QUEUE)
@@ -1129,6 +1301,18 @@ def daemon_status(*, bus_address: str | None = None, bus_name: str = dbus_names.
         return daemon_call("Status", bus_address=bus_address, bus_name=bus_name, timeout=timeout)
     except (DaemonNotRunning, TimeoutError):
         return None
+
+
+def daemon_reload_config(*, bus_address: str | None = None, bus_name: str = dbus_names.BUS_NAME,
+                         timeout: float = 10.0) -> list[str] | None:
+    """Make the daemon read its config file again (ReloadConfig): the changed settings that need
+    a restart ([] when all were applied), or None if it is not running. An invalid config file
+    raises DBusError (type dbus_names.CONFIG_ERROR, the reason as its text)."""
+    try:
+        names = daemon_call("ReloadConfig", bus_address=bus_address, bus_name=bus_name, timeout=timeout)
+    except (DaemonNotRunning, TimeoutError):
+        return None
+    return [str(n) for n in names or []]
 
 
 def daemon_failed(limit: int = 0, *, bus_address: str | None = None, bus_name: str = dbus_names.BUS_NAME,
