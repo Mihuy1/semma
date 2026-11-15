@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget, QWidget
+from PySide6.QtGui import QCloseEvent, QIcon
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QTabWidget, QWidget
 
 from .. import dbus_names
 from ..config import load_config
@@ -47,6 +47,10 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
         self.resize(*DEFAULT_SIZE)
         self.activate_requested.connect(self.bring_forward)
+        self._closing_after_apply = False
+        self._in_close_event = False
+        self._apply_close_result: bool | None = None
+        self.settings_page.reload_finished.connect(self._on_reload_finished)
 
     def bring_forward(self, token: str = "") -> None:
         if token:
@@ -55,6 +59,94 @@ class MainWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def _show_settings_section(self) -> None:
+        self.tabs.setCurrentWidget(self.settings_page)
+        modified = self.settings_page.modified_sections()
+        if not modified:
+            return
+        current = self.settings_page.nav.currentRow()
+        if not (0 <= current < len(self.settings_page.sections)
+                and self.settings_page.sections[current].is_modified()):
+            self.settings_page.select(modified[0].key)
+
+    def _confirm_unapplied_dialog(self) -> QMessageBox:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Unapplied changes")
+        box.setText("You have unapplied settings changes.")
+        names = ", ".join(s.title for s in self.settings_page.modified_sections())
+        prefix = f"Changed sections: {names}.\n\n" if names else ""
+        if self.settings_page.can_apply():
+            box.setInformativeText(f"{prefix}Apply your changes before closing, or discard them?")
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Apply
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel
+            )
+        else:
+            box.setInformativeText(
+                f"{prefix}Fix the problems in Settings before applying, or discard your changes."
+            )
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel
+            )
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+        return box
+
+    def _try_apply_and_close(self, event: QCloseEvent) -> None:
+        self._closing_after_apply = True
+        self._apply_close_result = None
+        if not self.settings_page.apply():
+            self._closing_after_apply = False
+            event.ignore()
+            self._show_settings_section()
+            return
+        if self._apply_close_result is not None:
+            can_close = self._apply_close_result
+            self._closing_after_apply = False
+            self._apply_close_result = None
+            if can_close:
+                super().closeEvent(event)
+            else:
+                event.ignore()
+                self._show_settings_section()
+            return
+        event.ignore()
+
+    def _on_reload_finished(self, can_close: bool) -> None:
+        if not self._closing_after_apply:
+            return
+        if self._in_close_event:
+            self._apply_close_result = can_close
+            return
+        self._closing_after_apply = False
+        if can_close:
+            self.close()
+        else:
+            self._show_settings_section()
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if self._closing_after_apply:
+            event.ignore()
+            return
+        if not self.settings_page.is_modified():
+            super().closeEvent(event)
+            return
+        self._in_close_event = True
+        try:
+            choice = self._confirm_unapplied_dialog().exec()
+            if choice == QMessageBox.StandardButton.Discard:
+                super().closeEvent(event)
+                return
+            if choice == QMessageBox.StandardButton.Apply and self.settings_page.can_apply():
+                self._try_apply_and_close(event)
+                return
+            event.ignore()
+            self._show_settings_section()
+        finally:
+            self._in_close_event = False
 
 
 def app_icon() -> QIcon:

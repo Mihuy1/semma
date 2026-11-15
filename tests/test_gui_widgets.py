@@ -94,6 +94,7 @@ def test_failed_dialog_lists_and_retries(app: QtWidgets.QApplication, home: Path
     assert "RetryFailed" in client.calls
     assert "1 file queued" in dialog.message.text()
     dialog.close()
+    app.processEvents()
 
 
 def test_daemon_not_running_and_start_service(app: QtWidgets.QApplication, home: Path) -> None:
@@ -230,3 +231,137 @@ def test_single_instance_activates_the_first_window(app: QtWidgets.QApplication)
 
     asyncio.run(main())
     assert tokens == [os.environ.get("XDG_ACTIVATION_TOKEN", "")]
+
+
+def test_close_prompts_on_unapplied_changes_and_handles_cancel_discard_apply(
+    app: QtWidgets.QApplication, home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import Future
+
+    QMessageBox = QtWidgets.QMessageBox
+    prompts: list[tuple[str, str, QMessageBox.StandardButton]] = []
+
+    def fake_exec(reply: QMessageBox.StandardButton):
+        def run(self: QtWidgets.QMessageBox) -> int:
+            prompts.append((self.text(), self.informativeText(), self.standardButtons()))
+            return int(reply)
+        return run
+
+    client = FakeClient(status())
+    w = MainWindow(client, config_path(home), home)
+    w.show()
+    app.processEvents()
+
+    # No changes: closes without prompting.
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec(QMessageBox.StandardButton.Cancel))
+    assert w.close() is True
+    assert prompts == []
+
+    # Reopen, edit Media while currently viewing Status, then try to close -> Cancel.
+    w.show()
+    media = w.settings_page.select("media")
+    media.max_video_gb.setValue(10.0)
+    w.settings_page.select("folders")  # view a different section
+    w.tabs.setCurrentWidget(w.status_page)  # and switch back to Status
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec(QMessageBox.StandardButton.Cancel))
+    assert w.close() is False
+    assert len(prompts) == 1
+    assert "unapplied" in prompts[-1][0].lower()
+    assert "Media" in prompts[-1][1]
+    assert prompts[-1][2] == (
+        QMessageBox.StandardButton.Apply
+        | QMessageBox.StandardButton.Discard
+        | QMessageBox.StandardButton.Cancel
+    )
+    assert w.isVisible()
+    assert w.tabs.currentWidget() is w.settings_page
+    assert w.settings_page.stack.currentIndex() == w.settings_page.sections.index(media)
+    assert not config_path(home).exists()
+
+    # Discard: closes without saving or reloading.
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec(QMessageBox.StandardButton.Discard))
+    assert w.close() is True
+    assert not w.isVisible()
+    assert not config_path(home).exists()
+    assert "ReloadConfig" not in client.calls
+
+    # Reopen (reloads clean defaults), edit Media, Apply -> saves, reloads asynchronously, then closes.
+    w.settings_page.reload()
+    w.show()
+    w.settings_page.select("media").max_video_gb.setValue(12.0)
+    pending_reload: Future[list[str] | None] = Future()
+    monkeypatch.setattr(client, "reload_config", lambda: pending_reload)
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec(QMessageBox.StandardButton.Apply))
+    assert w.close() is False  # waiting for ReloadConfig
+    assert w.isVisible()
+    assert read_raw(config_path(home)) == {"scan": {"max_file_mb": {"video": 12288}}}
+
+    pending_reload.set_result([])
+    app.processEvents()
+    assert not w.isVisible()
+
+
+def test_close_apply_keeps_window_open_when_restart_needed(
+    app: QtWidgets.QApplication, home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    QMessageBox = QtWidgets.QMessageBox
+    client = FakeClient(status())
+    client.reload_result = ["scan.roots"]
+    w = MainWindow(client, config_path(home), home)
+    w.show()
+    w.settings_page.select("folders").skip_hidden.setChecked(False)
+    w.tabs.setCurrentWidget(w.status_page)
+
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: int(QMessageBox.StandardButton.Apply))
+    assert w.close() is False
+    assert w.isVisible()
+    assert w.tabs.currentWidget() is w.settings_page
+    assert RESTART_NOTICE in w.settings_page.notice.text()
+    assert read_raw(config_path(home)) == {"scan": {"skip_hidden": False}}
+
+    # No unapplied changes left -> closing again succeeds immediately.
+    assert w.close() is True
+
+
+def test_close_with_blocking_problems_hides_apply_button(
+    app: QtWidgets.QApplication, home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    QMessageBox = QtWidgets.QMessageBox
+    seen_buttons: list[QMessageBox.StandardButton] = []
+
+    def fake_exec(self: QtWidgets.QMessageBox) -> int:
+        seen_buttons.append(self.standardButtons())
+        return int(QMessageBox.StandardButton.Discard)
+
+    w = MainWindow(FakeClient(status()), config_path(home), home)
+    w.show()
+    ft_sec = w.settings_page.select("filetypes")
+    for cb in ft_sec.kind_checks.values():
+        cb.setChecked(False)
+    assert w.settings_page.is_modified() and not w.settings_page.can_apply()
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    assert w.close() is True
+    assert seen_buttons == [QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel]
+
+
+def test_close_apply_write_error_keeps_window_open(
+    app: QtWidgets.QApplication, home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    QMessageBox = QtWidgets.QMessageBox
+    config_path(home).write_text("[scan]\nskip_hidden = true\n")
+    w = MainWindow(FakeClient(status()), config_path(home), home)
+    w.show()
+    w.settings_page.select("folders").skip_hidden.setChecked(False)
+    w.tabs.setCurrentWidget(w.status_page)
+    config_path(home).write_text("[scan\n")  # broken on disk before Apply
+
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: int(QMessageBox.StandardButton.Apply))
+    assert w.close() is False
+    assert w.isVisible()
+    assert w.tabs.currentWidget() is w.settings_page
+    assert "were not saved" in w.settings_page.error.text()
+    assert w.settings_page.is_modified()
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: int(QMessageBox.StandardButton.Discard))
+    assert w.close() is True

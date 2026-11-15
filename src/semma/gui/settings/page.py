@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QSize, Signal
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QDialogButtonBox,
@@ -34,6 +34,8 @@ RESTART_NOTICE = "Restart the service to apply these changes."
 
 
 class SettingsPage(QWidget):
+    reload_finished = Signal(bool)  # True when applied cleanly (or daemon stopped); False if restart needed or error
+
     def __init__(self, client: Any, config_path: Path | None = None, home: Path | None = None,
                  sections: list[type[SettingsSection]] | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -115,8 +117,14 @@ class SettingsPage(QWidget):
     def is_modified(self) -> bool:
         return self.ctx is not None and any(s.is_modified() for s in self.sections)
 
+    def modified_sections(self) -> list[SettingsSection]:
+        return [s for s in self.sections if s.is_modified()] if self.ctx is not None else []
+
     def problems(self) -> list[Problem]:
         return [p for s in self.sections for p in s.problems()]
+
+    def can_apply(self) -> bool:
+        return self.is_modified() and not any(p.blocking for p in self.problems())
 
     def _update(self) -> None:
         modified = self.is_modified()
@@ -137,22 +145,23 @@ class SettingsPage(QWidget):
         self.notice.clear()
         self.reload()
 
-    def apply(self) -> None:
-        if self.ctx is None:
-            return
+    def apply(self) -> bool:
+        if self.ctx is None or any(p.blocking for p in self.problems()):
+            return False
         changes = merge_changes(*(s.changes() for s in self.sections))
         if not changes:
-            return
+            return False
         try:
             update_config(self.ctx.config_path, changes)
         except ConfigWriteError as exc:
             self.error.show_message("error", f"The settings were not saved: {exc}")
-            return
+            return False
         self.notice.clear()
         if not self.reload():
-            return
+            return False
         self.apply_button.setEnabled(False)
         self._relay.when_done(self.client.reload_config(), self._reloaded, self._reload_failed)
+        return True
 
     def _reloaded(self, needs_restart: list[str] | None) -> None:
         if needs_restart is None or needs_restart:
@@ -160,17 +169,23 @@ class SettingsPage(QWidget):
             if needs_restart:
                 text += f" Waiting for a restart: {', '.join(needs_restart)}."
             self.notice.show_message("warning", text, "Restart service", self.restart_service)
+            ok_to_close = False
         else:
             self.notice.show_message("info", "Saved and applied.")
+            ok_to_close = True
         self._update()
+        self.reload_finished.emit(ok_to_close)
 
     def _reload_failed(self, exc: BaseException) -> None:
         if isinstance(exc, DaemonNotRunning):
             self.notice.show_message("info", "Saved. The service is not running; it uses these settings when it starts.")
+            ok_to_close = True
         else:
             self.notice.show_message("warning", f"Saved, but the service could not be told: {describe_error(exc)} "
                                                 f"{RESTART_NOTICE}", "Restart service", self.restart_service)
+            ok_to_close = False
         self._update()
+        self.reload_finished.emit(ok_to_close)
 
     def restart_service(self) -> None:
         self.notice.action_button().setEnabled(False)
