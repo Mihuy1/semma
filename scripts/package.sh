@@ -42,6 +42,71 @@ uv pip install --quiet --python "$py" --no-deps build/wheel/semma-"$version"-*.w
 # The commands beside the interpreter name this build folder in their first line; /usr/bin/semma
 # starts Semma instead.
 find "$prefix/python/bin" -mindepth 1 ! -name "python$PYTHON_VERSION" -delete
+
+# PySide6-Essentials carries all of Qt Quick, QML, Designer, Network, SQL, PrintSupport, translations
+# and developer tools (~250 MB). Semma's window uses only Qt Widgets on Wayland and X11; keep an
+# explicit allow-list (a missing path fails the build; everything else in PySide6/ and shiboken6/ is
+# deleted, along with their dist-info). libqgtk3.so is left out so the window does not pull in GTK 3
+# beside Qt; libqxdgdesktopportal.so uses the desktop portal over D-Bus instead.
+qt_keep=(
+  shiboken6/__init__.py
+  shiboken6/_config.py
+  shiboken6/_git_shiboken_module_version.py
+  shiboken6/Shiboken.abi3.so
+  'shiboken6/libshiboken6.abi3.so.*'
+  PySide6/__init__.py
+  PySide6/_config.py
+  PySide6/_git_pyside_version.py
+  PySide6/support
+  'PySide6/libpyside6.abi3.so.*'
+  PySide6/QtCore.abi3.so
+  PySide6/QtGui.abi3.so
+  PySide6/QtWidgets.abi3.so
+  PySide6/Qt/lib/libQt6Core.so.6
+  PySide6/Qt/lib/libQt6Gui.so.6
+  PySide6/Qt/lib/libQt6Widgets.so.6
+  PySide6/Qt/lib/libQt6WaylandClient.so.6
+  PySide6/Qt/lib/libQt6XcbQpa.so.6
+  PySide6/Qt/lib/libQt6DBus.so.6
+  PySide6/Qt/lib/libQt6Svg.so.6
+  'PySide6/Qt/lib/libicudata.so.*'
+  'PySide6/Qt/lib/libicui18n.so.*'
+  'PySide6/Qt/lib/libicuuc.so.*'
+  PySide6/Qt/plugins/platforms/libqwayland.so
+  PySide6/Qt/plugins/platforms/libqxcb.so
+  PySide6/Qt/plugins/platforms/libqoffscreen.so
+  PySide6/Qt/plugins/platforms/libqminimal.so
+  PySide6/Qt/plugins/wayland-shell-integration/libxdg-shell.so
+  PySide6/Qt/plugins/wayland-decoration-client/libadwaita.so
+  PySide6/Qt/plugins/wayland-decoration-client/libbradient.so
+  PySide6/Qt/plugins/platformthemes/libqxdgdesktopportal.so
+  PySide6/Qt/plugins/platforminputcontexts/libcomposeplatforminputcontextplugin.so
+  PySide6/Qt/plugins/platforminputcontexts/libibusplatforminputcontextplugin.so
+  PySide6/Qt/plugins/iconengines/libqsvgicon.so
+  PySide6/Qt/plugins/imageformats/libqsvg.so
+  PySide6/Qt/plugins/imageformats/libqjpeg.so
+  PySide6/Qt/plugins/imageformats/libqwebp.so
+  PySide6/Qt/plugins/imageformats/libqgif.so
+  PySide6/Qt/plugins/imageformats/libqico.so
+)
+qt_trim=$stage/qt-trim
+mkdir -p "$qt_trim"
+(
+  cd "$lib/site-packages"
+  shopt -s nullglob
+  for pattern in "${qt_keep[@]}"; do
+    matches=($pattern)
+    if (( ${#matches[@]} == 0 )); then
+      echo "missing allow-listed PySide6/shiboken6 path: $pattern" >&2
+      exit 1
+    fi
+    cp -a --parents "${matches[@]}" "$OLDPWD/$qt_trim/"
+  done
+)
+rm -rf "$lib/site-packages"/{PySide6,shiboken6,pyside6_essentials-*.dist-info,shiboken6-*.dist-info}
+cp -a "$qt_trim"/. "$lib/site-packages/"
+rm -rf "$qt_trim"
+
 # Compiled once here: /usr is read-only to the service, which would otherwise compile every module
 # again each time it starts. unchecked-hash: valid whatever times the installed files get.
 find "$prefix/python" -name __pycache__ -prune -exec rm -rf {} +
