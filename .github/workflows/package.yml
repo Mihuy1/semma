@@ -1,0 +1,108 @@
+# Builds the .rpm and the .deb with scripts/package.sh and checks each with scripts/check-package.sh
+# in a clean Fedora or Ubuntu container: installs it, opens the window, indexes and searches with the
+# real model on the processor, and starts the service over D-Bus. The built packages are kept with
+# the run for a week. The release workflow runs this one and publishes what it built.
+#
+# The llama.cpp build is cached on scripts/build-llama.sh (its commit and flags live there), and the
+# model on its revision and file list in embedder.py, so most runs build and download neither.
+name: Package
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/semma/**"
+      - "packaging/**"
+      - "scripts/package.sh"
+      - "scripts/build-llama.sh"
+      - "scripts/check-package.sh"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/package.yml"
+  pull_request:
+    paths:
+      - "src/semma/**"
+      - "packaging/**"
+      - "scripts/package.sh"
+      - "scripts/build-llama.sh"
+      - "scripts/check-package.sh"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/package.yml"
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      version:
+        description: The version in pyproject.toml the packages were built with
+        value: ${{ jobs.build.outputs.version }}
+
+concurrency:
+  # A newer push replaces a run still going on the same branch; a release (a tag) is never cancelled.
+  group: package-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Version
+        id: version
+        run: echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_OUTPUT"
+
+      - name: llama.cpp build cache
+        uses: actions/cache@v4
+        with:
+          path: build/llama
+          key: llama-${{ hashFiles('scripts/build-llama.sh') }}
+
+      - name: Build the packages
+        run: scripts/package.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: |
+            dist/semma-${{ steps.version.outputs.version }}-*.rpm
+            dist/semma_${{ steps.version.outputs.version }}-*.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  check:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        format: [rpm, deb]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+
+      - name: Model cache key
+        id: model
+        run: echo "key=$(sed -n '/^GGUF_REVISION/,/^}/p' src/semma/embedder.py | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      # check-package.sh downloads the model into build/models when it is not there.
+      - name: Model cache
+        uses: actions/cache@v4
+        with:
+          path: build/models
+          key: model-${{ steps.model.outputs.key }}
+
+      - name: Check the ${{ matrix.format }}
+        run: scripts/check-package.sh dist/*.${{ matrix.format }}
