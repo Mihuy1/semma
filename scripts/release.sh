@@ -1,11 +1,13 @@
 #!/bin/bash
-# Publishes the version in pyproject.toml as a GitHub release with the .rpm and the .deb attached:
-# builds both (scripts/package.sh), checks each in a clean container (scripts/check-package.sh), then
-# tags the current commit v<version>, pushes the branch and the tag, and creates the release.
+# Releases the version in pyproject.toml: tags the current commit v<version> and pushes the branch and
+# the tag. The tag starts the Release workflow on GitHub (.github/workflows/release.yml), which builds
+# the .rpm and the .deb, checks each in a clean container and publishes them as the release, with the
+# commits since the last tag as its notes. Follow it with `gh run watch`.
 # Refuses when the working tree has changes or that version is already released.
-# Needs gh (logged in), and what scripts/package.sh needs.
-#   scripts/release.sh            the release notes are the commits since the last tag
-#   scripts/release.sh --draft    as a draft, to look at before it is published
+# Needs gh (logged in).
+#   scripts/release.sh
+# To build and check the packages on this machine instead: scripts/package.sh, then
+# scripts/check-package.sh dist/<package>.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -19,17 +21,11 @@ if gh release view "$tag" > /dev/null 2>&1; then
   echo "$tag is already released: raise the version in pyproject.toml" >&2
   exit 1
 fi
+if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+  echo "$tag is already on GitHub but not released: re-run its failed Release workflow instead" >&2
+  exit 1
+fi
 
-scripts/package.sh
-rpm=dist/semma-$version-1.x86_64.rpm
-deb=dist/semma_$version-1_amd64.deb
-scripts/check-package.sh "$rpm"
-scripts/check-package.sh "$deb"
-
-git tag -f "$tag" > /dev/null   # -f: a tag left by a run that failed after this point
+git tag -f "$tag" > /dev/null   # -f: a tag left here by a push that failed
 git push --quiet origin HEAD "$tag"
-# A version with a suffix (0.2.0-beta.1) is a prerelease.
-flags=()
-[[ $version == *-* ]] && flags+=(--prerelease)
-[[ ${1:-} == --draft ]] && flags+=(--draft)
-gh release create "$tag" "$rpm" "$deb" --title "Semma $version" --generate-notes --verify-tag "${flags[@]}"
+echo "pushed $tag: the Release workflow builds and publishes it (gh run watch)"

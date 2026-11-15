@@ -1,0 +1,50 @@
+# Pushing a tag v<version> (scripts/release.sh does it) builds and checks both packages with the
+# package workflow, then publishes them as the GitHub release of that version. A version with a
+# suffix (0.3.0-beta.1) is a prerelease. If a step fails, fix it and re-run the failed jobs: the tag
+# stays where it is.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: The tag names the version in pyproject.toml
+        run: |
+          project=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          module=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/semma/__init__.py)
+          [[ $GITHUB_REF_NAME == "v$project" ]] || { echo "tag $GITHUB_REF_NAME, pyproject.toml $project"; exit 1; }
+          [[ $module == "$project" ]] || { echo "semma.__version__ is $module, pyproject.toml $project"; exit 1; }
+
+  package:
+    needs: version
+    uses: ./.github/workflows/package.yml
+
+  release:
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          flags=()
+          [[ $VERSION == *-* ]] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" dist/* --title "Semma $VERSION" --generate-notes \
+            --verify-tag "${flags[@]}"
