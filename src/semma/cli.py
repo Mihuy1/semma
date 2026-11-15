@@ -388,6 +388,12 @@ def cmd_ctl(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def cmd_gui(args: argparse.Namespace, cfg: Config) -> int:
+    from .gui import main as gui_main
+
+    return gui_main(args.config)
+
+
 def is_packaged() -> bool:
     """True when running from the rpm/deb package's private interpreter.
 
@@ -567,6 +573,9 @@ def build_parser() -> argparse.ArgumentParser:
     ct = sub.add_parser("ctl", help="talk to the running daemon")
     ct.add_argument("action", choices=["status", "pause", "resume", "rescan", "retry-failed"])
     ct.set_defaults(func=cmd_ctl)
+
+    gu = sub.add_parser("gui", help="open the Semma window (status and settings)")
+    gu.set_defaults(func=cmd_gui)
 
     if not is_packaged():
         ik = sub.add_parser("install-kde", help="install the KRunner plugin and the systemd user service")
