@@ -12,6 +12,7 @@ import pytest
 from semma import filetypes as ft
 from semma.config_write import read_raw, update_config
 from semma.gui.settings import filetypes_model as ftm
+from semma.gui.settings import media_model as mm
 from semma.gui.settings import priorities_model as pm
 from semma.gui.settings.context import SettingsContext
 
@@ -93,7 +94,8 @@ def test_filetypes_problems(home: Path) -> None:
 
 def test_filetypes_models_do_not_import_pyside6() -> None:
     code = (
-        "import sys, semma.gui.settings.filetypes_model, semma.gui.settings.priorities_model; "
+        "import sys, semma.gui.settings.filetypes_model, semma.gui.settings.priorities_model, "
+        "semma.gui.settings.media_model; "
         "bad = [m for m in sys.modules if m.startswith(('PySide6', 'shiboken6'))]; "
         "assert not bad, bad"
     )
@@ -173,6 +175,34 @@ def test_priorities_add_duplicate_and_problems(home: Path) -> None:
     bad = v.copy()
     bad.other_location = 120
     probs = pm.problems(bad, ctx)
+    assert len(probs) == 1 and probs[0].blocking
+
+
+# -- Media model ---------------------------------------------------------------------------
+
+def test_media_load_changes_and_problems(home: Path) -> None:
+    ctx = ctx_for(home)
+    saved = mm.load(ctx)
+    assert saved == mm.MediaValues(30)
+    assert mm.changes(saved, saved.copy()) == {}
+
+    edited = mm.MediaValues(45)
+    assert mm.changes(saved, edited) == {"media": {"max_minutes": 45}}
+    update_config(ctx.config_path, mm.changes(saved, edited))
+    assert read_raw(ctx.config_path) == {"media": {"max_minutes": 45}}
+
+    reloaded_ctx = ctx_for(home)
+    assert reloaded_ctx.config.max_media_seconds == 45 * 60
+    reloaded = mm.load(reloaded_ctx)
+    assert reloaded == mm.MediaValues(45)
+
+    back = mm.MediaValues(30)
+    assert mm.changes(reloaded, back) == {"media": {"max_minutes": None}}
+    update_config(ctx.config_path, mm.changes(reloaded, back))
+    assert read_raw(ctx.config_path) == {}
+
+    assert mm.problems(mm.MediaValues(30), ctx) == []
+    probs = mm.problems(mm.MediaValues(0), ctx)
     assert len(probs) == 1 and probs[0].blocking
 
 
@@ -269,4 +299,23 @@ def test_priorities_section_widget(app: QtWidgets.QApplication, home: Path) -> N
     assert sec.locations() == pm.DEFAULT_LOCATIONS
     page.apply()
     assert read_raw(config_path(home)) == {"priority": {"other_location": 8}}
+
+
+def test_media_section_widget(app: QtWidgets.QApplication, home: Path) -> None:
+    page = SettingsPage(FakeClient(status()), config_path(home), home)
+    sec = page.select("media")
+    assert not sec.is_modified()
+    assert sec.max_minutes.value() == 30
+
+    sec.max_minutes.setValue(60)
+    assert sec.is_modified()
+    assert sec.changes() == {"media": {"max_minutes": 60}}
+    page.apply()
+    assert read_raw(config_path(home)) == {"media": {"max_minutes": 60}}
+
+    sec.max_minutes.setValue(30)
+    assert sec.changes() == {"media": {"max_minutes": None}}
+    page.apply()
+    assert read_raw(config_path(home)) == {}
+
 
