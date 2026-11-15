@@ -38,6 +38,7 @@ class ScanStats:
     # not be forgotten just because this scan could not see them.
     failed_dirs: list[str] = field(default_factory=list)
     walked_dirs: list[str] = field(default_factory=list)
+    current_dir: str = ""  # the directory being listed now ("" once the scan has ended)
     seconds: float = 0.0
 
 
@@ -107,6 +108,7 @@ class Scanner:
             stack: list[tuple[str, bool]] = [(root_str, False)]
             while stack:
                 dirpath, in_project = stack.pop()
+                stats.current_dir = dirpath
                 try:
                     with os.scandir(dirpath) as it:
                         entries = list(it)
@@ -166,4 +168,5 @@ class Scanner:
                                               in_project, root, now)
                     yield ScannedFile(entry.path, kind, st.st_size, st.st_mtime, in_project, score)
 
+        stats.current_dir = ""
         stats.seconds = time.monotonic() - started
