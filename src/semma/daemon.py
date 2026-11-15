@@ -75,6 +75,7 @@ GPU_BUSY_UNLOAD_S = 60.0  # unload after 1 min without queries while another app
 NO_PROGRESS_RETRY_S = 300.0
 WORKER_BACKOFF_S = (5.0, 600.0)  # after an unexpected error: first wait, maximum wait
 DOWNLOAD_BACKOFF_S = (5.0, 300.0)  # model download failed: first wait, maximum wait
+MODEL_WAIT_REASON = "waiting for the model download"
 DOWNLOAD_JOIN_S = 2.0  # don't let a stuck transfer hold up shutdown; the part file resumes
 SHUTDOWN_JOIN_S = 60.0
 MAX_PARTIAL_SCAN_DIRS = 64  # more changed directories than this: one full scan instead
@@ -367,7 +368,6 @@ class Daemon:
         self._running = True
         self._loop = asyncio.get_running_loop()
         self._started = time.monotonic()
-        self._setup_done = onboarding_done(self.cfg, self.store)
         if self._watcher_factory is not None:
             try:
                 self.watcher = self._watcher_factory(self._on_watch_change, self.cfg.watch_debounce_seconds)
@@ -853,7 +853,7 @@ class Daemon:
                 self._logged_wait_setup = True
             self._current_file = ""
             self._set_phase("idle")
-            self._wait(5)
+            self._wait(3600.0)  # a reload that finishes setup wakes the worker
             return
         self._logged_wait_setup = False
         if full or dirs:
@@ -880,7 +880,7 @@ class Daemon:
                 log.info("indexing waits until the model has been downloaded")
                 self._logged_wait_model = True
             self._start_download()  # the files were there and are gone again: fetch them
-            self._set_phase("idle")
+            self._set_phase("paused", MODEL_WAIT_REASON)
             self._wait(min(sleep, 2.0))
             return
         self._logged_wait_model = False

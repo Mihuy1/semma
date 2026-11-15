@@ -144,6 +144,8 @@ def test_indexing_waits_for_the_model_files(tmp_path: Path) -> None:
             await wait_until(lambda: counts(cfg.db_path).get("pending", 0) > 0, what="scan queued files")
             await asyncio.sleep(0.2)
             assert "indexed" not in counts(cfg.db_path)
+            st = await d.status()
+            assert st["paused"] and st["pause_reason"] == "waiting for the model download"
             emb.ready = True
             d._wake()
             await until_idle(d)

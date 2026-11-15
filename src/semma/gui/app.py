@@ -215,15 +215,13 @@ def run(config_path: Path | None = None) -> int:
     app = make_app()
     client = DaemonClient()
     relay = Relay()
-    current: dict[str, QWidget | None] = {"window": None}
+    current: dict[str, MainWindow | OnboardingWindow | None] = {"window": None}
 
     def on_activate(token: str) -> None:  # on the client's thread
         def raise_current() -> None:
             window = current["window"]
-            if window is not None and hasattr(window, "bring_forward"):
-                window.bring_forward(token)
-            elif isinstance(window, MainWindow):
-                window.activate_requested.emit(token)
+            if window is not None:
+                window.bring_forward(token)  # the wizard or the main window
         relay.post(raise_current)
 
     from .single import claim
