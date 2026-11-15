@@ -37,6 +37,7 @@ Build the packages with `scripts/package.sh` (needs `uv`, `curl`, and `podman` o
 - Build and inspect the index: `uv run semma scan`, `uv run semma index`, `uv run semma status [--failed]`
 - Query from the terminal: `uv run semma search <query> [-n N] [--kind KIND] [--json]`
 - Run or control the daemon: `uv run semma daemon`, `uv run semma ctl status|pause|resume|rescan|retry-failed`
+- Open the window with the daemon's status and the settings: `uv run semma gui` (needs PySide6; closing it does not stop indexing)
 
 ## GNOME notes
 
