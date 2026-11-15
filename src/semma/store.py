@@ -29,7 +29,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -429,13 +429,14 @@ class Store:
         return removed
 
     def forget_unconfigured(self, keep_roots: Iterable[Path], exclude_paths: Iterable[Path] = (),
-                            kinds: Iterable[str] | None = None, exclude_extensions: Iterable[str] = ()) -> int:
+                            kinds: Iterable[str] | None = None, exclude_extensions: Iterable[str] = (),
+                            max_bytes: Mapping[str, int] | None = None) -> int:
         """Forget files the settings no longer cover, wherever they are. `finish_scan` only
         looks under the roots a scan walked, so this catches what it cannot see: files outside
         every one of `keep_roots` (a root removed from the settings, mounts once they are no
-        longer included), under an excluded path, of a kind not in `kinds` or with an excluded
-        extension. A root that is configured but unavailable right now (an unplugged drive)
-        belongs in `keep_roots`: its files stay.
+        longer included), under an excluded path, of a kind not in `kinds`, with an excluded
+        extension, or above `max_bytes` for their kind. A root that is configured but
+        unavailable right now (an unplugged drive) belongs in `keep_roots`: its files stay.
 
         `exclude_paths` at or above one of `keep_roots` are ignored (the scanner walks a root
         even when it is excluded). Extensions are matched as the scanner does: the text after
@@ -465,6 +466,10 @@ class Store:
                 continue  # the scanner compares only what follows the last dot: never matches
             clauses.append(r"lower(path) LIKE ? ESCAPE '\'")
             args.append("%." + ext.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_"))
+        if max_bytes:
+            for kind, limit in sorted(max_bytes.items()):
+                clauses.append("(kind = ? AND size > ?)")
+                args += [kind, int(limit)]
         if not clauses:
             return 0
         with self.write() as (db, delta):

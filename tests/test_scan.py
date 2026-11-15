@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from semma import filetypes as ft
-from semma.config import Config, apply_overrides, check_unknown_keys, load_config
+from semma.config import DEFAULT_MAX_BYTES, Config, apply_overrides, check_unknown_keys, load_config
 from semma.priority import Scorer
 from semma.scanner import Scanner
 from semma.store import ChunkRecord, Store
@@ -407,3 +407,47 @@ def test_disallowed_files_disappear_on_next_full_scan(tmp_path: Path) -> None:
     assert store.db.execute("SELECT count(*) FROM chunks").fetchone()[0] == 3
     assert store.db.execute("SELECT count(*) FROM vec_chunks").fetchone()[0] == 3
     store.close()
+
+
+def test_scan_max_file_mb_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cfg = make_cfg(tmp_path)
+    assert cfg.max_bytes == DEFAULT_MAX_BYTES
+    assert check_unknown_keys({"scan": {"max_file_mb": {"video": 20480, "audio": 1024}}}) == []
+
+    apply_overrides(cfg, {
+        "scan": {"max_file_mb": {"video": 20480, "audio": 1024, "text": 0.5}},
+    })
+    assert cfg.max_bytes == {
+        **DEFAULT_MAX_BYTES,
+        "video": 20480 * 2**20,
+        "audio": 1024 * 2**20,
+        "text": round(0.5 * 2**20),
+    }
+    assert capsys.readouterr().err == ""
+
+    # Unknown kind names and non-positive / non-numeric values warn and are ignored.
+    cfg_bad = make_cfg(tmp_path)
+    apply_overrides(cfg_bad, {
+        "scan": {
+            "max_file_mb": {
+                "audio": 512,
+                "bogus": 10,
+                "video": 0,
+                "pdf": -5,
+                "office": True,
+                "image": "large",
+            },
+        },
+    })
+    err = capsys.readouterr().err
+    for bad in ("bogus", "scan.max_file_mb.video", "scan.max_file_mb.pdf",
+                "scan.max_file_mb.office", "scan.max_file_mb.image"):
+        assert bad in err
+    assert cfg_bad.max_bytes == {**DEFAULT_MAX_BYTES, "audio": 512 * 2**20}
+
+    # A non-table max_file_mb warns and keeps the default.
+    cfg_nondict = make_cfg(tmp_path)
+    apply_overrides(cfg_nondict, {"scan": {"max_file_mb": 1024}})
+    assert "scan.max_file_mb" in capsys.readouterr().err
+    assert cfg_nondict.max_bytes == DEFAULT_MAX_BYTES
+

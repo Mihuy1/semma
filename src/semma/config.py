@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import tomllib
@@ -344,7 +345,7 @@ KNOWN_KEYS: dict[str, frozenset[str]] = {
     "scan": frozenset({"roots", "include_mounts", "skip_hidden", "skip_app_installs", "kinds",
                        "exclude_extensions", "exclude_dir_names",
                        "root_system_dir_names", "project_build_dir_names", "project_markers",
-                       "extra_exclude_dir_names", "exclude_paths"}),
+                       "extra_exclude_dir_names", "exclude_paths", "max_file_mb"}),
     "priority": frozenset({"locations", "type_weights", "other_location", "project_penalty",
                            "depth_penalty_per_level", "depth_penalty_max", "tiny_penalty", "huge_video_penalty",
                            "depth_free_levels", "recency"}),
@@ -451,6 +452,22 @@ def _parse_exclude_extensions(raw: Any, default: frozenset[str]) -> frozenset[st
     return frozenset(out)
 
 
+def _parse_max_file_mb(raw: Any) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        _warn(f"scan.max_file_mb must be a table of kind -> MiB (got {raw!r}); keeping default")
+        return {}
+    out: dict[str, int] = {}
+    for kind, val in raw.items():
+        if kind not in ft.KINDS:
+            _warn(f"unknown kind {kind!r} in scan.max_file_mb ignored (valid: {', '.join(ft.KINDS)})")
+            continue
+        if not isinstance(val, int | float) or isinstance(val, bool) or not (val > 0 and math.isfinite(val)):
+            _warn(f"scan.max_file_mb.{kind} must be a positive number (got {val!r}); ignored")
+            continue
+        out[kind] = round(float(val) * 2**20)
+    return out
+
+
 def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
     home = cfg.home
     for key in check_unknown_keys(data):
@@ -487,6 +504,8 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
         cfg.exclude_dir_names = cfg.exclude_dir_names | frozenset(scan["extra_exclude_dir_names"])
     if "exclude_paths" in scan:
         cfg.exclude_paths = [_expand(p, home) for p in scan["exclude_paths"]]
+    if "max_file_mb" in scan:
+        cfg.max_bytes.update(_parse_max_file_mb(scan["max_file_mb"]))
 
     if "locations" in prio:
         # Merge: a configured path replaces the default weight for that path, others are kept.

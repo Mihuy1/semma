@@ -162,6 +162,47 @@ def test_disabled_kind_and_excluded_extension_are_removed(home: Path) -> None:
     asyncio.run(main())
 
 
+def test_max_file_mb_change_removes_too_large_and_requeues_when_raised(home: Path) -> None:
+    async def main() -> None:
+        big = home / "Documents" / "big.md"
+        write_docs(home, {"big.md": "giant whale swimming in the deep ocean " * 60})
+        cfg = start_cfg(home)
+        d = make_daemon(cfg)
+        d.start()
+        try:
+            await until_idle(d)
+            assert str(big) in paths(cfg.db_path)
+            assert counts(cfg.db_path) == {"indexed": 4}
+
+            # Lower the text limit below big.md (~2.3 KiB) while keeping the small docs under it.
+            settings = base_settings(home)
+            settings["scan"]["max_file_mb"] = {"text": 0.001}
+            assert await reload_and_settle(d, home, settings) == []
+            assert str(big) not in paths(cfg.db_path)
+            assert counts(cfg.db_path) == {"indexed": 3}
+            assert all(r.path != str(big) for r in await d.search("whale swimming ocean"))
+
+            # Pause indexing so the rescan after raising the limit leaves big.md observable as pending.
+            d.pause()
+            await wait_until(lambda: d._phase == "paused", what="paused")
+            settings["scan"]["max_file_mb"] = {"text": 10}
+            write_config(home, settings)
+            scanned_at = d._last_scan_at
+            assert await d.reload_config() == []
+            await wait_until(lambda: d._last_scan_at > scanned_at, what="rescan after raising max_file_mb")
+            assert str(big) in paths(cfg.db_path)
+            assert counts(cfg.db_path) == {"indexed": 3, "pending": 1}
+
+            # Resume: big.md gets indexed again.
+            d.resume()
+            await until_idle(d)
+            assert counts(cfg.db_path) == {"indexed": 4}
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
 def test_new_root_is_scanned_and_watched(home: Path) -> None:
     async def main() -> None:
         StubWatcher.instances.clear()
@@ -372,6 +413,8 @@ def test_store_forget_unconfigured(tmp_path: Path) -> None:
         assert store.forget_unconfigured([Path("/")], exclude_extensions=["m_", "%"]) == 0
         assert store.forget_unconfigured([Path("/")], exclude_extensions=["md"]) == 3
         assert left() == ["/home/u/g.tar.gz"]
+        assert store.forget_unconfigured([Path("/")], max_bytes={"text": 0}) == 1
+        assert left() == []
     finally:
         store.close()
 

@@ -92,7 +92,7 @@ SCAN_FIELDS: dict[str, str] = {
     "exclude_extensions": "scan.exclude_extensions", "exclude_dir_names": "scan.exclude_dir_names",
     "root_system_dir_names": "scan.root_system_dir_names",
     "project_build_dir_names": "scan.project_build_dir_names", "project_markers": "scan.project_markers",
-    "exclude_paths": "scan.exclude_paths", "max_bytes": "scan.max_bytes",
+    "exclude_paths": "scan.exclude_paths", "max_bytes": "scan.max_file_mb",
 }
 # Priority scores: a full rescan stores the new score of every file, changed or not.
 PRIORITY_FIELDS: dict[str, str] = {
@@ -925,7 +925,7 @@ class Daemon:
             # longer cover anywhere else (a removed root, mounts no longer included, a kind
             # turned off on an unplugged drive). Configured but unavailable roots are kept.
             removed += self.store.forget_unconfigured(configured_areas(cfg, st.roots), cfg.exclude_paths,
-                                                      cfg.kinds, cfg.exclude_extensions)
+                                                      cfg.kinds, cfg.exclude_extensions, cfg.max_bytes)
         self._last_scan_at = time.time()
         if full:
             self._last_full_scan = time.monotonic()
