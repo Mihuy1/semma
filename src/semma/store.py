@@ -8,6 +8,8 @@ path); `fts_chunks` gets a 3-character prefix index (it is contentless, so it is
 and the indexer re-queues every file through the index-format version); `counters.chunks`
 counts every chunk insert/delete so an in-memory vector cache can tell when another process
 changed the index.
+Schema v4: an index on `files (status, kind)` so the daemon's per-kind counts (asked for every
+second while a status window is open) read only that index.
 
 Deletion is driven by triggers so every path that removes rows (re-indexing, `finish_scan`,
 `reset`) keeps the virtual tables in step: deleting a file cascades (FK) to its chunks, and the
@@ -124,7 +126,11 @@ CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
 END;
 """
 
-MIGRATIONS: list[str] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3]
+SCHEMA_V4 = """
+CREATE INDEX files_status_kind ON files (status, kind);
+"""
+
+MIGRATIONS: list[str] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4]
 
 # Word boundaries inside file names that unicode61 does not see: camelCase and letter/digit.
 _CAMEL = re.compile(r"(?<=[a-zà-ÿ])(?=[A-ZÀ-Þ])|(?<=[^\W\d_])(?=\d)|(?<=\d)(?=[^\W\d_])")
@@ -528,9 +534,12 @@ class Store:
         out["vectors"] = self.db.execute("SELECT count(*) FROM vec_chunks").fetchone()[0]
         return out
 
-    def failed_files(self, limit: int | None = None) -> list[sqlite3.Row]:
-        return self.db.execute(
-            "SELECT path, kind, error, attempts FROM files WHERE status = 'failed' ORDER BY priority DESC LIMIT ?",
+    def failed_files(self, limit: int | None = None, db: sqlite3.Connection | None = None) -> list[sqlite3.Row]:
+        """Failed files, the most important (highest priority) first, the latest failure first
+        among equals. `db`: the connection to read with (default: this thread's)."""
+        return (db or self.db).execute(
+            "SELECT path, kind, error, attempts FROM files WHERE status = 'failed' "
+            "ORDER BY priority DESC, indexed_at DESC LIMIT ?",
             (-1 if limit is None else limit,),
         ).fetchall()
 

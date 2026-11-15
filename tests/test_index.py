@@ -88,7 +88,7 @@ def test_migration_from_v1_backfills_file_names(tmp_path: Path) -> None:
     db.close()
 
     store = Store(path)
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS) == 3
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS) == 4
     assert store.embedding_dim() == 768
     hits = store.db.execute("SELECT rowid FROM fts_files WHERE fts_files MATCH ?", ['"opinnaytetyo"']).fetchall()
     assert len(hits) == 1

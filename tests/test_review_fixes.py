@@ -259,7 +259,7 @@ def test_migration_v2_to_v3(tmp_path: Path) -> None:
     db.close()
 
     store = Store(path)
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 4
     assert store.db.execute("SELECT attempts FROM files").fetchone()[0] == 0
     assert store.db.execute("SELECT dirs FROM fts_files").fetchone()[0] == "Documents thesis"
     sql = store.db.execute("SELECT sql FROM sqlite_master WHERE name = 'fts_chunks'").fetchone()[0]
