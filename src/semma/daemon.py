@@ -633,6 +633,9 @@ class Daemon:
             log.info("indexing resumed by request")
 
     def rescan(self) -> None:
+        if not self._setup_done:
+            log.info("full rescan requested, but setup is not finished; it runs when setup is done")
+            return
         with self._cv:
             self._scan_full = True
         self._wake()
@@ -693,6 +696,7 @@ class Daemon:
             "download_total": dl.get("total", 0),
             "download_all_done": dl.get("all_done", 0),
             "download_all_total": dl.get("all_total", 0),
+            "setup_pending": not self._setup_done,
             "download_error": self._download_error,
             "model_files_ready": bool(files.get("ready")),
             "model_bytes_done": int(files.get("done") or 0),
@@ -1236,6 +1240,8 @@ STATUS_SIGNATURES = {
     # expected, and the same over every model file
     "download_file": "s", "download_done": "x", "download_total": "x",
     "download_all_done": "x", "download_all_total": "x",
+    # first-run setup is not finished: nothing is scanned or indexed and searches return nothing
+    "setup_pending": "b",
     "download_error": "s", "model_files_ready": "b", "model_bytes_done": "x", "model_bytes_total": "x",
     # the running indexing slice (0 when not indexing): files done (indexed, failed, skipped or
     # deferred) of the files queued when it started, failed among them, files per second

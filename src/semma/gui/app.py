@@ -74,7 +74,8 @@ class MainWindow(QMainWindow):
             self._wizard.raise_()
             self.hide()
             return
-        wizard = OnboardingWindow(self.client, self.settings_page.config_path, self.settings_page.home)
+        wizard = OnboardingWindow(self.client, self.settings_page.config_path, self.settings_page.home,
+                                  rerun=True)
         self._wizard = wizard
         wizard.finished_ok.connect(self._setup_finished)
         wizard.closed_early.connect(self._setup_closed)
@@ -90,6 +91,7 @@ class MainWindow(QMainWindow):
             wizard.close()
 
     def _setup_closed(self) -> None:
+        self.tabs.setCurrentWidget(self.status_page)  # it says that setup is not finished
         if not self.isVisible():
             self.show()
             self.raise_()

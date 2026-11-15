@@ -203,6 +203,11 @@ def headline(st: dict[str, Any], home: Path | str) -> Headline:
     indexed, pending = _int(st, "indexed"), _int(st, "pending")
     total = indexed + pending
 
+    if st.get("setup_pending"):
+        return Headline("Setup is not finished",
+                        detail="Indexing and desktop search are off. Finish setup with "
+                               "Settings → Run setup again, or run `semma setup` in a terminal.")
+
     if state == "downloading" or st.get("download_file"):
         done, size = _num(st, "download_all_done"), _num(st, "download_all_total")
         if size <= 0:

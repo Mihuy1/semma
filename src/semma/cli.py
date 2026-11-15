@@ -114,6 +114,8 @@ def cmd_status(args: argparse.Namespace, cfg: Config) -> int:
         print("No index yet. Run `semma scan`.")
         return 1
     store = Store(cfg.db_path)
+    if cfg.onboarding_complete is False:
+        print(SETUP_PENDING_NOTE + "\n")
     counts = store.counts()
     statuses = sorted({s for _, s in counts})
     print(f"{'kind':<8}" + "".join(f"{s:>10}" for s in statuses))
@@ -319,6 +321,10 @@ def _percent(done: float, total: float) -> str:
     return f"{100 * done / total:.0f}%" if total > 0 else "-"
 
 
+SETUP_PENDING_NOTE = ("Setup is not finished: nothing is indexed and desktop search is off. "
+                      "Open Semma to finish it, or run `semma setup` to start with the current settings.")
+
+
 def format_daemon_status(st: dict[str, object], home: Path) -> list[str]:
     """`semma ctl status`: the daemon's Status as lines. The plain keys come first, as key/value
     lines; then what is running now (download, scan, indexing run) and the counts per kind.
@@ -345,6 +351,8 @@ def format_daemon_status(st: dict[str, object], home: Path) -> list[str]:
                          f"({_percent(all_done, all_total)})")
     elif st.get("download_error"):
         lines += ["", f"Model download failed: {st['download_error']}"]
+    if st.get("setup_pending"):
+        lines += ["", SETUP_PENDING_NOTE]
     if st.get("scan_dir") or num("scan_dirs"):
         lines += ["", f"Scanning: {num('scan_dirs'):,.0f} folders, {num('scan_files'):,.0f} files seen, "
                       f"{num('scan_matched'):,.0f} to index"]
@@ -387,6 +395,44 @@ def cmd_ctl(args: argparse.Namespace, cfg: Config) -> int:
         print("The daemon is not running (systemctl --user start semma).")
         return 1
     print(f"{method}: ok" + (f" ({result} files queued)" if method == "RetryFailed" else ""))
+    if method == "Rescan" and (daemon_status() or {}).get("setup_pending"):
+        print(SETUP_PENDING_NOTE)
+    return 0
+
+
+def cmd_setup(args: argparse.Namespace, cfg: Config) -> int:
+    """Finish first-run setup without the window: keep the settings in the config file (the
+    defaults when there is none) and let the service start indexing."""
+    from .config import default_config_path
+    from .config_write import ConfigWriteError, update_config
+    from .daemon import daemon_reload_config
+    from .onboarding import onboarding_done
+
+    path = cfg.source_path or default_config_path()
+    if cfg.onboarding_complete is True:
+        print("Setup is already finished.")
+    else:
+        try:
+            update_config(path, {"": {"onboarding_complete": True}})
+        except ConfigWriteError as exc:
+            print(f"Setup was not finished: {exc}", file=sys.stderr)
+            return 1
+        print(f"Setup finished: onboarding_complete = true in {path}")
+        if cfg.onboarding_complete is None and onboarding_done(cfg):
+            print("(An index already existed, so the service was indexing already.)")
+    try:
+        needs_restart = daemon_reload_config()
+    except Exception as exc:  # DBusError: the service refused the config file
+        print(f"The service did not accept the settings: {exc}", file=sys.stderr)
+        return 1
+    if needs_restart is None:
+        print("The service is not running; it starts indexing when it starts "
+              "(systemctl --user start semma).")
+    elif needs_restart:
+        print(f"Restart the service to apply: {', '.join(needs_restart)} "
+              "(systemctl --user restart semma).")
+    else:
+        print("The service is scanning and will index with these settings.")
     return 0
 
 
@@ -575,6 +621,10 @@ def build_parser() -> argparse.ArgumentParser:
     ct = sub.add_parser("ctl", help="talk to the running daemon")
     ct.add_argument("action", choices=["status", "pause", "resume", "rescan", "retry-failed"])
     ct.set_defaults(func=cmd_ctl)
+
+    su = sub.add_parser("setup", help="finish first-run setup without the window: start indexing "
+                                      "with the settings in the config file (or the defaults)")
+    su.set_defaults(func=cmd_setup)
 
     gu = sub.add_parser("gui", help="open the Semma window (status and settings)")
     gu.set_defaults(func=cmd_gui)

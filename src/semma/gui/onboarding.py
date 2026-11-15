@@ -1,8 +1,9 @@
 """First-run setup: a few pages, then indexing is allowed to start.
 
-The pages edit the same config.toml keys as Settings. Closing the window discards edits and
-leaves the completion flag unchanged (unless Run setup again already set it false). The model
-download is shown on every page; it is started by the daemon, not by this window.
+The pages edit the same config.toml keys as Settings. Closing the window early asks first: go
+back to setup, finish later (edits are discarded and indexing stays off), or skip the pages and
+start indexing with the saved settings (the defaults on a first run). The model download is
+shown on every page; it is started by the daemon, not by this window.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -157,11 +159,13 @@ class OnboardingWindow(QMainWindow):
     closed_early = Signal()
 
     def __init__(self, client: Any, config_path: Path | None = None, home: Path | None = None,
-                 parent: QWidget | None = None) -> None:
+                 parent: QWidget | None = None, *, rerun: bool = False) -> None:
         super().__init__(parent)
         self.client = client
         self.config_path = config_path
         self.home = home
+        self.rerun = rerun  # opened by Run setup again: the saved settings are the user's own
+        self._saved = False  # the completion flag has been written; only the service is behind
         self._relay = Relay(self)
         self._completed = False
         self._saving = False
@@ -258,10 +262,57 @@ class OnboardingWindow(QMainWindow):
         self._poll()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        self._timer.stop()
         if not self._completed:
-            self.closed_early.emit()
+            if self._saving:
+                event.ignore()
+                return
+            if self._saved:
+                # Saved already; only a service restart was pending. That is a finished setup.
+                self._complete()
+            elif self.ctx is None:
+                self.closed_early.emit()  # nothing can be saved from here
+            else:
+                choice = self.confirm_close()
+                if choice == "skip":
+                    # Not from inside the close: finishing closes this window, and Qt ignores
+                    # a close() made while a close event is being handled.
+                    event.ignore()
+                    QTimer.singleShot(0, lambda: self._save(include_pages=False))
+                    return
+                if choice != "later":
+                    event.ignore()
+                    return
+                self.closed_early.emit()
+        self._timer.stop()
         super().closeEvent(event)
+
+    def confirm_close(self) -> str:
+        """Ask what closing early should do: "stay", "later", or "skip" (start indexing now)."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Setup is not finished")
+        box.setText("Indexing and desktop search stay off until setup is finished.")
+        if self.rerun:
+            box.setInformativeText("You can finish later from Settings, or keep the settings you "
+                                   "already had and start indexing again now. Changes made in "
+                                   "these steps are discarded either way.")
+            skip_text = "Keep current settings"
+        else:
+            box.setInformativeText("You can finish later by opening Semma again, or start indexing "
+                                   "now with the default settings and change them later in Settings.")
+            skip_text = "Use defaults"
+        stay = box.addButton("Keep setting up", QMessageBox.ButtonRole.RejectRole)
+        later = box.addButton("Finish later", QMessageBox.ButtonRole.DestructiveRole)
+        skip = box.addButton(skip_text, QMessageBox.ButtonRole.AcceptRole)
+        box.setDefaultButton(stay)
+        box.setEscapeButton(stay)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is skip:
+            return "skip"
+        if clicked is later:
+            return "later"
+        return "stay"
 
     # -- pages -----------------------------------------------------------------------------
     def _load(self) -> None:
@@ -312,6 +363,7 @@ class OnboardingWindow(QMainWindow):
     def _back(self) -> None:
         if self._index > 0 and not self._saving:
             self._awaiting_restart = False
+            self._saved = False
             self.notice.hide()
             self.restart_button.hide()
             self._show_page(self._index - 1)
@@ -328,10 +380,12 @@ class OnboardingWindow(QMainWindow):
         self._save()
 
     # -- saving ----------------------------------------------------------------------------
-    def _save(self) -> None:
+    def _save(self, include_pages: bool = True) -> None:
+        """Write the completion flag and tell the service. Without `include_pages` the edits
+        on the pages are left out: the saved settings (or the defaults) are used as they are."""
         if self.ctx is None:
             return
-        changes = merge_changes(*(form.changes() for form in self._forms))
+        changes = merge_changes(*(form.changes() for form in self._forms)) if include_pages else {}
         changes.setdefault("", {})["onboarding_complete"] = True
         try:
             update_config(self.ctx.config_path, changes)
@@ -339,6 +393,7 @@ class OnboardingWindow(QMainWindow):
             self.problems.setText(f"The settings were not saved: {exc}")
             self.problems.show()
             return
+        self._saved = True
         self._saving = True
         self._update_buttons()
         self._relay.when_done(self.client.reload_config(), self._reloaded, self._reload_failed)

@@ -330,3 +330,9 @@ def test_gui_without_pyside6_prints_one_line(monkeypatch: pytest.MonkeyPatch, ca
     assert gui.main() == 1
     err = capsys.readouterr().err
     assert err.count("\n") == 1 and "PySide6" in err
+
+
+def test_headline_says_when_setup_is_not_finished() -> None:
+    h = m.headline({"state": "idle", "setup_pending": True, "indexed": 5}, "/home/u")
+    assert h.text == "Setup is not finished"
+    assert "semma setup" in h.detail and "Run setup again" in h.detail

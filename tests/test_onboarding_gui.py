@@ -65,8 +65,14 @@ def test_wizard_blocks_empty_scope_discards_on_close_and_writes_on_finish(
     assert wizard.next_button.isEnabled()
 
     wizard.folders.skip_hidden.setChecked(False)
+    wizard.confirm_close = lambda: "stay"  # closing asks first; "stay" keeps the wizard open
     wizard.close()
     app.processEvents()
+    assert wizard.isVisible()
+    wizard.confirm_close = lambda: "later"
+    wizard.close()
+    app.processEvents()
+    assert not wizard.isVisible()
     assert finished == []
     assert not config_path(home).exists()
 
@@ -124,7 +130,67 @@ def test_run_setup_again_pauses_and_opens_the_wizard(app: QtWidgets.QApplication
     assert not window.isVisible()
     # Prefilled with the saved folders, and closing does not turn indexing back on.
     assert wizard.folders.roots.folders() == ["~/Documents"]
+    assert wizard.rerun
+    wizard.confirm_close = lambda: "later"
     wizard.close()
     app.processEvents()
     assert window.isVisible()
+    assert window.tabs.currentWidget() is window.status_page
     assert read_raw(config_path(home))["onboarding_complete"] is False
+
+    # Run it again and close with "Keep current settings": indexing resumes, page edits are dropped.
+    client.calls.clear()
+    window.settings_page.setup_button.click()
+    app.processEvents()
+    wizard = window._wizard
+    assert wizard is not None and wizard.isVisible()
+    wizard.folders.skip_hidden.setChecked(not wizard.folders.skip_hidden.isChecked())
+    wizard.confirm_close = lambda: "skip"
+    wizard.close()
+    app.processEvents()
+    assert not wizard.isVisible() and window.isVisible()
+    raw = read_raw(config_path(home))
+    assert raw["onboarding_complete"] is True
+    assert raw["scan"] == {"roots": ["~/Documents"]}
+    assert client.calls.count("ReloadConfig") == 2  # paused, then resumed
+
+
+def test_closing_the_first_run_wizard_with_defaults_starts_indexing(
+    app: QtWidgets.QApplication, home: Path,
+) -> None:
+    finished: list[bool] = []
+    closed: list[bool] = []
+    client = FakeClient(status())
+    wizard = OnboardingWindow(client, config_path(home), home)
+    wizard.finished_ok.connect(lambda: finished.append(True))
+    wizard.closed_early.connect(lambda: closed.append(True))
+    wizard.show()
+    wizard.next_button.click()
+    wizard.folders.skip_hidden.setChecked(not wizard.folders.skip_hidden.isChecked())
+    wizard.confirm_close = lambda: "skip"
+    wizard.close()
+    app.processEvents()
+    assert finished == [True] and closed == []
+    assert "ReloadConfig" in client.calls
+    assert read_raw(config_path(home)) == {"onboarding_complete": True}
+
+
+def test_closing_after_a_save_that_needs_a_restart_counts_as_finished(
+    app: QtWidgets.QApplication, home: Path,
+) -> None:
+    finished: list[bool] = []
+    closed: list[bool] = []
+    client = FakeClient(status())
+    client.reload_result = ["model.device"]
+    wizard = OnboardingWindow(client, config_path(home), home)
+    wizard.finished_ok.connect(lambda: finished.append(True))
+    wizard.closed_early.connect(lambda: closed.append(True))
+    wizard.confirm_close = lambda: pytest.fail("a saved setup must not ask")
+    wizard.show()
+    for _ in range(5):
+        wizard.next_button.click()
+    app.processEvents()
+    assert wizard.next_button.text() == "Close" and finished == []
+    wizard.close()
+    app.processEvents()
+    assert finished == [True] and closed == []

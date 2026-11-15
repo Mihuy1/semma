@@ -182,3 +182,48 @@ def test_finishing_setup_starts_a_scan_and_running_it_again_keeps_the_index(tmp_
             await d.stop()
 
     asyncio.run(main())
+
+
+def test_semma_setup_finishes_setup_without_the_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from semma import cli
+    from semma import daemon as daemon_mod
+
+    home = tmp_path / "home"
+    path = home / ".config" / "semma" / "config.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(f'db_path = "{tmp_path / "index.db"}"\n[scan]\nroots = ["~/Documents"]\n', encoding="utf-8")
+    reloads: list[bool] = []
+    monkeypatch.setattr(daemon_mod, "daemon_reload_config", lambda **kw: reloads.append(True) or [])
+
+    assert not onboarding_done(load_config(path, home))
+    assert cli.main(["--config", str(path), "setup"]) == 0
+    cfg = load_config(path, home)
+    assert cfg.onboarding_complete is True and onboarding_done(cfg)
+    assert [str(r) for r in cfg.roots] == [str(home / "Documents")]  # the other settings are kept
+    assert reloads == [True]
+    assert "Setup finished" in capsys.readouterr().out
+
+    assert cli.main(["--config", str(path), "setup"]) == 0  # again: nothing to write
+    assert "already finished" in capsys.readouterr().out
+
+
+def test_status_reports_pending_setup_and_rescan_waits(tmp_path: Path) -> None:
+    from semma import cli
+
+    async def main() -> None:
+        cfg = make_cfg(tmp_path)
+        cfg.onboarding_complete = False
+        d = make_daemon(cfg, embedder=FakeEmbedder())
+        d.start()
+        try:
+            st = await d.status()
+            assert st["setup_pending"] is True
+            assert any("semma setup" in line for line in cli.format_daemon_status(st, cfg.home))
+            d.rescan()
+            assert d._scan_full is False
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
