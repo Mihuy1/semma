@@ -361,3 +361,74 @@ def test_unserializable_value_raises_without_modifying_file(tmp_path: Path) -> N
 
     assert cfg_path.read_bytes() == original
 
+
+def test_symlink_to_existing_file_keeps_symlink_comments_and_mode(tmp_path: Path) -> None:
+    target = tmp_path / "dotfiles" / "semma.toml"
+    target.parent.mkdir()
+    target.write_text(
+        "# Dotfiles managed config\n"
+        "[scan]\n"
+        "skip_hidden = true # keep this comment\n",
+        encoding="utf-8",
+    )
+    os.chmod(target, 0o640)
+
+    cfg_dir = tmp_path / "config" / "semma"
+    cfg_dir.mkdir(parents=True)
+    cfg_path = cfg_dir / "config.toml"
+    cfg_path.symlink_to(target)
+
+    update_config(cfg_path, {"scan": {"skip_hidden": False}, "daemon": {"rescan_hours": 8}})
+
+    assert cfg_path.is_symlink()
+    assert cfg_path.readlink() == target
+    updated = target.read_text(encoding="utf-8")
+    assert "# Dotfiles managed config" in updated
+    assert "# keep this comment" in updated
+    assert read_raw(target) == {"scan": {"skip_hidden": False}, "daemon": {"rescan_hours": 8}}
+    assert read_raw(cfg_path) == {"scan": {"skip_hidden": False}, "daemon": {"rescan_hours": 8}}
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+    assert [p.name for p in cfg_dir.iterdir()] == ["config.toml"]
+    assert [p.name for p in target.parent.iterdir()] == ["semma.toml"]
+
+
+def test_dangling_symlink_creates_target_and_keeps_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "dotfiles" / "nested" / "semma.toml"
+    assert not target.parent.exists()
+
+    cfg_dir = tmp_path / "config" / "semma"
+    cfg_dir.mkdir(parents=True)
+    cfg_path = cfg_dir / "config.toml"
+    cfg_path.symlink_to(target)
+    assert cfg_path.is_symlink()
+    assert not cfg_path.exists()
+
+    update_config(cfg_path, {"scan": {"roots": ["~/Documents"], "skip_hidden": False}})
+
+    assert cfg_path.is_symlink()
+    assert cfg_path.readlink() == target
+    assert target.is_file()
+    assert cfg_path.exists()
+    assert read_raw(target) == {"scan": {"roots": ["~/Documents"], "skip_hidden": False}}
+    assert read_raw(cfg_path) == {"scan": {"roots": ["~/Documents"], "skip_hidden": False}}
+
+
+def test_relative_symlink_updates_target_and_keeps_relative_link(tmp_path: Path) -> None:
+    dotfiles_dir = tmp_path / "dotfiles"
+    dotfiles_dir.mkdir()
+    target = dotfiles_dir / "semma.toml"
+    target.write_text("# relative target\n[scan]\nskip_hidden = true\n", encoding="utf-8")
+
+    cfg_dir = tmp_path / "config" / "semma"
+    cfg_dir.mkdir(parents=True)
+    cfg_path = cfg_dir / "config.toml"
+    rel_target = Path("..") / ".." / "dotfiles" / "semma.toml"
+    cfg_path.symlink_to(rel_target)
+
+    update_config(cfg_path, {"scan": {"skip_hidden": False}})
+
+    assert cfg_path.is_symlink()
+    assert cfg_path.readlink() == rel_target
+    assert not cfg_path.readlink().is_absolute()
+    assert "# relative target" in target.read_text(encoding="utf-8")
+    assert read_raw(target) == {"scan": {"skip_hidden": False}}

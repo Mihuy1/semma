@@ -84,9 +84,10 @@ def update_config(path: Path, changes: dict[str, dict[str, Any]]) -> None:
 
     existing_mode: int | None = None
     try:
-        st = path.stat()
+        target = path.resolve() if path.is_symlink() else path
+        st = target.stat()
         existing_mode = stat.S_IMODE(st.st_mode)
-        raw_text = path.read_text(encoding="utf-8")
+        raw_text = target.read_text(encoding="utf-8")
     except FileNotFoundError:
         doc = tomlkit.document()
     except (OSError, UnicodeDecodeError) as exc:
@@ -95,7 +96,7 @@ def update_config(path: Path, changes: dict[str, dict[str, Any]]) -> None:
         try:
             doc = tomlkit.parse(raw_text)
         except TOMLKitError as exc:
-            raise ConfigWriteError(f"invalid TOML in {path}: {exc}") from exc
+            raise ConfigWriteError(f"invalid TOML in {target}: {exc}") from exc
 
     try:
         for section, entries in changes.items():
@@ -116,7 +117,7 @@ def update_config(path: Path, changes: dict[str, dict[str, Any]]) -> None:
             else:
                 tbl = doc[section]
                 if not isinstance(tbl, _TABLE_LIKE):
-                    raise ConfigWriteError(f"section {section!r} in {path} is not a table")
+                    raise ConfigWriteError(f"section {section!r} in {target} is not a table")
 
             for key, value in entries.items():
                 if value is None:
@@ -136,12 +137,12 @@ def update_config(path: Path, changes: dict[str, dict[str, Any]]) -> None:
 
     tmp_path: Path | None = None
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
+            dir=target.parent,
+            prefix=f".{target.name}.",
             suffix=".tmp",
             delete=False,
         ) as fh:
@@ -151,10 +152,10 @@ def update_config(path: Path, changes: dict[str, dict[str, Any]]) -> None:
             os.fsync(fh.fileno())
         if existing_mode is not None:
             os.chmod(tmp_path, existing_mode)
-        os.replace(tmp_path, path)
+        os.replace(tmp_path, target)
         tmp_path = None
     except OSError as exc:
-        raise ConfigWriteError(f"cannot write {path}: {exc}") from exc
+        raise ConfigWriteError(f"cannot write {target}: {exc}") from exc
     finally:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
