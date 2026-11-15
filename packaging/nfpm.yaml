@@ -26,6 +26,8 @@ scripts:
   preremove: packaging/preremove.sh
   postremove: packaging/postremove.sh
 
+# The service downloads the model over HTTPS with the carried Python, which verifies it against the
+# system's certificates: ca-certificates is a dependency (a bare Ubuntu or Debian has none).
 # Python and its libraries are inside the package; the llama.cpp libraries need the C and C++
 # runtimes of the image they were built in or newer, and OpenMP. Vulkan, ffmpeg and the desktop
 # libraries linked by the bundled Qt Widgets subset (`semma gui` on Wayland and X11) are in
@@ -37,6 +39,7 @@ overrides:
       - libc6 (>= ${SEMMA_GLIBC})
       - libstdc++6
       - libgomp1
+      - ca-certificates
     recommends:
       - libvulkan1
       - ffmpeg
@@ -71,6 +74,7 @@ overrides:
       - glibc >= ${SEMMA_GLIBC}
       - libstdc++
       - libgomp
+      - ca-certificates
     recommends:
       - vulkan-loader
       - /usr/bin/ffmpeg
