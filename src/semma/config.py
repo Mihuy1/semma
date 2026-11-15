@@ -230,6 +230,11 @@ class Config:
     krunner_max_results: int = 10
     query_debounce_ms: float = 100  # search-as-you-type: only the last keystroke is searched
 
+    # Where `load_config` read this from (the file, which need not exist, and the home it
+    # expanded ~ against), so the daemon can read the same file again. Not settings.
+    source_path: Path | None = field(default=None, compare=False, repr=False)
+    source_home: Path | None = field(default=None, compare=False, repr=False)
+
     def effective_roots(self) -> list[Path]:
         """Configured roots plus detected mounts, canonicalised and de-duplicated.
 
@@ -291,8 +296,16 @@ def default_config_path(home: Path | None = None) -> Path:
     return xdg_config_home(home) / "semma" / "config.toml"
 
 
-def load_config(path: Path | None = None, home: Path | None = None) -> Config:
-    """Build the default config, then apply overrides from the TOML file if it exists."""
+class ConfigError(Exception):
+    """The config file cannot be read or is not valid (`load_config(strict=True)`)."""
+
+
+def load_config(path: Path | None = None, home: Path | None = None, *, strict: bool = False) -> Config:
+    """Build the default config, then apply overrides from the TOML file if it exists.
+
+    strict: the file must exist and be valid; anything else raises ConfigError with a readable
+    message (instead of OSError, TOMLDecodeError or the ValueError of a bad value).
+    """
     home = home or Path.home()
     config_home = xdg_config_home(home)
     cfg = Config(
@@ -302,6 +315,23 @@ def load_config(path: Path | None = None, home: Path | None = None) -> Config:
         locations=default_locations(home, read_user_dirs(home, config_home)),
     )
     path = path or default_config_path(home)
+    cfg.source_path, cfg.source_home = path, home
+    if strict:
+        try:
+            with path.open("rb") as fh:
+                data = tomllib.load(fh)
+        except OSError as exc:
+            raise ConfigError(f"cannot read {path}: {exc.strerror or exc}") from exc
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigError(f"{path} is not valid TOML: {exc}") from exc
+        except UnicodeDecodeError as exc:
+            raise ConfigError(f"{path} is not valid UTF-8: {exc}") from exc
+        try:
+            apply_overrides(cfg, data)
+            cfg.canonicalize()
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            raise ConfigError(f"{path} has an invalid value: {exc}") from exc
+        return cfg
     if path.is_file():
         with path.open("rb") as fh:
             apply_overrides(cfg, tomllib.load(fh))
