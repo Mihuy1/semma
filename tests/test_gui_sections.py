@@ -184,27 +184,65 @@ def test_priorities_add_duplicate_and_problems(home: Path) -> None:
 def test_media_load_changes_and_problems(home: Path) -> None:
     ctx = ctx_for(home)
     saved = mm.load(ctx)
-    assert saved == mm.MediaValues(30)
+    assert saved == mm.MediaValues(30, 4.0, 100.0)
     assert mm.changes(saved, saved.copy()) == {}
 
-    edited = mm.MediaValues(45)
-    assert mm.changes(saved, edited) == {"media": {"max_minutes": 45}}
+    edited = mm.MediaValues(45, 1.0, 20.0)
+    assert mm.changes(saved, edited) == {
+        "media": {"max_minutes": 45},
+        "scan": {"max_file_mb": {"audio": 1024, "video": 20480}},
+    }
     update_config(ctx.config_path, mm.changes(saved, edited))
-    assert read_raw(ctx.config_path) == {"media": {"max_minutes": 45}}
+    assert read_raw(ctx.config_path) == {
+        "media": {"max_minutes": 45},
+        "scan": {"max_file_mb": {"audio": 1024, "video": 20480}},
+    }
 
     reloaded_ctx = ctx_for(home)
     assert reloaded_ctx.config.max_media_seconds == 45 * 60
+    assert reloaded_ctx.config.max_bytes["audio"] == 1024 * 2**20
+    assert reloaded_ctx.config.max_bytes["video"] == 20480 * 2**20
     reloaded = mm.load(reloaded_ctx)
-    assert reloaded == mm.MediaValues(45)
+    assert reloaded == mm.MediaValues(45, 1.0, 20.0)
 
-    back = mm.MediaValues(30)
-    assert mm.changes(reloaded, back) == {"media": {"max_minutes": None}}
+    back = mm.MediaValues(30, 4.0, 100.0)
+    assert mm.changes(reloaded, back) == {
+        "media": {"max_minutes": None},
+        "scan": {"max_file_mb": None},
+    }
     update_config(ctx.config_path, mm.changes(reloaded, back))
     assert read_raw(ctx.config_path) == {}
 
-    assert mm.problems(mm.MediaValues(30), ctx) == []
-    probs = mm.problems(mm.MediaValues(0), ctx)
-    assert len(probs) == 1 and probs[0].blocking
+    assert mm.problems(mm.MediaValues(30, 4.0, 100.0), ctx) == []
+    probs = mm.problems(mm.MediaValues(0, 0.0, 2000.0), ctx)
+    assert len(probs) == 3 and all(p.blocking for p in probs)
+
+
+def test_media_keeps_other_kind_overrides_in_max_file_mb(home: Path) -> None:
+    ctx = ctx_for(home, "[scan]\nmax_file_mb = { pdf = 1000, audio = 2048 }\n")
+    saved = mm.load(ctx)
+    assert saved == mm.MediaValues(30, 2.0, 100.0)
+    assert saved.other_max_file_mb == {"pdf": 1000}
+
+    # Changing only max_minutes leaves scan.max_file_mb untouched in changes()
+    only_min = saved.copy()
+    only_min.max_minutes = 20
+    assert mm.changes(saved, only_min) == {"media": {"max_minutes": 20}}
+
+    # Changing video limit keeps pdf override and existing audio override
+    with_video = saved.copy()
+    with_video.max_video_gb = 10.0
+    assert mm.changes(saved, with_video) == {
+        "scan": {"max_file_mb": {"pdf": 1000, "audio": 2048, "video": 10240}},
+    }
+
+    # Returning audio and video to their defaults keeps pdf override (not None)
+    back_to_defaults = saved.copy()
+    back_to_defaults.max_audio_gb = 4.0
+    ch = mm.changes(saved, back_to_defaults)
+    assert ch == {"scan": {"max_file_mb": {"pdf": 1000}}}
+    update_config(ctx.config_path, ch)
+    assert read_raw(ctx.config_path) == {"scan": {"max_file_mb": {"pdf": 1000}}}
 
 
 # -- Performance model ---------------------------------------------------------------------
@@ -373,21 +411,37 @@ def test_priorities_section_widget(app: QtWidgets.QApplication, home: Path) -> N
 
 
 def test_media_section_widget(app: QtWidgets.QApplication, home: Path) -> None:
+    config_path(home).write_text("[scan]\nmax_file_mb = { pdf = 800 }\n")
     page = SettingsPage(FakeClient(status()), config_path(home), home)
     sec = page.select("media")
     assert not sec.is_modified()
     assert sec.max_minutes.value() == 30
+    assert sec.max_audio_gb.value() == pytest.approx(4.0)
+    assert sec.max_video_gb.value() == pytest.approx(100.0)
 
     sec.max_minutes.setValue(60)
+    sec.max_audio_gb.setValue(1.5)
+    sec.max_video_gb.setValue(20.0)
     assert sec.is_modified()
-    assert sec.changes() == {"media": {"max_minutes": 60}}
+    assert sec.changes() == {
+        "media": {"max_minutes": 60},
+        "scan": {"max_file_mb": {"pdf": 800, "audio": 1536, "video": 20480}},
+    }
     page.apply()
-    assert read_raw(config_path(home)) == {"media": {"max_minutes": 60}}
+    assert read_raw(config_path(home)) == {
+        "media": {"max_minutes": 60},
+        "scan": {"max_file_mb": {"pdf": 800, "audio": 1536, "video": 20480}},
+    }
 
     sec.max_minutes.setValue(30)
-    assert sec.changes() == {"media": {"max_minutes": None}}
+    sec.max_audio_gb.setValue(4.0)
+    sec.max_video_gb.setValue(100.0)
+    assert sec.changes() == {
+        "media": {"max_minutes": None},
+        "scan": {"max_file_mb": {"pdf": 800}},
+    }
     page.apply()
-    assert read_raw(config_path(home)) == {}
+    assert read_raw(config_path(home)) == {"scan": {"max_file_mb": {"pdf": 800}}}
 
 
 def test_performance_section_widget(app: QtWidgets.QApplication, home: Path) -> None:
