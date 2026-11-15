@@ -7,8 +7,8 @@ Semantic file search for KDE KRunner and GNOME Shell overview search, powered by
 ### From a package (x86-64: Fedora 41+, Ubuntu 24.04+, Debian 13+)
 
 ```sh
-sudo dnf install ./semma-0.2.0-1.x86_64.rpm     # Fedora
-sudo apt install ./semma_0.2.0-1_amd64.deb      # Ubuntu, Debian
+sudo dnf install ./semma-0.3.0-1.x86_64.rpm     # Fedora
+sudo apt install ./semma_0.3.0-1_amd64.deb      # Ubuntu, Debian
 ```
 
 Then log out and back in. The package adds Semma to the application menu, KRunner, and GNOME Shell search for every user and starts its service with the session; nothing else needs to be set up. The service starts downloading the model immediately. It does not scan or index until you open **Semma** and finish the setup wizard (folders, file types, audio and video limits, and whether the model runs on the graphics card or the processor). The download progress stays on screen for the whole wizard. Closing the wizard before the end asks what to do: keep setting up, finish later (the choices are discarded and indexing stays off; opening Semma again starts the wizard over), or start indexing with the default settings. Without a desktop, `semma setup` does the same as that last choice: it starts indexing with the settings in `config.toml`, or the defaults. An upgrade keeps indexing and does not show the wizard when you already have an index. **Run setup again** in Settings pauses indexing until you finish (or close the wizard with **Keep current settings**), and keeps the index you already have. While setup is unfinished, the Status page, `semma status` and `semma ctl status` say so. After setup, the window shows the status of the download and indexing, and the settings.
