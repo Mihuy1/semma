@@ -11,7 +11,7 @@ sudo dnf install ./semma-0.1.0-1.x86_64.rpm     # Fedora
 sudo apt install ./semma_0.1.0-1_amd64.deb      # Ubuntu, Debian
 ```
 
-Then log out and back in. The package adds Semma to KRunner and GNOME Shell search for every user and starts its service with the session; nothing else needs to be set up.
+Then log out and back in. The package adds Semma to the application menu, KRunner, and GNOME Shell search for every user and starts its service with the session; nothing else needs to be set up. Opening **Semma** from the application menu shows the status of the model download and indexing, and settings for folders and file types.
 
 - Everything Semma runs on is inside the package, under `/usr/lib/semma`: its own Python 3.13 with its libraries, and llama.cpp with the Vulkan and CPU backends. The system's Python is not used.
 - The model (865 MB) is not inside. The service downloads it to `~/.local/share/semma/models` the first time it runs, checks it, and continues an interrupted download where it stopped.
@@ -32,6 +32,8 @@ Build the packages with `scripts/package.sh` (needs `uv`, `curl`, and `podman` o
 - Explicit GNOME: `uv run semma install-gnome [--python PATH] [--no-enable]`, `uv run semma uninstall-gnome`
 - Status: `uv run semma kde-status`, `uv run semma gnome-status`
 
+Both `install-kde` and `install-gnome` also add **Semma** to the application menu (`~/.local/share/applications/io.github.Semma.desktop`) to open the window (status of the model download and indexing; settings for folders and file types).
+
 ## CLI
 
 - Build and inspect the index: `uv run semma scan`, `uv run semma index`, `uv run semma status [--failed]`
@@ -42,13 +44,13 @@ Build the packages with `scripts/package.sh` (needs `uv`, `curl`, and `podman` o
 ## GNOME notes
 
 - GNOME Shell only reads search-provider files from system data directories, so `install-gnome` writes `io.github.Semma.search-provider.ini` to `/usr/local/share/gnome-shell/search-providers/` or, without permission, stages it in `~/.local/share/semma/` (`$XDG_DATA_HOME/semma/`) and prints a one-line `sudo install` command to run (`uninstall-gnome` likewise prints a `sudo rm` command if needed).
-- The generated `.desktop` file (`~/.local/share/applications/io.github.Semma.desktop`) includes `OnlyShowIn=GNOME;` so it never appears in KDE Plasma.
+- The generated `.desktop` file (`~/.local/share/applications/io.github.Semma.desktop`) serves as both the application menu entry (on KDE and GNOME) and GNOME Shell's `DesktopId`.
 - Log out and back in (or restart GNOME Shell) after installing for the new search provider to appear.
-- Result activation opens files with `gio open` (falling back to `xdg-open`); `LaunchSearch` (clicking the provider icon) currently does nothing.
+- Result activation opens files with `gio open` (falling back to `xdg-open`); clicking the provider icon (`LaunchSearch`) opens the Semma window.
 
 ## Both desktops
 
-The daemon serves KRunner (`org.kde.krunner1`) at `/runner` and GNOME (`org.gnome.Shell.SearchProvider2`) at `/io/github/Semma/SearchProvider` on `io.github.Semma` at the same time. Uninstalling one desktop's integration keeps the shared D-Bus service and `semma.service` systemd user unit active while the other desktop is still installed.
+The daemon serves KRunner (`org.kde.krunner1`) at `/runner` and GNOME (`org.gnome.Shell.SearchProvider2`) at `/io/github/Semma/SearchProvider` on `io.github.Semma` at the same time. Uninstalling one desktop's integration keeps the shared application entry, D-Bus service, and `semma.service` systemd user unit active while the other desktop is still installed.
 
 ## Testing GNOME from KDE
 
