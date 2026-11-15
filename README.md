@@ -23,6 +23,13 @@ Then log out and back in. The package adds Semma to the application menu, KRunne
 
 Build the packages with `scripts/package.sh` (needs `uv`, `curl`, and `podman` or `docker`); they land in `dist/`. `scripts/check-package.sh dist/<package> [image]` installs one in a clean container, checks the window and runs an index and a search with the real model.
 
+Releases: raise the version (`pyproject.toml`, `src/semma/__init__.py`, `uv lock`, the package names above), then `scripts/release.sh` tags it; GitHub Actions builds, checks and publishes the packages. Version numbers:
+
+- **Patch** (0.3.0 → 0.3.1): bug fixes only.
+- **Minor** (0.3.x → 0.4.0): anything new or changed that users notice: features, settings or changed defaults, a rebuilt index or a new model, renamed or removed config keys, a changed D-Bus interface, a dropped distribution version. Several of these between two releases still make one bump.
+- **Prerelease** (`0.4.0-beta.1`): a build to try before the release; published as a prerelease.
+- **1.0.0** once config, index and packages stay compatible from one version to the next, or come with a migration.
+
 ### From a source checkout
 
 `uv run semma install` auto-detects the desktop from `XDG_CURRENT_DESKTOP` (falling back to `XDG_SESSION_DESKTOP` and `DESKTOP_SESSION`); pass `--desktop kde|gnome` to override. On other desktops it exits without making changes.
