@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from .base import SettingsSection, placeholder
+from .base import SettingsSection
 from .filetypes import FiletypesSection
 from .folders import FoldersSection
 from .media import MediaSection
+from .performance import PerformanceSection
 from .priorities import PrioritiesSection
 
 SECTIONS: list[type[SettingsSection]] = [
@@ -13,5 +14,5 @@ SECTIONS: list[type[SettingsSection]] = [
     FiletypesSection,
     PrioritiesSection,
     MediaSection,
-    placeholder("performance", "Performance", "speedometer"),
+    PerformanceSection,
 ]

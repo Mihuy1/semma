@@ -13,6 +13,7 @@ from semma import filetypes as ft
 from semma.config_write import read_raw, update_config
 from semma.gui.settings import filetypes_model as ftm
 from semma.gui.settings import media_model as mm
+from semma.gui.settings import performance_model as pfm
 from semma.gui.settings import priorities_model as pm
 from semma.gui.settings.context import SettingsContext
 
@@ -95,7 +96,7 @@ def test_filetypes_problems(home: Path) -> None:
 def test_filetypes_models_do_not_import_pyside6() -> None:
     code = (
         "import sys, semma.gui.settings.filetypes_model, semma.gui.settings.priorities_model, "
-        "semma.gui.settings.media_model; "
+        "semma.gui.settings.media_model, semma.gui.settings.performance_model; "
         "bad = [m for m in sys.modules if m.startswith(('PySide6', 'shiboken6'))]; "
         "assert not bad, bad"
     )
@@ -204,6 +205,76 @@ def test_media_load_changes_and_problems(home: Path) -> None:
     assert mm.problems(mm.MediaValues(30), ctx) == []
     probs = mm.problems(mm.MediaValues(0), ctx)
     assert len(probs) == 1 and probs[0].blocking
+
+
+# -- Performance model ---------------------------------------------------------------------
+
+def test_performance_load_defaults_and_custom_device(home: Path) -> None:
+    ctx = ctx_for(home)
+    saved = pfm.load(ctx)
+    assert saved == pfm.PerformanceValues(30, None, 24, 10)
+    assert pfm.device_choices(None) == [
+        ("Automatic", None),
+        ("Graphics card", "gpu"),
+        ("Processor", "cpu"),
+    ]
+
+    ctx_custom = ctx_for(
+        home,
+        '[model]\ndevice = "vulkan:1"\n[daemon]\ngpu_busy_threshold = 45\n'
+        "rescan_hours = 12\nkrunner_max_results = 15\n",
+    )
+    loaded = pfm.load(ctx_custom)
+    assert loaded == pfm.PerformanceValues(45, "vulkan:1", 12, 15)
+    assert ("vulkan:1", "vulkan:1") in pfm.device_choices(loaded.device)
+    assert pfm.changes(loaded, loaded.copy()) == {}
+
+
+def test_performance_changes_and_back_to_default(home: Path) -> None:
+    ctx = ctx_for(home)
+    saved = pfm.load(ctx)
+    edited = pfm.PerformanceValues(
+        gpu_busy_threshold=50,
+        device="cpu",
+        rescan_hours=6,
+        krunner_max_results=20,
+    )
+    ch = pfm.changes(saved, edited)
+    assert ch == {
+        "model": {"device": "cpu"},
+        "daemon": {
+            "gpu_busy_threshold": 50,
+            "rescan_hours": 6,
+            "krunner_max_results": 20,
+        },
+    }
+    update_config(ctx.config_path, ch)
+    assert read_raw(ctx.config_path) == ch
+
+    reloaded = pfm.load(ctx_for(home))
+    assert reloaded == edited
+
+    back = pfm.PerformanceValues()
+    ch_back = pfm.changes(reloaded, back)
+    assert ch_back == {
+        "model": {"device": None},
+        "daemon": {
+            "gpu_busy_threshold": None,
+            "rescan_hours": None,
+            "krunner_max_results": None,
+        },
+    }
+    update_config(ctx.config_path, ch_back)
+    assert read_raw(ctx.config_path) == {}
+
+
+def test_performance_problems(home: Path) -> None:
+    ctx = ctx_for(home)
+    assert pfm.problems(pfm.PerformanceValues(), ctx) == []
+    assert pfm.problems(pfm.PerformanceValues(device="vulkan:1"), ctx) == []
+    bad = pfm.PerformanceValues(gpu_busy_threshold=0, device="tpu", rescan_hours=0, krunner_max_results=0)
+    probs = pfm.problems(bad, ctx)
+    assert len(probs) == 4 and all(p.blocking for p in probs)
 
 
 # -- Widgets -------------------------------------------------------------------------------
@@ -317,5 +388,49 @@ def test_media_section_widget(app: QtWidgets.QApplication, home: Path) -> None:
     assert sec.changes() == {"media": {"max_minutes": None}}
     page.apply()
     assert read_raw(config_path(home)) == {}
+
+
+def test_performance_section_widget(app: QtWidgets.QApplication, home: Path) -> None:
+    config_path(home).write_text('[model]\ndevice = "vulkan:1"\n')
+    page = SettingsPage(FakeClient(status()), config_path(home), home)
+    sec = page.select("performance")
+    assert not sec.is_modified()
+    assert sec.selected_device() == "vulkan:1"
+    assert sec.device_combo.count() == 4
+
+    # Keep custom device while editing daemon fields
+    sec.gpu_busy_threshold.setValue(40)
+    sec.rescan_hours.setValue(12)
+    sec.krunner_max_results.setValue(15)
+    assert sec.is_modified()
+    assert sec.changes() == {
+        "daemon": {
+            "gpu_busy_threshold": 40,
+            "rescan_hours": 12,
+            "krunner_max_results": 15,
+        }
+    }
+    page.apply()
+    assert read_raw(config_path(home)) == {
+        "model": {"device": "vulkan:1"},
+        "daemon": {
+            "gpu_busy_threshold": 40,
+            "rescan_hours": 12,
+            "krunner_max_results": 15,
+        },
+    }
+
+    # Change device to Automatic -> removes model.device
+    sec.set_device(None)
+    assert sec.changes() == {"model": {"device": None}}
+    page.apply()
+    assert read_raw(config_path(home)) == {
+        "daemon": {
+            "gpu_busy_threshold": 40,
+            "rescan_hours": 12,
+            "krunner_max_results": 15,
+        }
+    }
+
 
 
