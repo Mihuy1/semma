@@ -12,6 +12,7 @@ import pytest
 from semma import filetypes as ft
 from semma.config_write import read_raw, update_config
 from semma.gui.settings import filetypes_model as ftm
+from semma.gui.settings import priorities_model as pm
 from semma.gui.settings.context import SettingsContext
 
 
@@ -92,11 +93,87 @@ def test_filetypes_problems(home: Path) -> None:
 
 def test_filetypes_models_do_not_import_pyside6() -> None:
     code = (
-        "import sys, semma.gui.settings.filetypes_model; "
+        "import sys, semma.gui.settings.filetypes_model, semma.gui.settings.priorities_model; "
         "bad = [m for m in sys.modules if m.startswith(('PySide6', 'shiboken6'))]; "
         "assert not bad, bad"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+# -- Priorities model ----------------------------------------------------------------------
+
+def test_priorities_load_defaults(home: Path) -> None:
+    ctx = ctx_for(home)
+    v = pm.load(ctx)
+    assert v.locations == pm.DEFAULT_LOCATIONS
+    assert v.other_location == 10
+    assert pm.changes(v, v.copy()) == {}
+
+
+def test_priorities_load_and_changes_only_diff_from_defaults(home: Path) -> None:
+    ctx = ctx_for(home)
+    saved = pm.load(ctx)
+    edited = saved.copy()
+    edited.locations["~/Documents"] = 60
+    edited.locations, msg = pm.add_location(edited.locations, str(home / "Work"), ctx, score=55)
+    assert msg is None
+    edited.other_location = 5
+
+    ch = pm.changes(saved, edited)
+    assert ch == {
+        "priority": {
+            "locations": {"~/Documents": 60, "~/Work": 55},
+            "other_location": 5,
+        }
+    }
+    update_config(ctx.config_path, ch)
+    assert read_raw(ctx.config_path) == {
+        "priority": {
+            "locations": {"~/Documents": 60, "~/Work": 55},
+            "other_location": 5,
+        }
+    }
+
+    # Reload and remove the user-added folder: config.toml replaces the old dict so ~/Work is gone
+    reloaded = pm.load(ctx_for(home))
+    assert reloaded.locations["~/Documents"] == 60
+    assert reloaded.locations["~/Work"] == 55
+    after_remove = reloaded.copy()
+    after_remove.locations = pm.remove_location(after_remove.locations, "~/Work", after_remove.defaults)
+    # Default folders cannot be removed
+    after_remove.locations = pm.remove_location(after_remove.locations, "~/Documents", after_remove.defaults)
+    assert "~/Documents" in after_remove.locations
+
+    ch2 = pm.changes(reloaded, after_remove)
+    assert ch2 == {"priority": {"locations": {"~/Documents": 60}}}
+    update_config(ctx.config_path, ch2)
+    assert read_raw(ctx.config_path) == {
+        "priority": {"locations": {"~/Documents": 60}, "other_location": 5}
+    }
+    reloaded2 = pm.load(ctx_for(home))
+    assert "~/Work" not in reloaded2.locations
+    assert reloaded2.locations["~/Documents"] == 60
+
+    # Reset to defaults -> None removes the keys from config.toml
+    reset = pm.reset_locations(reloaded2)
+    reset.other_location = pm.DEFAULT_OTHER_LOCATION
+    ch3 = pm.changes(reloaded2, reset)
+    assert ch3 == {"priority": {"locations": None, "other_location": None}}
+    update_config(ctx.config_path, ch3)
+    assert read_raw(ctx.config_path) == {}
+
+
+def test_priorities_add_duplicate_and_problems(home: Path) -> None:
+    ctx = ctx_for(home)
+    v = pm.load(ctx)
+    same, msg = pm.add_location(v.locations, str(home / "Documents"), ctx)
+    assert same == v.locations and msg == "~/Documents is in the list already."
+
+    assert pm.problems(v, ctx) == []
+    bad = v.copy()
+    bad.other_location = 120
+    probs = pm.problems(bad, ctx)
+    assert len(probs) == 1 and probs[0].blocking
 
 
 # -- Widgets -------------------------------------------------------------------------------
@@ -143,3 +220,53 @@ def test_filetypes_section_widget(app: QtWidgets.QApplication, home: Path) -> No
     assert read_raw(config_path(home)) == {
         "scan": {"kinds": ["text"], "exclude_extensions": ["md", "tif"]}
     }
+
+
+def test_priorities_section_widget(app: QtWidgets.QApplication, home: Path) -> None:
+    page = SettingsPage(FakeClient(status()), config_path(home), home)
+    sec = page.select("priorities")
+    assert not sec.is_modified()
+    assert not sec.reset_button.isEnabled()
+
+    # Selecting a default row keeps Remove disabled
+    sec.table.selectRow(0)
+    assert not sec.remove_button.isEnabled()
+
+    # Adding a custom folder enables Remove and Reset to defaults
+    sec.choose_folder = lambda _start: str(home / "Work")
+    sec.add_button.click()
+    assert sec.is_modified()
+    assert sec.remove_button.isEnabled()
+    assert sec.reset_button.isEnabled()
+
+    # Duplicate folder shows message
+    sec.add_button.click()
+    assert "already" in sec.message.text()
+
+    sec.score_spins["~/Documents"].setValue(65)
+    sec.score_spins["~/Work"].setValue(55)
+    sec.other_location.setValue(8)
+    assert sec.changes() == {
+        "priority": {
+            "locations": {"~/Documents": 65, "~/Work": 55},
+            "other_location": 8,
+        }
+    }
+    page.apply()
+    assert read_raw(config_path(home)) == {
+        "priority": {
+            "locations": {"~/Documents": 65, "~/Work": 55},
+            "other_location": 8,
+        }
+    }
+
+    # Remove the custom folder and reset defaults
+    sec.table.selectRow(sec.table.rowCount() - 1)
+    assert sec.remove_button.isEnabled()
+    sec.remove_button.click()
+    assert "~/Work" not in sec.locations()
+    sec.reset_button.click()
+    assert sec.locations() == pm.DEFAULT_LOCATIONS
+    page.apply()
+    assert read_raw(config_path(home)) == {"priority": {"other_location": 8}}
+

@@ -5,11 +5,12 @@ from __future__ import annotations
 from .base import SettingsSection, placeholder
 from .filetypes import FiletypesSection
 from .folders import FoldersSection
+from .priorities import PrioritiesSection
 
 SECTIONS: list[type[SettingsSection]] = [
     FoldersSection,
     FiletypesSection,
-    placeholder("priorities", "Priorities", "view-sort-descending"),
+    PrioritiesSection,
     placeholder("media", "Media", "applications-multimedia"),
     placeholder("performance", "Performance", "speedometer"),
 ]
