@@ -7,8 +7,8 @@ Semantic file search for KDE KRunner and GNOME Shell overview search, powered by
 ### From a package (x86-64: Fedora 41+, Ubuntu 24.04+, Debian 13+)
 
 ```sh
-sudo dnf install ./semma-0.1.0-1.x86_64.rpm     # Fedora
-sudo apt install ./semma_0.1.0-1_amd64.deb      # Ubuntu, Debian
+sudo dnf install ./semma-0.2.0-1.x86_64.rpm     # Fedora
+sudo apt install ./semma_0.2.0-1_amd64.deb      # Ubuntu, Debian
 ```
 
 Then log out and back in. The package adds Semma to the application menu, KRunner, and GNOME Shell search for every user and starts its service with the session; nothing else needs to be set up. Opening **Semma** from the application menu (or `semma gui` in a graphical session) shows the status of the model download and indexing, and the settings.
