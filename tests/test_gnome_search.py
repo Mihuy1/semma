@@ -6,8 +6,11 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import itertools
+import logging
 import os
 from pathlib import Path
+import subprocess
+import sys
 
 from dbus_fast.aio import MessageBus
 import pytest
@@ -42,12 +45,15 @@ ICON: IconData = (2, 1, 8, True, 8, 4, bytes(range(8)))
 class FakeLauncher(GnomeLauncher):
     def __init__(self) -> None:
         self.opened: list[str] = []
-
         self.spots: list[Spot | None] = []
+        self.gui_opened: int = 0
 
     async def open_file(self, path: str, spot: Spot | None = None) -> None:
         self.opened.append(path)
         self.spots.append(spot)
+
+    async def open_gui(self) -> None:
+        self.gui_opened += 1
 
 
 class FakeThumbnailer(Thumbnailer):
@@ -219,6 +225,7 @@ def test_dbus_round_trip_metas_activate_and_signatures(tmp_path: Path) -> None:
             await iface.call_activate_result(ids[1], ["rocket"], 123)
             assert launcher.opened == ["/home/user/Pictures/launch.png"]
             await iface.call_launch_search(["rocket"], 0)
+            assert launcher.gui_opened == 1
 
     asyncio.run(check())
 
@@ -528,3 +535,61 @@ def test_activate_unknown_id_opens_existing_indexable_file_only(tmp_path: Path) 
         assert launcher.opened == [str(doc)]
 
     asyncio.run(check())
+
+
+def test_launch_search_spawns_gui_detached(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_popen(argv: list[str], **kwargs: object) -> _FakeProc:
+        calls.append((argv, kwargs))
+        return _FakeProc(None)
+
+    launcher = GnomeLauncher()
+    monkeypatch.setattr(launcher, "_scope_prefix", lambda: None)
+    monkeypatch.setattr(gs.subprocess, "Popen", fake_popen)
+
+    async def check() -> None:
+        svc, _ = _service([], launcher=launcher)
+        launch = type(svc).__dict__["LaunchSearch"].__wrapped__
+        await launch(svc, ["ignored", "terms"], 42)
+
+    asyncio.run(check())
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == [sys.executable, "-m", "semma", "gui"]
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.DEVNULL
+    assert kwargs["start_new_session"] is True
+
+
+def test_launch_search_failure_logs_warning_and_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    launcher = GnomeLauncher()
+    monkeypatch.setattr(launcher, "_scope_prefix", lambda: None)
+
+    def boom_popen(*args: object, **kwargs: object) -> None:
+        raise OSError("cannot exec")
+
+    monkeypatch.setattr(gs.subprocess, "Popen", boom_popen)
+
+    async def check() -> None:
+        svc, _ = _service([], launcher=launcher)
+        launch = type(svc).__dict__["LaunchSearch"].__wrapped__
+        await launch(svc, ["rocket"], 0)
+
+        async def broken_spawn(argv: list[str]) -> bool:
+            raise RuntimeError("unexpected failure")
+
+        monkeypatch.setattr(launcher, "spawn", broken_spawn)
+        await launch(svc, [], 0)
+
+    with caplog.at_level(logging.WARNING, logger="semma.gnome_search"):
+        asyncio.run(check())
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) >= 2
+    assert any("failed to spawn" in r.message for r in warnings)
+    assert any("LaunchSearch failed" in r.message for r in warnings)

@@ -28,6 +28,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from typing import Any
 
 from dbus_fast import Variant
@@ -131,7 +132,7 @@ def gicon_string(path: str, kind: str) -> str:
 
 
 class GnomeLauncher:
-    """Opens files with the default application (``gio open``, fallback ``xdg-open``).
+    """Opens files with the default application (``gio open``, fallback ``xdg-open``) and the Semma window.
 
     The daemon runs as ``semma.service`` with ``KillMode=control-group``: anything it
     spawns directly stays in the service's cgroup and is killed by ``systemctl --user
@@ -211,6 +212,12 @@ class GnomeLauncher:
             await self.spawn([xdg_open, path])
         else:
             log.warning("neither gio nor xdg-open found: cannot open %s", path)
+
+    async def open_gui(self) -> None:
+        """Start the Semma status and settings window (``semma gui``)."""
+        argv = [sys.executable, "-m", "semma", "gui"]
+        if not await self.spawn(argv):
+            log.warning("failed to launch Semma window: %s", argv)
 
 
 class GnomeSearchService(ServiceInterface):
@@ -405,5 +412,8 @@ class GnomeSearchService(ServiceInterface):
             log.exception("ActivateResult(%r) failed", identifier)
 
     @method()
-    def LaunchSearch(self, terms: "as", timestamp: "u"):  # noqa: F821, N802, UP037
-        log.debug("LaunchSearch(%r) ignored", terms)
+    async def LaunchSearch(self, terms: "as", timestamp: "u"):  # noqa: F821, N802, UP037
+        try:
+            await self._launcher.open_gui()
+        except Exception:
+            log.warning("LaunchSearch failed", exc_info=True)
