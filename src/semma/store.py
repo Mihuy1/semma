@@ -503,6 +503,41 @@ class Store:
                               "AND coalesce(indexed_at, 0) <= ? - ? * attempts",
                               (max_attempts, now, backoff_s)).rowcount
 
+    def requeue_kinds(self, kinds: Sequence[str], min_last_position: float | None = None) -> int:
+        """Mark indexed files of these kinds pending again (chunks stay searchable until replaced).
+        `min_last_position`: only files with a chunk at or after that position (media: a file
+        whose segments reach that second)."""
+        marks = ",".join("?" * len(kinds))
+        where, args = f"status = 'indexed' AND kind IN ({marks})", list(kinds)
+        if min_last_position is not None:
+            where += " AND id IN (SELECT file_id FROM chunks WHERE position >= ?)"
+            args.append(min_last_position)
+        with self.write() as (db, _):
+            return db.execute(f"UPDATE files SET status = 'pending', error = NULL, attempts = 0 WHERE {where}",
+                              args).rowcount
+
+    def trim_positions(self, kinds: Sequence[str], max_position: float) -> int:
+        """Delete the chunks of files of these kinds at or after `max_position` (media: past a
+        shorter indexing limit). Returns the number of chunks deleted."""
+        marks = ",".join("?" * len(kinds))
+        match = (f"position >= ? AND file_id IN (SELECT id FROM files WHERE kind IN ({marks}))",
+                 [max_position, *kinds])
+        with self.write() as (db, delta):
+            files = [r[0] for r in db.execute(f"SELECT DISTINCT file_id FROM chunks WHERE {match[0]}", match[1])]
+            if not files:
+                return 0
+            deleted = db.execute(f"DELETE FROM chunks WHERE {match[0]}", match[1]).rowcount  # triggers clear vec/fts
+            # The vector cache drops whole files: re-add the chunks these files keep.
+            delta.removed_files.update(files)
+            fmarks = ",".join("?" * len(files))
+            for chunk_id, file_id, emb, modality, kind in db.execute(
+                f"SELECT c.id, c.file_id, v.embedding, c.modality, f.kind FROM chunks c "
+                f"JOIN vec_chunks v ON v.chunk_id = c.id JOIN files f ON f.id = c.file_id "
+                f"WHERE c.file_id IN ({fmarks})", files,
+            ):
+                delta.added.append((chunk_id, file_id, np.frombuffer(emb, dtype=np.float32).copy(), modality, kind))
+            return deleted
+
     # -- index ----------------------------------------------------------------
     def embedding_dim(self) -> int:
         return int(self.get_meta("embedding_dim", str(EMBEDDING_DIM)) or EMBEDDING_DIM)

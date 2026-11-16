@@ -512,8 +512,23 @@ def build_app_stylesheet(palette: QPalette) -> str:
         border-radius: 4px;
         background-color: {highlight.name()};
     }}
+    QTabWidget::tab-bar {{
+        left: 8px;
+    }}
     QTabBar::tab {{
         padding: 7px 18px;
+        margin: 4px 2px;
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+        color: {text.name()};
+    }}
+    QTabBar::tab:hover:!selected {{
+        background-color: {hover_bg};
+    }}
+    QTabBar::tab:selected {{
+        background-color: {highlight.name()};
+        color: {highlighted_text.name()};
     }}
     QPushButton {{
         min-height: 24px;

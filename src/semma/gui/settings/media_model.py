@@ -12,7 +12,7 @@ from .context import Changes, Problem, SettingsContext
 
 SECTION = "media"
 SCAN_SECTION = "scan"
-DEFAULT_MAX_MINUTES = 30
+DEFAULT_MAX_MINUTES = 60
 MIN_MAX_MINUTES = 1
 MAX_MAX_MINUTES = 720
 

@@ -51,7 +51,8 @@ class MediaSection(SettingsSection):
         bl.addLayout(row)
 
         note = QLabel(
-            "Longer limits make indexing slower. Files already indexed are not indexed again.",
+            "Longer limits make indexing slower. A longer limit re-indexes the files that were cut off; "
+            "a shorter one removes what lies past it.",
             box,
         )
         note.setWordWrap(True)

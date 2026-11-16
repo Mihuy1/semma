@@ -34,7 +34,7 @@ from typing import Any
 from dbus_fast import Variant
 from dbus_fast.service import ServiceInterface, method
 
-from . import filetypes as ft
+from . import filetypes as ft, mpris
 from .dbus_names import GNOME_INTERFACE
 from .krunner import (
     _WS_RE,
@@ -198,12 +198,21 @@ class GnomeLauncher:
         return self._spawn_detached(argv)
 
     async def open_file(self, path: str, spot: Spot | None = None) -> None:
-        """Open ``path`` with the default application; with a ``spot`` (a PDF hit's page), a
-        default viewer that can be pointed at a page is started with its page options."""
+        """Open ``path`` with the default application; with a ``spot`` (a PDF hit's page, an
+        audio/video hit's start second), a default viewer that can be pointed there is started
+        with its options. Other media players are sought over MPRIS once the file is loaded."""
         if spot is not None:
             argv = await viewer_argv(path, spot)
             if argv and await self.spawn(argv):
                 return
+        if spot is not None and spot.seconds is not None:
+            before = await mpris.snapshot()
+            await self._open_plainly(path)
+            mpris.seek_in_background(path, spot.seconds, before)
+            return
+        await self._open_plainly(path)
+
+    async def _open_plainly(self, path: str) -> None:
         gio = shutil.which("gio")
         if gio and await self.spawn([gio, "open", path]):
             return
