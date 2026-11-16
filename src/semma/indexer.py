@@ -173,6 +173,16 @@ def _error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
 
 
+def _release_extraction() -> None:
+    """Free the calling thread's extraction resources (see extract.release_thread)."""
+    try:
+        from .extract import release_thread
+
+        release_thread()
+    except Exception:  # pragma: no cover - never let cleanup fail a run
+        log.debug("releasing extraction resources failed", exc_info=True)
+
+
 class Indexer:
     def __init__(self, store: Store, cfg: Config, embedder: EmbedderLike, extract_fn: ExtractFn | None = None,
                  prefetch: bool = True):
@@ -362,6 +372,7 @@ class Indexer:
                 return
             finally:
                 self.store.release_thread()  # the queue reader's connection (one per run)
+                _release_extraction()  # the OCR engine: loaded per run, not for the daemon's life
             put((_DONE,))
 
         thread = threading.Thread(target=work, name="semma-extract", daemon=True)
@@ -526,6 +537,8 @@ class Indexer:
             close = getattr(source, "close", None)
             if close:
                 close()
+            if not self.prefetch:
+                _release_extraction()
         stats.stopped = stop.is_set()
         stats.current = ""
         report()

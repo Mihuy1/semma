@@ -68,6 +68,7 @@ import numpy as np
 
 from . import filetypes as ft
 from .config import MAX_KNN_K, Config
+from .ocr import is_screenshot
 from .store import Store
 from .vectors import chunks_version
 
@@ -326,12 +327,6 @@ def _exists(path: str) -> bool:
     return True
 
 
-def _is_screenshot(path: str) -> bool:
-    name = os.path.basename(path).casefold()
-    folder = os.path.basename(os.path.dirname(path)).casefold()
-    return name.startswith(("screenshot", "kuvakaappaus")) or folder in ("screenshots", "kuvakaappaukset")
-
-
 @dataclass
 class _Meaning:
     best: dict[int, tuple[float, float, int]]  # file_id -> (z, cosine, chunk_id) of its best chunk
@@ -498,7 +493,7 @@ class Searcher:
                 score += NAME_BONUS
             if row["kind"] in words.kinds:
                 score += TYPE_BONUS
-                if words.screenshot and row["kind"] == ft.IMAGE and _is_screenshot(row["path"]):
+                if words.screenshot and row["kind"] == ft.IMAGE and is_screenshot(row["path"]):
                     score += SCREENSHOT_BONUS
             score += cfg.location_prior * (row["priority"] / 100.0)
             scores[f] = score
