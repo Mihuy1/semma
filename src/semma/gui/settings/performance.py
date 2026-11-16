@@ -23,6 +23,9 @@ class PerformanceSection(SettingsSection):
     key = "performance"
     title = "Performance"
     icon = "speedometer"
+    icon_fallbacks = (
+        "preferences-system-symbolic", "applications-system-symbolic", "computer-symbolic", "preferences-system",
+    )
     description = "How Semma uses the graphics card, processor and background scans."
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -32,6 +35,7 @@ class PerformanceSection(SettingsSection):
         # Model & GPU group
         hw_box = QGroupBox("Graphics card and processor", self)
         hl = QVBoxLayout(hw_box)
+        hl.setSpacing(8)
 
         dev_row = QHBoxLayout()
         dev_label = QLabel("Run the model on:", hw_box)
@@ -76,6 +80,7 @@ class PerformanceSection(SettingsSection):
         # Scanning & search group
         scan_box = QGroupBox("Scanning and desktop search", self)
         sl = QVBoxLayout(scan_box)
+        sl.setSpacing(8)
 
         rescan_row = QHBoxLayout()
         rescan_prefix = QLabel("Check all folders again every", scan_box)

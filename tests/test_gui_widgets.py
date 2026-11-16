@@ -365,3 +365,410 @@ def test_close_apply_write_error_keeps_window_open(
     assert w.settings_page.is_modified()
     monkeypatch.setattr(QMessageBox, "exec", lambda self: int(QMessageBox.StandardButton.Discard))
     assert w.close() is True
+
+
+def _icon_avg_channel(icon: object, mode: object) -> tuple[float, float]:
+    """Return (weighted average luminance, average alpha) over visible pixels of a 22x22 icon."""
+    from PySide6.QtGui import QIcon, QImage
+
+    assert isinstance(icon, QIcon)
+    pm = icon.pixmap(22, 22, mode)  # type: ignore[arg-type]
+    assert not pm.isNull()
+    img = pm.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    lum_sum = 0.0
+    alpha_sum = 0
+    count = 0
+    for y in range(img.height()):
+        for x in range(img.width()):
+            c = img.pixelColor(x, y)
+            if c.alpha() > 16:
+                lum_sum += (0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()) * (c.alpha() / 255.0)
+                alpha_sum += c.alpha()
+                count += 1
+    assert count > 0
+    return lum_sum / count, alpha_sum / count
+
+
+def test_disabled_button_icons_are_muted_not_bright_white(
+    app: QtWidgets.QApplication, home: Path,
+) -> None:
+    from PySide6.QtGui import QIcon
+
+    from semma.gui import theme
+    from semma.gui.onboarding import OnboardingWindow
+
+    theme.ensure_icon_theme_paths()
+    old_pal = app.palette()
+    old_theme = QIcon.themeName()
+    try:
+        app.setPalette(theme.build_gnome_palette(dark=True))
+        if Path("/usr/share/icons/breeze-dark/index.theme").is_file():
+            QIcon.setThemeName("breeze-dark")
+        page = make_settings(home, FakeClient(status()))
+        folders = page.select("folders")
+        priorities = page.select("priorities")
+        wiz = OnboardingWindow(FakeClient(status()), config_path(home), home)
+
+        buttons = [
+            page.revert_button,
+            page.apply_button,
+            folders.roots.remove_button,
+            priorities.remove_button,
+            priorities.reset_button,
+            wiz.back_button,
+        ]
+        for btn in buttons:
+            assert not btn.isEnabled()
+            icon = btn.icon()
+            assert not icon.isNull()
+            normal_lum, normal_alpha = _icon_avg_channel(icon, QIcon.Mode.Normal)
+            disabled_lum, disabled_alpha = _icon_avg_channel(icon, QIcon.Mode.Disabled)
+            # Either luminance is noticeably darker on dark mode or alpha is significantly reduced.
+            assert disabled_lum < normal_lum - 30 or disabled_alpha < normal_alpha * 0.65, (
+                f"{btn.text()} disabled icon not muted: normal=({normal_lum:.1f}, {normal_alpha:.1f}) "
+                f"disabled=({disabled_lum:.1f}, {disabled_alpha:.1f})"
+            )
+    finally:
+        app.setPalette(old_pal)
+        QIcon.setThemeName(old_theme)
+
+
+def test_gnome_palette_has_distinct_surfaces_and_disabled_colors(app: QtWidgets.QApplication) -> None:
+    from PySide6.QtGui import QPalette
+
+    from semma.gui import theme
+
+    for dark in (True, False):
+        pal = theme.build_gnome_palette(dark=dark)
+        win = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.Window)
+        base = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.Base)
+        btn = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.Button)
+        assert win != base and win != btn and base != btn
+
+        btn_text = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.ButtonText)
+        dis_text = pal.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText)
+        assert abs(btn_text.lightness() - dis_text.lightness()) >= 80
+
+
+def test_all_settings_sections_resolve_icons_in_adwaita(
+    app: QtWidgets.QApplication, home: Path,
+) -> None:
+    from PySide6.QtGui import QIcon
+
+    from semma.gui import theme
+
+    theme.ensure_icon_theme_paths()
+    old_theme = QIcon.themeName()
+    try:
+        if Path("/usr/share/icons/Adwaita/index.theme").is_file():
+            QIcon.setThemeName("Adwaita")
+        page = make_settings(home, FakeClient(status()))
+        assert page.nav.count() == 5
+        for i in range(page.nav.count()):
+            icon = page.nav.item(i).icon()
+            assert not icon.isNull(), f"missing icon for section {page.nav.item(i).text()}"
+            assert not icon.pixmap(22, 22).isNull()
+    finally:
+        QIcon.setThemeName(old_theme)
+
+
+def test_theme_detection_and_platform_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from semma.gui import theme
+
+    assert theme.is_gnome_desktop({"XDG_CURRENT_DESKTOP": "ubuntu:GNOME"})
+    assert not theme.is_gnome_desktop({"XDG_CURRENT_DESKTOP": "KDE"})
+    assert theme.parse_gtk_font("Inter Variable  10") == ("Inter Variable", 10.0)
+    assert theme.parse_gtk_font("Adwaita Sans 11") == ("Adwaita Sans", 11.0)
+    assert theme.parse_gtk_font("") is None
+
+    monkeypatch.delenv("QT_QPA_PLATFORMTHEME", raising=False)
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "GNOME")
+    monkeypatch.setattr(theme, "has_gtk3_platform_plugin", lambda: False)
+    theme.prepare_platform_env()
+    assert os.environ["QT_QPA_PLATFORMTHEME"] == "xdgdesktopportal"
+
+    detected_dark = theme.detect_desktop_theme(
+        portal={
+            "org.freedesktop.appearance": {"color-scheme": 1, "accent-color": (0.2, 0.5, 0.9)},
+            "org.gnome.desktop.interface": {"font-name": "Adwaita Sans 11"},
+        },
+        gsettings={},
+        ini={},
+        env={"XDG_CURRENT_DESKTOP": "GNOME"},
+    )
+    assert detected_dark.is_gnome is True
+    assert detected_dark.dark is True
+    assert detected_dark.accent == (51, 128, 230)
+    assert detected_dark.font_name == "Adwaita Sans 11"
+
+    detected_light = theme.detect_desktop_theme(
+        portal={},
+        gsettings={"color-scheme": "prefer-light", "accent-color": "teal"},
+        ini={},
+        env={"XDG_CURRENT_DESKTOP": "GNOME", "GTK_THEME": "Adwaita"},
+    )
+    assert detected_light.dark is False
+    assert detected_light.accent == (33, 144, 164)
+
+
+def test_live_theme_switch_refreshes_icons_and_stylesheet(
+    app: QtWidgets.QApplication, home: Path,
+) -> None:
+    from PySide6.QtGui import QIcon
+
+    from semma.gui import theme
+    from semma.gui.onboarding import OnboardingWindow
+    from semma.gui.status_page import FailedDialog
+
+    theme.ensure_icon_theme_paths()
+    old_pal = app.palette()
+    old_css = app.styleSheet()
+    old_theme = QIcon.themeName()
+    try:
+        if Path("/usr/share/icons/Adwaita/index.theme").is_file():
+            QIcon.setThemeName("Adwaita")
+        app.setPalette(theme.build_gnome_palette(dark=False))
+        app.processEvents()
+
+        client = FakeClient(status(state="indexing", indexed=5, pending=5, failed=1,
+                                   indexed_by_kind={"text": 5}, failed_by_kind={"pdf": 1}))
+        w = MainWindow(client, config_path(home), home)
+        w.show()
+        w.status_page.error.show_message("warning", "Transient warning")
+        dialog = FailedDialog(client, home, w)
+        dialog.show()
+        wiz = OnboardingWindow(client, config_path(home), home)
+        wiz.show()
+        app.processEvents()
+
+        light_lums = {
+            "tab0": _icon_avg_channel(w.tabs.tabIcon(0), QIcon.Mode.Normal)[0],
+            "pause": _icon_avg_channel(w.status_page.pause_button.icon(), QIcon.Mode.Normal)[0],
+            "rescan": _icon_avg_channel(w.status_page.rescan_button.icon(), QIcon.Mode.Normal)[0],
+            "retry": _icon_avg_channel(w.status_page.retry_button.icon(), QIcon.Mode.Normal)[0],
+            "start": _icon_avg_channel(w.status_page.start_button.icon(), QIcon.Mode.Normal)[0],
+            "failed_retry": _icon_avg_channel(dialog.retry_button.icon(), QIcon.Mode.Normal)[0],
+            "msg_close": _icon_avg_channel(w.status_page.error._close.icon(), QIcon.Mode.Normal)[0],
+            "settings_apply": _icon_avg_channel(w.settings_page.apply_button.icon(), QIcon.Mode.Normal)[0],
+            "wiz_next": _icon_avg_channel(wiz.next_button.icon(), QIcon.Mode.Normal)[0],
+        }
+        for name, lum in light_lums.items():
+            assert lum < 100, f"{name} light icon should be dark, got lum={lum:.1f}"
+
+        # Live switch to dark palette (which triggers ApplicationPaletteChange -> stylesheet rebuild + PaletteChange)
+        app.setPalette(theme.build_gnome_palette(dark=True))
+        app.processEvents()
+
+        assert "#242424" in app.styleSheet() or "#2d2d2d" in app.styleSheet()
+        dark_lums = {
+            "tab0": _icon_avg_channel(w.tabs.tabIcon(0), QIcon.Mode.Normal)[0],
+            "pause": _icon_avg_channel(w.status_page.pause_button.icon(), QIcon.Mode.Normal)[0],
+            "rescan": _icon_avg_channel(w.status_page.rescan_button.icon(), QIcon.Mode.Normal)[0],
+            "retry": _icon_avg_channel(w.status_page.retry_button.icon(), QIcon.Mode.Normal)[0],
+            "start": _icon_avg_channel(w.status_page.start_button.icon(), QIcon.Mode.Normal)[0],
+            "failed_retry": _icon_avg_channel(dialog.retry_button.icon(), QIcon.Mode.Normal)[0],
+            "msg_close": _icon_avg_channel(w.status_page.error._close.icon(), QIcon.Mode.Normal)[0],
+            "settings_apply": _icon_avg_channel(w.settings_page.apply_button.icon(), QIcon.Mode.Normal)[0],
+            "wiz_next": _icon_avg_channel(wiz.next_button.icon(), QIcon.Mode.Normal)[0],
+        }
+        for name, lum in dark_lums.items():
+            assert lum > 180, f"{name} dark icon did not refresh to bright, got lum={lum:.1f}"
+
+        wiz._completed = True
+        wiz.close()
+        dialog.close()
+        w.close()
+    finally:
+        app.setPalette(old_pal)
+        app.setStyleSheet(old_css)
+        QIcon.setThemeName(old_theme)
+
+
+def test_priorities_spinbox_cells_and_messagebar_styling(
+    app: QtWidgets.QApplication, home: Path,
+) -> None:
+    from PySide6.QtGui import QPalette
+
+    from semma.gui import theme
+
+    old_pal = app.palette()
+    old_css = app.styleSheet()
+    try:
+        for dark in (False, True):
+            app.setPalette(theme.build_gnome_palette(dark=dark))
+            app.processEvents()
+            page = make_settings(home, FakeClient(status()))
+            priorities = page.select("priorities")
+            page.resize(800, 600)
+            page.show()
+            app.processEvents()
+
+            spin = next(iter(priorities.score_spins.values()))
+            cell = spin.parentWidget()
+            assert cell is not None and cell.objectName() == "prioritySpinCell"
+            assert cell.styleSheet().startswith("#prioritySpinCell")
+            # Child QSpinBox must keep its palette Base background, not transparent from parent stylesheet.
+            expected_base = app.palette().color(QPalette.ColorRole.Base)
+            assert spin.palette().color(QPalette.ColorRole.Base) == expected_base
+            assert priorities.table.rowHeight(0) >= spin.sizeHint().height() + 4
+            assert priorities.table.columnWidth(1) >= spin.sizeHint().width() + 12
+
+            assert page.notice.objectName() == "messageBar"
+            assert "QFrame#messageBar" in app.styleSheet()
+            assert "border-radius" in app.styleSheet()
+            page.close()
+    finally:
+        app.setPalette(old_pal)
+        app.setStyleSheet(old_css)
+
+
+def test_status_not_running_labels_are_not_clipped(app: QtWidgets.QApplication, home: Path) -> None:
+    w = MainWindow(FakeClient(None), config_path(home), home)
+    w.show()
+    w.status_page.set_status(None)
+    w.status_page.start_message.setText("The service could not be started: Unit semma.service not found.")
+    app.processEvents()
+    not_running = w.status_page.pages.widget(2)
+    for lbl in not_running.findChildren(QtWidgets.QLabel):
+        if lbl.wordWrap() and lbl.text():
+            assert lbl.height() >= lbl.heightForWidth(lbl.width())
+    w.close()
+
+
+def test_onboarding_keeps_load_error_visible(app: QtWidgets.QApplication, home: Path) -> None:
+    from semma.gui.onboarding import OnboardingWindow
+
+    cfg = config_path(home)
+    cfg.write_text("[scan\nbroken = 1\n")
+    wiz = OnboardingWindow(FakeClient(status()), cfg, home)
+    assert "cannot be read" in wiz.problems.text()
+    assert not wiz.problems.isHidden()
+    assert not wiz.next_button.isEnabled()
+    wiz._completed = True
+    wiz.close()
+
+
+def test_main_and_onboarding_share_exact_window_background_and_transparent_welcome_icon(
+    app: QtWidgets.QApplication, home: Path,
+) -> None:
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QIcon, QPalette
+
+    from semma.gui import theme
+    from semma.gui.onboarding import OnboardingWindow
+
+    theme.ensure_icon_theme_paths()
+    old_pal = app.palette()
+    old_css = app.styleSheet()
+    old_theme = QIcon.themeName()
+    try:
+        for dark, icon_theme in ((True, "breeze-dark"), (False, "breeze"), (True, "Adwaita")):
+            if Path(f"/usr/share/icons/{icon_theme}/index.theme").is_file():
+                QIcon.setThemeName(icon_theme)
+            pal = theme.build_gnome_palette(dark=dark)
+            app.setPalette(pal)
+            app.setStyleSheet(theme.build_app_stylesheet(pal))
+            app.processEvents()
+
+            expected_bg = pal.color(QPalette.ColorRole.Window)
+            client = FakeClient(status(state="indexing"))
+            w = MainWindow(client, config_path(home), home)
+            w.show()
+            app.processEvents()
+            img_status = w.grab().toImage()
+            assert img_status.pixelColor(10, 80) == expected_bg
+
+            w.tabs.setCurrentWidget(w.settings_page)
+            app.processEvents()
+            img_settings = w.grab().toImage()
+            assert img_settings.pixelColor(10, 200) == expected_bg
+            assert img_settings.pixelColor(240, 40) == expected_bg
+
+            wiz = OnboardingWindow(client, config_path(home), home)
+            wiz.show()
+            app.processEvents()
+            for page_idx in range(len(wiz._forms)):
+                wiz._show_page(page_idx)
+                app.processEvents()
+                img_wiz = wiz.grab().toImage()
+                assert img_wiz.pixelColor(10, 10) == expected_bg
+                assert img_wiz.pixelColor(10, img_wiz.height() - 10) == expected_bg
+                scroll = wiz.stack.currentWidget()
+                assert scroll is not None
+                vp_pt = scroll.mapTo(wiz, QPoint(scroll.width() - 30, 6))
+                assert img_wiz.pixelColor(vp_pt) == expected_bg
+
+            # Check _WelcomePage icon label corners have exact Window background (no dark square).
+            wiz._show_page(0)
+            app.processEvents()
+            img_welcome = wiz.grab().toImage()
+            icon_lbl = wiz.welcome._icon_label
+            for corner in (
+                QPoint(0, 0),
+                QPoint(icon_lbl.width() - 1, 0),
+                QPoint(0, icon_lbl.height() - 1),
+                QPoint(icon_lbl.width() - 1, icon_lbl.height() - 1),
+            ):
+                pt = icon_lbl.mapTo(wiz, corner)
+                assert img_welcome.pixelColor(pt) == expected_bg
+
+            wiz._completed = True
+            wiz.close()
+            w.close()
+
+        # Live switch on breeze-dark must re-tint monochrome welcome icon for light vs dark palette.
+        if Path("/usr/share/icons/breeze-dark/index.theme").is_file():
+            QIcon.setThemeName("breeze-dark")
+            app.setPalette(theme.build_gnome_palette(dark=False))
+            app.processEvents()
+            wiz = OnboardingWindow(FakeClient(status()), config_path(home), home)
+            wiz.show()
+            app.processEvents()
+            pm_light = wiz.welcome._icon_label.pixmap()
+            assert not pm_light.isNull()
+            img_light = pm_light.toImage()
+            light_lums = [
+                img_light.pixelColor(x, y).lightness()
+                for y in range(img_light.height())
+                for x in range(img_light.width())
+                if img_light.pixelColor(x, y).alpha() > 128
+            ]
+            assert light_lums and (sum(light_lums) / len(light_lums)) < 100
+
+            app.setPalette(theme.build_gnome_palette(dark=True))
+            app.processEvents()
+            pm_dark = wiz.welcome._icon_label.pixmap()
+            img_dark = pm_dark.toImage()
+            dark_lums = [
+                img_dark.pixelColor(x, y).lightness()
+                for y in range(img_dark.height())
+                for x in range(img_dark.width())
+                if img_dark.pixelColor(x, y).alpha() > 128
+            ]
+            assert dark_lums and (sum(dark_lums) / len(dark_lums)) > 180
+            wiz._completed = True
+            wiz.close()
+    finally:
+        app.setPalette(old_pal)
+        app.setStyleSheet(old_css)
+        QIcon.setThemeName(old_theme)
+
+
+def test_tinting_keeps_full_color_sizes_of_mixed_icons(app: QtWidgets.QApplication) -> None:
+    """Breeze's `folder` is monochrome at 16 px but blue at 32 px+; only the monochrome sizes get tinted."""
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QIcon
+
+    from semma.gui import theme, widgets
+
+    if not Path("/usr/share/icons/breeze/places/48/folder.svg").is_file():
+        pytest.skip("Breeze icon theme not installed")
+    theme.ensure_icon_theme_paths()
+    old_theme = QIcon.themeName()
+    try:
+        QIcon.setThemeName("breeze")
+        icon = widgets.theme_icon("folder")
+        assert widgets._is_monochrome_pixmap(icon.pixmap(QSize(16, 16)))
+        assert not widgets._is_monochrome_pixmap(icon.pixmap(QSize(48, 48)))
+    finally:
+        QIcon.setThemeName(old_theme)

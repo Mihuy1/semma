@@ -7,8 +7,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QCloseEvent, QIcon
+from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtGui import QCloseEvent, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QTabWidget, QWidget
 
 from .. import dbus_names
@@ -19,10 +19,11 @@ from .onboarding import OnboardingWindow
 from .qtasync import Relay
 from .settings.page import SettingsPage
 from .status_page import StatusPage
+from .theme import apply_desktop_theme, prepare_platform_env
 from .widgets import theme_icon
 
 APP_ID = dbus_names.GNOME_DESKTOP_ID.removesuffix(".desktop")  # io.github.Semma
-DEFAULT_SIZE = (780, 600)
+DEFAULT_SIZE = (800, 640)
 
 
 class MainWindow(QMainWindow):
@@ -41,11 +42,12 @@ class MainWindow(QMainWindow):
                 home = Path.home()
         self.tabs = QTabWidget(self)
         self.tabs.setDocumentMode(True)
+        self.tabs.setBackgroundRole(QPalette.ColorRole.Window)
         self.status_page = StatusPage(client, home, self.tabs)
         self.settings_page = SettingsPage(client, config_path, home, parent=self.tabs)
-        self.tabs.addTab(self.status_page, theme_icon("dialog-information", widget=self), "Status")
-        self.tabs.addTab(self.settings_page, theme_icon("configure", "preferences-system", "preferences-other",
-                                                        widget=self), "Settings")
+        self.tabs.addTab(self.status_page, QIcon(), "Status")
+        self.tabs.addTab(self.settings_page, QIcon(), "Settings")
+        self._apply_icons()
         self.setCentralWidget(self.tabs)
         self.resize(*DEFAULT_SIZE)
         self.activate_requested.connect(self.bring_forward)
@@ -55,6 +57,16 @@ class MainWindow(QMainWindow):
         self._in_close_event = False
         self._apply_close_result: bool | None = None
         self.settings_page.reload_finished.connect(self._on_reload_finished)
+
+    def _apply_icons(self) -> None:
+        self.tabs.setTabIcon(0, theme_icon("dialog-information-symbolic", "dialog-information", widget=self))
+        self.tabs.setTabIcon(1, theme_icon("configure", "preferences-system-symbolic", "preferences-system",
+                                            "preferences-other", widget=self))
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
+            self._apply_icons()
 
     def bring_forward(self, token: str = "") -> None:
         wizard = self._wizard
@@ -188,16 +200,18 @@ class MainWindow(QMainWindow):
 
 
 def app_icon() -> QIcon:
-    return theme_icon(APP_ID, "system-search", "edit-find")
+    return theme_icon(APP_ID, "system-search", "edit-find", monochrome=False)
 
 
 def make_app(argv: list[str] | None = None) -> QApplication:
     app = QApplication.instance()
     if app is None:
+        prepare_platform_env()
         QApplication.setApplicationName("semma")
         QApplication.setApplicationDisplayName("Semma")
         QApplication.setDesktopFileName(APP_ID)  # Wayland app_id -> io.github.Semma.desktop
         app = QApplication(argv if argv is not None else sys.argv[:1])
+        apply_desktop_theme(app)
     assert isinstance(app, QApplication)
     return app
 

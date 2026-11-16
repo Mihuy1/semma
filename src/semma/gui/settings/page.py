@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSize, Signal
-from PySide6.QtGui import QShowEvent
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtGui import QPalette, QShowEvent
 from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFrame,
@@ -49,25 +49,34 @@ class SettingsPage(QWidget):
         self._relay = Relay(self)
 
         self.nav = QListWidget(self)
+        self.nav.setObjectName("settingsNav")
+        self.nav.setFrameShape(QFrame.Shape.NoFrame)
         self.nav.setIconSize(QSize(22, 22))
         self.nav.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.stack = QStackedWidget(self)
+        self._section_classes: list[type[SettingsSection]] = list(sections or SECTIONS)
         self.sections: list[SettingsSection] = []
-        for cls in sections or SECTIONS:
+        for cls in self._section_classes:
             section = cls()
             section.edited.connect(self._update)
             self.sections.append(section)
             scroll = QScrollArea(self.stack)
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setBackgroundRole(QPalette.ColorRole.Window)
+            scroll.viewport().setBackgroundRole(QPalette.ColorRole.Window)
+            scroll.viewport().setAutoFillBackground(False)
             holder = QWidget()
             hl = QVBoxLayout(holder)
-            hl.setContentsMargins(12, 0, 4, 0)
+            hl.setContentsMargins(10, 2, 10, 8)
             hl.addWidget(section)
             scroll.setWidget(holder)
+            holder.setAutoFillBackground(False)
             self.stack.addWidget(scroll)
-            QListWidgetItem(theme_icon(cls.icon, "preferences-other", widget=self), cls.title, self.nav)
-        self.nav.setFixedWidth(max(self.nav.sizeHintForColumn(0) + 2 * self.nav.frameWidth() + 16, 150))
+            QListWidgetItem(theme_icon(cls.icon, *cls.icon_fallbacks, "preferences-other", widget=self),
+                            cls.title, self.nav)
+        self.nav.setFixedWidth(max(self.nav.sizeHintForColumn(0) + 32, 175))
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav.setCurrentRow(0)
 
@@ -87,21 +96,44 @@ class SettingsPage(QWidget):
         self.setup_button.setToolTip("Pause indexing and choose folders, file types and the processor again. "
                                      "Files already indexed are kept.")
         self.setup_button.clicked.connect(self.run_setup_again)
+        self._apply_icons()
 
         top = QHBoxLayout()
+        top.setSpacing(12)
         top.addWidget(self.nav)
         top.addWidget(self.stack, 1)
+        sep = QFrame(self)
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
         actions = QHBoxLayout()
         actions.addWidget(self.setup_button)
         actions.addStretch(1)
         actions.addWidget(self.buttons)
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(10)
         lay.addLayout(top, 1)
         lay.addWidget(self.problems_label)
         lay.addWidget(self.error)
         lay.addWidget(self.notice)
+        lay.addWidget(sep)
         lay.addLayout(actions)
         self.reload()
+
+    def _apply_icons(self) -> None:
+        for i, cls in enumerate(self._section_classes):
+            item = self.nav.item(i)
+            if item is not None:
+                item.setIcon(theme_icon(cls.icon, *cls.icon_fallbacks, "preferences-other", widget=self))
+        self.revert_button.setIcon(theme_icon("edit-undo", "document-revert", widget=self))
+        self.apply_button.setIcon(
+            theme_icon("dialog-ok-apply", "object-select-symbolic", "document-save", widget=self)
+        )
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
+            self._apply_icons()
 
     # -- loading and state ----------------------------------------------------------------
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
