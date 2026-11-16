@@ -109,7 +109,8 @@ PRIORITY_FIELDS: dict[str, str] = {
     "tiny_bytes": "priority.tiny_bytes", "tiny_penalty": "priority.tiny_penalty",
     "huge_video_bytes": "priority.huge_video_bytes", "huge_video_penalty": "priority.huge_video_penalty",
 }
-# Read when a file is indexed (or a slice starts): files indexed from then on; nothing re-indexed.
+# Read when a file is indexed (or a slice starts): files indexed from then on. A new media limit
+# or segment length also re-queues or trims indexed audio/video (Indexer.reconcile_media).
 NEXT_FILE_FIELDS: dict[str, str] = {
     "max_media_seconds": "media.max_minutes", "media_segment_seconds": "media.segment_seconds",
     "prefetch_chunks": "index.prefetch_chunks",
@@ -1145,8 +1146,15 @@ class Daemon:
     def _apply_config(self, cfg: Config) -> None:
         """On the worker, between scans and slices: every holder of the Config gets the new one
         (the next scan builds its Scanner and Scorer from it)."""
+        media_changed = (cfg.max_media_seconds != self.cfg.max_media_seconds
+                         or cfg.media_segment_seconds != self.cfg.media_segment_seconds)
         self.cfg = cfg
         self.indexer.cfg = cfg
+        if media_changed:
+            try:  # trim at once; re-queued files wake the worker's next pending check
+                self.indexer.reconcile_media()
+            except Exception:
+                log.exception("applying the new media settings to the index failed")
         self._setup_done = onboarding_done(cfg, self.store)
         if self._setup_done:
             self._logged_wait_setup = False

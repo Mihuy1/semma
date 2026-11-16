@@ -372,6 +372,27 @@ def test_live_settings_reach_every_holder_without_a_rescan(home: Path) -> None:
     asyncio.run(main())
 
 
+def test_new_media_settings_reconcile_the_index_at_once(home: Path) -> None:
+    async def main() -> None:
+        d = make_daemon(start_cfg(home))
+        d.start()
+        try:
+            await until_idle(d)
+            calls: list[float] = []
+            d.indexer.reconcile_media = lambda: calls.append(d.indexer.cfg.max_media_seconds) or 0
+            settings = base_settings(home)
+            settings["search"]["z_gate"] = 1.5
+            await reload_and_settle(d, home, settings, rescan=False)
+            assert calls == []  # media settings unchanged
+            settings["media"] = {"max_minutes": 5}
+            await reload_and_settle(d, home, settings, rescan=False)
+            await wait_until(lambda: calls == [300], what="media reconciled with the new limit")
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
 def test_reload_toggles_pause_when_gpu_busy_live(home: Path) -> None:
     from test_daemon import StubGpu
 

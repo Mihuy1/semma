@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from . import filetypes as ft
 from .config import Config
 from .store import ChunkRecord, Store
 
@@ -64,6 +65,11 @@ STORE_BACKOFF_S = 0.5
 # sooner than n * RETRY_BACKOFF_S after the last attempt. `index --retry-failed` retries now.
 AUTO_RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_S = 86_400.0
+
+# The media settings the index was built with (meta 'media_max_seconds' / 'media_segment_seconds').
+# An index from before they were recorded was built with the old 30-minute default.
+MEDIA_KINDS = (ft.AUDIO, ft.VIDEO)
+LEGACY_MEDIA_MAX_SECONDS = 30 * 60
 
 
 class ModelMismatch(RuntimeError):
@@ -206,11 +212,55 @@ class Indexer:
         if store.get_meta("extractor_version") != version:
             requeued += store.requeue(("failed",))
             store.set_meta("extractor_version", version)
+        requeued += self.reconcile_media()
         if retry_failed:
             requeued += store.requeue(("failed",), reset_attempts=False)
         else:
             requeued += store.requeue_failed_for_retry(AUTO_RETRY_ATTEMPTS, RETRY_BACKOFF_S)
         return requeued
+
+    def reconcile_media(self) -> int:
+        """Bring indexed audio/video in line with the media settings (`media.max_minutes`,
+        `media.segment_seconds`) when they differ from those the index was built with:
+
+        - a new segment length re-queues every audio/video file (all positions change);
+        - a longer limit re-queues only the files cut off at the old one (a segment reaching
+          into the last two segments before it); shorter files have nothing more to index;
+        - a shorter limit deletes the segments past it, without re-embedding anything.
+        Returns the number of files re-queued.
+        """
+        from .extract.audio import segment_seconds
+
+        store = self.store
+        limit, seg = float(self.cfg.max_media_seconds), segment_seconds(self.cfg)
+        old_limit_s, old_seg_s = store.get_meta("media_max_seconds"), store.get_meta("media_segment_seconds")
+        if old_limit_s is None or old_seg_s is None:
+            if not self._has_media_chunks():
+                old_limit_s, old_seg_s = str(limit), str(seg)  # nothing indexed yet: just record
+            else:
+                old_limit_s, old_seg_s = old_limit_s or str(LEGACY_MEDIA_MAX_SECONDS), old_seg_s or str(seg)
+        old_limit, old_seg = float(old_limit_s), float(old_seg_s)
+        requeued = trimmed = 0
+        if abs(seg - old_seg) > 1e-6:
+            requeued = store.requeue_kinds(MEDIA_KINDS)
+        elif limit > old_limit + 1e-6:
+            requeued = store.requeue_kinds(MEDIA_KINDS, min_last_position=max(0.0, old_limit - 2 * old_seg))
+        if limit < old_limit - 1e-6:
+            trimmed = store.trim_positions(MEDIA_KINDS, limit)
+        if requeued or trimmed:
+            log.info("media settings changed (limit %.0f -> %.0f s, segments %.0f -> %.0f s): "
+                     "%d audio/video files re-queued, %d segments past the limit deleted",
+                     old_limit, limit, old_seg, seg, requeued, trimmed)
+        for key, value in (("media_max_seconds", str(limit)), ("media_segment_seconds", str(seg))):
+            if store.get_meta(key) != value:
+                store.set_meta(key, value)
+        return requeued
+
+    def _has_media_chunks(self) -> bool:
+        marks = ",".join("?" * len(MEDIA_KINDS))
+        return self.store.db.execute(
+            f"SELECT 1 FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.kind IN ({marks}) LIMIT 1",
+            MEDIA_KINDS).fetchone() is not None
 
     # -- queue ----------------------------------------------------------------
     def _queue_where(self, kinds: Sequence[str] | None) -> tuple[str, list[Any]]:
