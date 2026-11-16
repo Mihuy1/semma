@@ -15,6 +15,7 @@ from gui_fakes import FakeClient, status  # noqa: E402
 from semma.config_write import read_raw  # noqa: E402
 from semma.gui.app import MainWindow, make_app  # noqa: E402
 from semma.gui.onboarding import OnboardingWindow  # noqa: E402
+from semma.gui.settings import screenshots_model as sm  # noqa: E402
 from semma.gui.settings.performance_model import DEFAULT_GPU_BUSY_THRESHOLD  # noqa: E402
 
 
@@ -81,7 +82,7 @@ def test_wizard_blocks_empty_scope_discards_on_close_and_writes_on_finish(
     wizard = OnboardingWindow(client, config_path(home), home)
     wizard.finished_ok.connect(lambda: finished.append(True))
     wizard.show()
-    for _ in range(4):
+    for _ in range(5):
         wizard.next_button.click()
     assert wizard.next_button.text() == "Start indexing"
     combo = wizard.device.device_combo
@@ -188,7 +189,7 @@ def test_closing_after_a_save_that_needs_a_restart_counts_as_finished(
     wizard.closed_early.connect(lambda: closed.append(True))
     wizard.confirm_close = lambda: pytest.fail("a saved setup must not ask")
     wizard.show()
-    for _ in range(5):
+    for _ in range(6):
         wizard.next_button.click()
     app.processEvents()
     assert wizard.next_button.text() == "Close" and finished == []
@@ -205,7 +206,7 @@ def test_wizard_gpu_busy_pause_and_threshold(
     wizard = OnboardingWindow(client, config_path(home), home)
     wizard.finished_ok.connect(lambda: finished.append(True))
     wizard.show()
-    for _ in range(4):
+    for _ in range(5):
         wizard.next_button.click()
 
     assert wizard.device.pause_when_gpu_busy.isChecked()
@@ -233,7 +234,7 @@ def test_wizard_gpu_busy_pause_and_threshold(
     wizard = OnboardingWindow(client, config_path(home), home, rerun=True)
     wizard.finished_ok.connect(lambda: finished.append(True))
     wizard.show()
-    for _ in range(4):
+    for _ in range(5):
         wizard.next_button.click()
     assert not wizard.device.pause_when_gpu_busy.isChecked()
     assert not wizard.device.gpu_busy_threshold.isEnabled()
@@ -250,3 +251,58 @@ def test_wizard_gpu_busy_pause_and_threshold(
         "onboarding_complete": True,
         "daemon": {"gpu_busy_threshold": 45},
     }
+
+
+def test_wizard_screenshots_page_position_and_save(
+    app: QtWidgets.QApplication, home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    facts = sm.OcrFacts(
+        library_available=True,
+        installed_languages=("deu", "eng", "fin"),
+        default_languages=("fin", "eng"),
+        install_hint=lambda code=None: (
+            "sudo dnf install tesseract-libs tesseract-langpack-eng"
+            if code is None
+            else f"sudo dnf install tesseract-langpack-{code}"
+        ),
+    )
+    monkeypatch.setattr(sm.OcrFacts, "detect", lambda: facts)
+
+    finished: list[bool] = []
+    client = FakeClient(status())
+    wizard = OnboardingWindow(client, config_path(home), home)
+    wizard.finished_ok.connect(lambda: finished.append(True))
+    wizard.show()
+    app.processEvents()
+
+    assert wizard.step_label.text() == "Step 1 of 6"
+    for _ in range(3):
+        wizard.next_button.click()
+    assert wizard.step_label.text() == "Step 4 of 6"
+    assert wizard.stack.currentWidget().widget() is wizard.media
+
+    wizard.next_button.click()
+    assert wizard.step_label.text() == "Step 5 of 6"
+    assert wizard.stack.currentWidget().widget() is wizard.screenshots
+    assert not wizard.screenshots.enabled_check.isChecked()
+
+    wizard.screenshots.enabled_check.setChecked(True)
+    for combo, code in zip(wizard.screenshots.language_combos, ("deu", "eng", None)):
+        for i in range(combo.count()):
+            if combo.itemData(i) == code:
+                combo.setCurrentIndex(i)
+                break
+
+    wizard.next_button.click()
+    assert wizard.step_label.text() == "Step 6 of 6"
+    assert wizard.stack.currentWidget().widget() is wizard.device
+    assert wizard.next_button.text() == "Start indexing"
+
+    wizard.next_button.click()
+    app.processEvents()
+    assert finished == [True]
+    assert read_raw(config_path(home)) == {
+        "onboarding_complete": True,
+        "ocr": {"enabled": True, "languages": ["deu", "eng"]},
+    }
+

@@ -46,6 +46,7 @@ from .settings.performance_model import PerformanceValues
 from .settings.performance_model import changes as device_changes
 from .settings.performance_model import load as load_performance
 from .settings.performance_model import problems as device_problems
+from .settings.screenshots import ScreenshotsSection
 from .widgets import scaled_font, theme_icon
 
 APP_ID = dbus_names.GNOME_DESKTOP_ID.removesuffix(".desktop")
@@ -194,8 +195,11 @@ class OnboardingWindow(QMainWindow):
         self.folders = FoldersSection()
         self.filetypes = FiletypesSection()
         self.media = MediaSection()
+        self.screenshots = ScreenshotsSection()
         self.device = _DevicePage()
-        self._forms: list[Any] = [self.welcome, self.folders, self.filetypes, self.media, self.device]
+        self._forms: list[Any] = [
+            self.welcome, self.folders, self.filetypes, self.media, self.screenshots, self.device,
+        ]
 
         self.stack = QStackedWidget(self)
         for form in self._forms:
