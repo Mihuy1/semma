@@ -5,7 +5,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QEvent, Signal
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -43,16 +44,22 @@ class FolderList(QWidget):
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
         self.list = QListWidget(self)
         self.list.setUniformItemSizes(True)
-        # About five rows: the form stays without a scroll bar at the default window size.
+        # About four rows: the form stays without a scroll bar at the default window size.
         row = max(self.list.fontMetrics().height(), self.list.iconSize().height(), 16) + 6
         self.list.setMinimumHeight(3 * row)
-        self.list.setMaximumHeight(5 * row + 2 * self.list.frameWidth())
+        self.list.setMaximumHeight(4 * row + 2 * self.list.frameWidth())
         self.list.itemSelectionChanged.connect(self._update_buttons)
         buttons = QVBoxLayout()
-        self.add_button = QPushButton(theme_icon("list-add", widget=self), add_text, self)
-        self.remove_button = QPushButton(theme_icon("list-remove", widget=self), "Remove", self)
+        buttons.setSpacing(6)
+        self.add_button = QPushButton(add_text, self)
+        self.remove_button = QPushButton("Remove", self)
+        self._apply_icons()
+        btn_w = max(self.add_button.sizeHint().width(), self.remove_button.sizeHint().width(), 96)
+        self.add_button.setMinimumWidth(btn_w)
+        self.remove_button.setMinimumWidth(btn_w)
         self.add_button.clicked.connect(self._add)
         self.remove_button.clicked.connect(self._remove)
         buttons.addWidget(self.add_button)
@@ -62,13 +69,27 @@ class FolderList(QWidget):
         lay.addLayout(buttons)
         self._update_buttons()
 
+    def _apply_icons(self) -> None:
+        self.add_button.setIcon(theme_icon("list-add", widget=self))
+        self.remove_button.setIcon(theme_icon("list-remove", widget=self))
+        folder_icon = theme_icon("folder", "folder-symbolic", widget=self)
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            if item is not None:
+                item.setIcon(folder_icon)
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
+            self._apply_icons()
+
     def folders(self) -> list[str]:
         return list(self._folders)
 
     def set_folders(self, folders: list[str]) -> None:
         self._folders = list(folders)
         self.list.clear()
-        icon = theme_icon("folder", widget=self)
+        icon = theme_icon("folder", "folder-symbolic", widget=self)
         for f in self._folders:
             item = QListWidgetItem(icon, HOME_LABEL if f == "~" else f, self.list)
             item.setToolTip(str(self.ctx.resolve(f)) if self.ctx is not None else f)
@@ -110,6 +131,7 @@ class FoldersSection(SettingsSection):
     key = "folders"
     title = "Folders"
     icon = "folder"
+    icon_fallbacks = ("folder-symbolic",)
     description = "Semma indexes the files in these folders and keeps watching them for changes."
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -118,6 +140,7 @@ class FoldersSection(SettingsSection):
 
         roots_box = QGroupBox("Indexed folders", self)
         rl = QVBoxLayout(roots_box)
+        rl.setSpacing(6)
         self.roots = FolderList("Add…", "Choose a folder to index", roots_box)
         rl.addWidget(self.roots)
         self.include_mounts = QCheckBox("Also index external drives (mounted under /mnt, /media and /run/media)",
@@ -126,8 +149,10 @@ class FoldersSection(SettingsSection):
 
         skip_box = QGroupBox("Skipped folders", self)
         sl = QVBoxLayout(skip_box)
+        sl.setSpacing(6)
         hint = QLabel("Files in these folders and the folders inside them are not indexed.", skip_box)
         hint.setWordWrap(True)
+        hint.setForegroundRole(QPalette.ColorRole.PlaceholderText)
         sl.addWidget(hint)
         self.excludes = FolderList("Add…", "Choose a folder to skip", skip_box)
         sl.addWidget(self.excludes)

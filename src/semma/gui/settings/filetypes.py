@@ -22,6 +22,7 @@ class FiletypesSection(SettingsSection):
     key = "filetypes"
     title = "File types"
     icon = "document-multiple"
+    icon_fallbacks = ("x-office-document-symbolic", "folder-documents-symbolic", "x-office-document", "text-x-generic")
     description = (
         "Choose which kinds of files Semma indexes. "
         "Turning a file type off removes its files from the index."
@@ -33,11 +34,11 @@ class FiletypesSection(SettingsSection):
 
         kinds_box = QGroupBox("Indexed file types", self)
         kl = QVBoxLayout(kinds_box)
-        kl.setSpacing(2)
+        kl.setSpacing(5)
         self.kind_checks: dict[str, QCheckBox] = {}
         for kind in ft.KINDS:
             item = QVBoxLayout()
-            item.setSpacing(0)
+            item.setSpacing(1)
             cb = QCheckBox(ftm.KIND_NAMES[kind], kinds_box)
             cb.toggled.connect(self._edited)
             self.kind_checks[kind] = cb
@@ -51,11 +52,13 @@ class FiletypesSection(SettingsSection):
 
         skip_box = QGroupBox("Skipped extensions", self)
         sl = QVBoxLayout(skip_box)
+        sl.setSpacing(8)
         hint = QLabel(
             "Files with these extensions are not indexed (separated by commas or spaces).",
             skip_box,
         )
         hint.setWordWrap(True)
+        hint.setForegroundRole(QPalette.ColorRole.PlaceholderText)
         sl.addWidget(hint)
         self.exclude_extensions = QLineEdit(skip_box)
         self.exclude_extensions.setPlaceholderText("e.g. md, tif, mov")

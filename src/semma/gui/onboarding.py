@@ -13,12 +13,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QCloseEvent, QShowEvent
+from PySide6.QtCore import QEvent, QTimer, Qt, Signal
+from PySide6.QtGui import QCloseEvent, QPalette, QShowEvent
 from PySide6.QtWidgets import (
-    QComboBox,
     QFrame,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -43,8 +41,10 @@ from .settings.folders import FoldersSection
 from .settings.folders_model import NOTHING_INDEXED
 from .settings.media import MediaSection
 from .settings.page import RESTART_NOTICE
+from .settings.performance import GraphicsCardGroup
+from .settings.performance_model import PerformanceValues
 from .settings.performance_model import changes as device_changes
-from .settings.performance_model import device_choices, load as load_performance, normalise_device
+from .settings.performance_model import load as load_performance
 from .settings.performance_model import problems as device_problems
 from .widgets import scaled_font, theme_icon
 
@@ -59,8 +59,22 @@ class _WelcomePage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         lay = QVBoxLayout(self)
-        title = QLabel("Welcome", self)
-        title.setFont(scaled_font(self, 1.25, bold=True))
+        lay.setContentsMargins(0, 8, 0, 0)
+        lay.setSpacing(14)
+
+        header = QHBoxLayout()
+        header.setSpacing(14)
+        self._icon_label = QLabel(self)
+        self._icon_label.setAutoFillBackground(False)
+        self._icon_label.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._icon_label.setStyleSheet("background: transparent;")
+        self._apply_icons()
+        header.addWidget(self._icon_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        title = QLabel("Welcome to Semma", self)
+        title.setFont(scaled_font(self, 1.45, bold=True))
+        header.addWidget(title, 1, Qt.AlignmentFlag.AlignVCenter)
+        lay.addLayout(header)
+
         body = QLabel(
             "Semma searches your files by meaning, from KRunner and the GNOME overview.\n\n"
             "The model downloads in the background. Indexing starts when you finish these steps. "
@@ -68,9 +82,18 @@ class _WelcomePage(QWidget):
             self,
         )
         body.setWordWrap(True)
-        lay.addWidget(title)
         lay.addWidget(body)
         lay.addStretch(1)
+
+    def _apply_icons(self) -> None:
+        icon_pm = theme_icon(APP_ID, "system-search", "edit-find", widget=self).pixmap(56, 56)
+        self._icon_label.setPixmap(icon_pm)
+        self._icon_label.setVisible(not icon_pm.isNull())
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
+            self._apply_icons()
 
     def load(self, _ctx: SettingsContext) -> None:
         return None
@@ -83,7 +106,7 @@ class _WelcomePage(QWidget):
 
 
 class _DevicePage(QWidget):
-    """Only the model device. The rest of Performance stays on the Settings page."""
+    """Model device and GPU-busy pause settings. The rest of Performance stays on Settings."""
 
     key = "device"
     edited = Signal()
@@ -91,69 +114,52 @@ class _DevicePage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.ctx: SettingsContext | None = None
-        self._saved_values = None
+        self._saved_values: PerformanceValues | None = None
         lay = QVBoxLayout(self)
-        title = QLabel("Device", self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
+        title = QLabel("Performance", self)
         title.setFont(scaled_font(self, 1.25, bold=True))
         desc = QLabel(
-            "Where the model runs. Automatic uses the graphics card when one is available, "
-            "and the processor otherwise. This is the same setting as Settings → Performance.",
+            "Where the model runs and whether indexing pauses while other programs use the graphics card. "
+            "These are the same settings as Settings → Performance.",
             self,
         )
         desc.setWordWrap(True)
-        box = QGroupBox("Graphics card and processor", self)
-        bl = QVBoxLayout(box)
-        row = QHBoxLayout()
-        label = QLabel("Run the model on:", box)
-        self.device_combo = QComboBox(box)
-        self.device_combo.currentIndexChanged.connect(self.edited.emit)
-        label.setBuddy(self.device_combo)
-        row.addWidget(label)
-        row.addWidget(self.device_combo)
-        row.addStretch(1)
-        bl.addLayout(row)
-        note = QLabel(
+        desc.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+        self.box = GraphicsCardGroup(
             "Applied before the model is loaded. If it is already loaded, the service needs a restart.",
-            box,
+            self,
         )
-        note.setWordWrap(True)
-        bl.addWidget(note)
+        self.device_combo = self.box.device_combo
+        self.pause_when_gpu_busy = self.box.pause_when_gpu_busy
+        self.gpu_busy_label = self.box.gpu_busy_label
+        self.gpu_busy_threshold = self.box.gpu_busy_threshold
+        self.box.edited.connect(self.edited)
         lay.addWidget(title)
         lay.addWidget(desc)
-        lay.addWidget(box)
+        lay.addWidget(self.box)
         lay.addStretch(1)
 
     def load(self, ctx: SettingsContext) -> None:
         self.ctx = ctx
         saved = load_performance(ctx)
         self._saved_values = saved
-        self.device_combo.blockSignals(True)
-        self.device_combo.clear()
-        norm = normalise_device(saved.device)
-        selected = 0
-        for idx, (label, value) in enumerate(device_choices(saved.device)):
-            self.device_combo.addItem(label, value)
-            if value == norm:
-                selected = idx
-        self.device_combo.setCurrentIndex(selected)
-        self.device_combo.blockSignals(False)
+        self.box.load(saved)
 
-    def _device(self) -> str | None:
-        return normalise_device(self.device_combo.currentData())
+    def _edited_values(self) -> PerformanceValues:
+        assert self._saved_values is not None
+        return self.box.apply_to(self._saved_values)
 
     def changes(self) -> dict[str, dict[str, Any]]:
         if self._saved_values is None:
             return {}
-        edited = self._saved_values.copy()
-        edited.device = self._device()
-        return device_changes(self._saved_values, edited)
+        return device_changes(self._saved_values, self._edited_values())
 
     def problems(self) -> list[Any]:
         if self._saved_values is None or self.ctx is None:
             return []
-        edited = self._saved_values.copy()
-        edited.device = self._device()
-        return device_problems(edited, self.ctx)
+        return device_problems(self._edited_values(), self.ctx)
 
 
 class OnboardingWindow(QMainWindow):
@@ -174,11 +180,15 @@ class OnboardingWindow(QMainWindow):
         self._awaiting_restart = False
         self._index = 0
         self._in_flight = False
+        self._load_error = ""
         self.ctx: SettingsContext | None = None
 
         self.setWindowTitle("Semma setup")
-        self.setWindowIcon(theme_icon(APP_ID, "system-search", "edit-find"))
-        self.resize(780, 600)
+        self.setWindowIcon(theme_icon(APP_ID, "system-search", "edit-find", monochrome=False))
+        self.resize(800, 640)
+
+        self.step_label = QLabel(self)
+        self.step_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
 
         self.welcome = _WelcomePage()
         self.folders = FoldersSection()
@@ -194,7 +204,12 @@ class OnboardingWindow(QMainWindow):
             scroll = QScrollArea(self.stack)
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setBackgroundRole(QPalette.ColorRole.Window)
+            scroll.viewport().setBackgroundRole(QPalette.ColorRole.Window)
+            scroll.viewport().setAutoFillBackground(False)
             scroll.setWidget(form)
+            form.setAutoFillBackground(False)
             self.stack.addWidget(scroll)
 
         self.problems = QLabel(self)
@@ -208,12 +223,14 @@ class OnboardingWindow(QMainWindow):
 
         self.footer_label = QLabel(self)
         self.footer_label.setWordWrap(True)
+        self.footer_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
         self.footer_bar = QProgressBar(self)
         self.footer_bar.setTextVisible(False)
-        self.start_button = QPushButton(theme_icon("media-playback-start", widget=self), "Start service", self)
+        self.start_button = QPushButton("Start service", self)
         self.start_button.clicked.connect(self._start_service)
         self.start_button.hide()
         footer = QVBoxLayout()
+        footer.setSpacing(6)
         footer.addWidget(self.footer_label)
         bar_row = QHBoxLayout()
         bar_row.addWidget(self.footer_bar, 1)
@@ -225,12 +242,16 @@ class OnboardingWindow(QMainWindow):
         self.back_button.clicked.connect(self._back)
         self.next_button.clicked.connect(self._next)
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         buttons.addStretch(1)
         buttons.addWidget(self.back_button)
         buttons.addWidget(self.next_button)
 
         central = QWidget(self)
         lay = QVBoxLayout(central)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(10)
+        lay.addWidget(self.step_label)
         lay.addWidget(self.stack, 1)
         lay.addWidget(self.problems)
         lay.addWidget(self.notice)
@@ -322,8 +343,11 @@ class OnboardingWindow(QMainWindow):
             self.ctx = SettingsContext.load(self.config_path, self.home)
         except ConfigWriteError as exc:
             self.ctx = None
-            self.problems.setText(f"The settings cannot be read: {exc}")
+            self._load_error = f"The settings cannot be read: {exc}"
+            self.problems.setText(self._load_error)
+            self.problems.show()
             return
+        self._load_error = ""
         for form in self._forms:
             form.load(self.ctx)
 
@@ -345,7 +369,24 @@ class OnboardingWindow(QMainWindow):
     def _show_page(self, index: int) -> None:
         self._index = index
         self.stack.setCurrentIndex(index)
+        self.step_label.setText(f"Step {index + 1} of {len(self._forms)}")
         self._update_buttons()
+
+    def _apply_icons(self) -> None:
+        self.start_button.setIcon(theme_icon("media-playback-start", widget=self))
+        self.back_button.setIcon(theme_icon("go-previous", widget=self))
+        last = self._index == len(self._forms) - 1
+        if self._awaiting_restart:
+            self.next_button.setIcon(theme_icon("window-close", widget=self))
+        elif last:
+            self.next_button.setIcon(theme_icon("media-playback-start", widget=self))
+        else:
+            self.next_button.setIcon(theme_icon("go-next", widget=self))
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
+            self._apply_icons()
 
     def _update_buttons(self) -> None:
         last = self._index == len(self._forms) - 1
@@ -358,9 +399,14 @@ class OnboardingWindow(QMainWindow):
             self.next_button.setText("Start indexing")
         else:
             self.next_button.setText("Next")
-        texts = [p.text for p in self._page_problems()]
-        self.problems.setText("\n".join(texts))
-        self.problems.setVisible(bool(texts))
+        self._apply_icons()
+        if self._load_error:
+            self.problems.setText(self._load_error)
+            self.problems.setVisible(True)
+        else:
+            texts = [p.text for p in self._page_problems()]
+            self.problems.setText("\n".join(texts))
+            self.problems.setVisible(bool(texts))
 
     def _back(self) -> None:
         if self._index > 0 and not self._saving:

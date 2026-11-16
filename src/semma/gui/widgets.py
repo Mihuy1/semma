@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QFontMetrics, QIcon, QPalette, QResizeEvent
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QImage, QPainter, QPalette, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -30,22 +31,177 @@ _STANDARD_ICONS = {
     "list-remove": QStyle.StandardPixmap.SP_TrashIcon,
     "document-save": QStyle.StandardPixmap.SP_DialogApplyButton,
     "edit-undo": QStyle.StandardPixmap.SP_DialogResetButton,
+    "go-previous": QStyle.StandardPixmap.SP_ArrowBack,
+    "go-next": QStyle.StandardPixmap.SP_ArrowForward,
 }
 
+# Icons that carry semantic/brand colors and should not be forced to symbolic variants.
+_COLORFUL_ICONS = frozenset({
+    "io.github.Semma",
+    "system-search",
+    "folder",
+    "dialog-information",
+    "dialog-warning",
+    "dialog-error",
+})
 
-def theme_icon(name: str, *fallbacks: str, widget: QWidget | None = None) -> QIcon:
-    """The desktop theme's icon `name` (or the first fallback the theme has), else Qt's own."""
-    for n in (name, *fallbacks):
+_ICON_SIZES = (16, 22, 24, 32, 48, 64)
+
+
+def _is_monochrome_pixmap(pm: QPixmap) -> bool:
+    """True when every visible pixel in `pm` is near-achromatic (chroma <= 25).
+
+    Large pixmaps are scaled down first so the per-pixel Python loop stays cheap; chroma survives
+    smooth scaling well enough to tell a symbolic glyph from a full-color icon.
+    """
+    if pm.isNull():
+        return False
+    img = pm.toImage()
+    if img.width() > 24 or img.height() > 24:
+        img = img.scaled(24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    # RGBA8888 is byte-ordered R, G, B, A on every platform (ARGB32 depends on endianness).
+    img = img.convertToFormat(QImage.Format.Format_RGBA8888)
+    raw = bytes(img.constBits())
+    stride = img.bytesPerLine()
+    row_bytes = img.width() * 4
+    has_opaque = False
+    for y in range(img.height()):
+        start = y * stride
+        for i in range(start, start + row_bytes, 4):
+            if raw[i + 3] <= 16:
+                continue
+            has_opaque = True
+            r, g, b = raw[i], raw[i + 1], raw[i + 2]
+            if max(r, g, b) - min(r, g, b) > 25:
+                return False
+    return has_opaque
+
+
+def _tint_pixmap(pm: QPixmap, color: QColor) -> QPixmap:
+    out = QPixmap(pm.size())
+    out.setDevicePixelRatio(pm.devicePixelRatio())
+    out.fill(Qt.GlobalColor.transparent)
+    logical = QRect(QPoint(0, 0), pm.deviceIndependentSize().toSize())
+    painter = QPainter(out)
+    painter.drawPixmap(0, 0, pm)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(logical, color)
+    painter.end()
+    return out
+
+
+def _dim_pixmap(pm: QPixmap, opacity: float = 0.4) -> QPixmap:
+    out = QPixmap(pm.size())
+    out.setDevicePixelRatio(pm.devicePixelRatio())
+    out.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(out)
+    painter.setOpacity(opacity)
+    painter.drawPixmap(0, 0, pm)
+    painter.end()
+    return out
+
+
+def _effective_palette(widget: QWidget | None = None) -> QPalette:
+    if widget is not None:
+        return widget.palette()
+    app = QApplication.instance()
+    return app.palette() if isinstance(app, QApplication) else QPalette()
+
+
+def tinted_icon(
+    icon: QIcon,
+    palette: QPalette | None = None,
+    *,
+    monochrome: bool | None = None,
+) -> QIcon:
+    """Return a copy of `icon` with proper Normal/Active/Disabled/Selected pixmaps.
+
+    Monochrome/symbolic icons are tinted to ButtonText (Normal/Active), Disabled ButtonText
+    (Disabled), and HighlightedText (Selected). Colorful icons keep their Normal colors and
+    get a translucent Disabled pixmap.
+    """
+    if icon.isNull():
+        return icon
+    pal = palette if palette is not None else _effective_palette()
+
+    normal_color = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.ButtonText)
+    disabled_color = QColor(pal.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText))
+    if disabled_color.alpha() == 255 and abs(normal_color.lightness() - disabled_color.lightness()) < 40:
+        disabled_color.setAlphaF(0.45)
+    selected_color = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.HighlightedText)
+
+    out = QIcon()
+    for sz in _ICON_SIZES:
+        for dpr in (1.0, 2.0):
+            pm = icon.pixmap(QSize(sz, sz), dpr, QIcon.Mode.Normal, QIcon.State.Off)
+            if pm.isNull():
+                continue
+            # Decide per pixmap: themes such as Breeze ship monochrome 16-24 px icons but full-color
+            # 32 px+ ones under the same name, and tinting those would flatten them into silhouettes.
+            is_mono = monochrome if monochrome is not None else _is_monochrome_pixmap(pm)
+            if is_mono:
+                normal_pm = _tint_pixmap(pm, normal_color)
+                disabled_pm = _tint_pixmap(pm, disabled_color)
+                selected_pm = _tint_pixmap(pm, selected_color)
+                out.addPixmap(normal_pm, QIcon.Mode.Normal)
+                out.addPixmap(normal_pm, QIcon.Mode.Active)
+                out.addPixmap(disabled_pm, QIcon.Mode.Disabled)
+                out.addPixmap(selected_pm, QIcon.Mode.Selected)
+            else:
+                out.addPixmap(pm, QIcon.Mode.Normal)
+                out.addPixmap(pm, QIcon.Mode.Active)
+                out.addPixmap(_dim_pixmap(pm), QIcon.Mode.Disabled)
+                out.addPixmap(pm, QIcon.Mode.Selected)
+    return out if not out.isNull() else icon
+
+
+def _resolve_theme_icon(name: str, *fallbacks: str, widget: QWidget | None = None) -> tuple[QIcon, str | None]:
+    names = (name, *fallbacks)
+    theme_lower = QIcon.themeName().lower()
+    prefer_symbolic = theme_lower.startswith("adwaita")
+
+    if prefer_symbolic:
+        for n in names:
+            if n in _COLORFUL_ICONS:
+                if QIcon.hasThemeIcon(n):
+                    return QIcon.fromTheme(n), n
+                continue
+            sym = n if n.endswith("-symbolic") else f"{n}-symbolic"
+            if QIcon.hasThemeIcon(sym):
+                return QIcon.fromTheme(sym), sym
+
+    for n in names:
         if QIcon.hasThemeIcon(n):
-            return QIcon.fromTheme(n)
-    for n in (name, *fallbacks):
+            return QIcon.fromTheme(n), n
+
+    for n in names:
+        if not n.endswith("-symbolic"):
+            sym = f"{n}-symbolic"
+            if QIcon.hasThemeIcon(sym):
+                return QIcon.fromTheme(sym), sym
+
+    for n in names:
         if n in _STANDARD_ICONS:
-            style = widget.style() if widget is not None else None
-            if style is None:
-                from PySide6.QtWidgets import QApplication
-                style = QApplication.style()
-            return style.standardIcon(_STANDARD_ICONS[n])
-    return QIcon()
+            style = widget.style() if widget is not None else QApplication.style()
+            if style is not None:
+                return style.standardIcon(_STANDARD_ICONS[n]), n
+
+    return QIcon(), None
+
+
+def theme_icon(
+    name: str,
+    *fallbacks: str,
+    widget: QWidget | None = None,
+    monochrome: bool | None = None,
+) -> QIcon:
+    """The desktop theme's icon `name` (or the first fallback the theme has), tinted for the active palette."""
+    icon, resolved = _resolve_theme_icon(name, *fallbacks, widget=widget)
+    if icon.isNull():
+        return icon
+    if monochrome is None and resolved is not None and resolved.endswith("-symbolic"):
+        monochrome = True
+    return tinted_icon(icon, _effective_palette(widget), monochrome=monochrome)
 
 
 def scaled_font(widget: QWidget, factor: float, bold: bool = False) -> QFont:
@@ -96,11 +252,13 @@ class MessageBar(QFrame):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("messageBar")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setAutoFillBackground(True)
         self.setBackgroundRole(QPalette.ColorRole.AlternateBase)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 6, 6, 6)
+        lay.setContentsMargins(10, 8, 8, 8)
+        lay.setSpacing(8)
         self._icon = QLabel(self)
         self._text = QLabel(self)
         self._text.setWordWrap(True)
@@ -109,7 +267,6 @@ class MessageBar(QFrame):
         self._action = QPushButton(self)
         self._close = QToolButton(self)
         self._close.setAutoRaise(True)
-        self._close.setIcon(theme_icon("window-close", widget=self))
         self._close.setToolTip("Close")
         self._close.clicked.connect(self.clear)
         lay.addWidget(self._icon, 0, Qt.AlignmentFlag.AlignTop)
@@ -119,13 +276,28 @@ class MessageBar(QFrame):
         self._callback: Callable[[], None] | None = None
         self._action.clicked.connect(self._on_action)
         self.kind = ""
+        self._apply_icons()
         self.clear()
+
+    def _apply_icons(self) -> None:
+        if not hasattr(self, "_close"):
+            return
+        self._close.setIcon(theme_icon("window-close", widget=self))
+        if self.kind:
+            size = self.style().pixelMetric(QStyle.PixelMetric.PM_SmallIconSize)
+            self._icon.setPixmap(
+                theme_icon(self.ICONS.get(self.kind, "dialog-information"), widget=self).pixmap(size, size)
+            )
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
+            self._apply_icons()
 
     def show_message(self, kind: str, text: str, action: str = "",
                      callback: Callable[[], None] | None = None) -> None:
         self.kind = kind
-        size = self.style().pixelMetric(QStyle.PixelMetric.PM_SmallIconSize)
-        self._icon.setPixmap(theme_icon(self.ICONS.get(kind, "dialog-information"), widget=self).pixmap(size, size))
+        self._apply_icons()
         self._text.setText(text)
         self._action.setText(action)
         self._action.setVisible(bool(action))

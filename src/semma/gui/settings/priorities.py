@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -31,6 +31,7 @@ class PrioritiesSection(SettingsSection):
     key = "priorities"
     title = "Priorities"
     icon = "view-sort-descending"
+    icon_fallbacks = ("view-sort-descending-symbolic", "starred-symbolic", "starred")
     description = "Folders with a higher score are indexed first and win ties in search results."
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -44,8 +45,10 @@ class PrioritiesSection(SettingsSection):
 
         folders_box = QGroupBox("Folder scores", self)
         fl = QVBoxLayout(folders_box)
+        fl.setSpacing(10)
 
         table_row = QHBoxLayout()
+        table_row.setSpacing(10)
         self.table = QTableWidget(0, 2, folders_box)
         self.table.setHorizontalHeaderLabels(["Folder", "Score (0–100)"])
         self.table.verticalHeader().setVisible(False)
@@ -56,16 +59,31 @@ class PrioritiesSection(SettingsSection):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(1, 110)
-        row_h = max(self.table.fontMetrics().height() + 12, 28)
-        self.table.verticalHeader().setDefaultSectionSize(row_h)
-        self.table.setMinimumHeight(8 * row_h + header.sizeHint().height() + 2 * self.table.frameWidth() + 4)
+        spin_probe = QSpinBox(self.table)
+        spin_probe.hide()
+        spin_probe.setRange(pm.MIN_SCORE, pm.MAX_SCORE)
+        spin_probe.ensurePolished()
+        spin_sh = spin_probe.sizeHint()
+        spin_probe.setParent(None)
+        spin_probe.deleteLater()
+        self.table.setColumnWidth(1, max(120, spin_sh.width() + 24, header.sectionSizeHint(1) + 16))
+        self._row_h = max(self.table.fontMetrics().height() + 14, spin_sh.height() + 8, 34)
+        self.table.verticalHeader().setDefaultSectionSize(self._row_h)
         self.table.itemSelectionChanged.connect(self._update_buttons)
 
         buttons = QVBoxLayout()
-        self.add_button = QPushButton(theme_icon("list-add", widget=self), "Add…", folders_box)
-        self.remove_button = QPushButton(theme_icon("list-remove", widget=self), "Remove", folders_box)
-        self.reset_button = QPushButton(theme_icon("edit-undo", widget=self), "Reset to defaults", folders_box)
+        buttons.setSpacing(6)
+        self.add_button = QPushButton("Add…", folders_box)
+        self.remove_button = QPushButton("Remove", folders_box)
+        self.reset_button = QPushButton("Reset to defaults", folders_box)
+        self._apply_icons()
+        btn_w = max(
+            self.add_button.sizeHint().width(),
+            self.remove_button.sizeHint().width(),
+            self.reset_button.sizeHint().width(),
+        )
+        for btn in (self.add_button, self.remove_button, self.reset_button):
+            btn.setMinimumWidth(btn_w)
         self.add_button.clicked.connect(self._add)
         self.remove_button.clicked.connect(self._remove)
         self.reset_button.clicked.connect(self.reset_to_defaults)
@@ -77,6 +95,7 @@ class PrioritiesSection(SettingsSection):
         table_row.addWidget(self.table, 1)
         table_row.addLayout(buttons)
         fl.addLayout(table_row)
+        fl.addSpacing(6)
 
         other_row = QHBoxLayout()
         other_label = QLabel("Other folders:", folders_box)
@@ -95,7 +114,33 @@ class PrioritiesSection(SettingsSection):
 
         self.body.addWidget(folders_box)
         self.body.addWidget(self.message)
+        self._fit_table_height()
         self._update_buttons()
+
+    def _apply_icons(self) -> None:
+        self.add_button.setIcon(theme_icon("list-add", widget=self))
+        self.remove_button.setIcon(theme_icon("list-remove", widget=self))
+        self.reset_button.setIcon(theme_icon("edit-undo", widget=self))
+        folder_icon = theme_icon("folder", "folder-symbolic", widget=self)
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None:
+                item.setIcon(folder_icon)
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
+            self._apply_icons()
+
+    def _fit_table_height(self) -> None:
+        header_h = max(self.table.horizontalHeader().sizeHint().height(), 28)
+        visible_rows = min(max(len(self._folders), 1), 10)
+        h = visible_rows * self._row_h + header_h + 2 * self.table.frameWidth() + 2
+        self.table.setMinimumHeight(h)
+        if len(self._folders) <= 10:
+            self.table.setMaximumHeight(h)
+        else:
+            self.table.setMaximumHeight(10 * self._row_h + header_h + 2 * self.table.frameWidth() + 2)
 
     def load(self, ctx: SettingsContext) -> None:
         super().load(ctx)
@@ -113,7 +158,7 @@ class PrioritiesSection(SettingsSection):
         self.score_spins.clear()
         self.table.setRowCount(0)
         self.table.setRowCount(len(self._folders))
-        icon = theme_icon("folder", widget=self)
+        icon = theme_icon("folder", "folder-symbolic", widget=self)
         for row, (folder, score) in enumerate(locations.items()):
             label = HOME_LABEL if folder == "~" else folder
             item = QTableWidgetItem(icon, label)
@@ -122,12 +167,20 @@ class PrioritiesSection(SettingsSection):
             item.setToolTip(str(self.ctx.resolve(folder)) if self.ctx is not None else folder)
             self.table.setItem(row, 0, item)
 
-            spin = QSpinBox(self.table)
+            cell = QWidget(self.table)
+            cell.setObjectName("prioritySpinCell")
+            cell.setAutoFillBackground(False)
+            cell.setStyleSheet("#prioritySpinCell { background: transparent; }")
+            spin = QSpinBox(cell)
             spin.setRange(pm.MIN_SCORE, pm.MAX_SCORE)
             spin.setValue(pm.clamp_score(score))
             spin.valueChanged.connect(self._on_score_changed)
-            self.table.setCellWidget(row, 1, spin)
+            cl = QHBoxLayout(cell)
+            cl.setContentsMargins(6, 3, 6, 3)
+            cl.addWidget(spin)
+            self.table.setCellWidget(row, 1, cell)
             self.score_spins[folder] = spin
+        self._fit_table_height()
         self._update_buttons()
 
     def locations(self) -> dict[str, int]:

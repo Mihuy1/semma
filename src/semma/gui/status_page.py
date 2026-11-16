@@ -6,11 +6,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QHideEvent, QPalette, QShowEvent
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -59,7 +60,7 @@ class FailedDialog(QDialog):
         self.message = MessageBar(self)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, self)
         self.retry_button = self.buttons.addButton("Retry failed", QDialogButtonBox.ButtonRole.ActionRole)
-        self.retry_button.setIcon(theme_icon("view-refresh", widget=self))
+        self._apply_icons()
         self.retry_button.setEnabled(False)
         self.retry_button.clicked.connect(self.retry)
         self.buttons.rejected.connect(self.reject)
@@ -68,6 +69,14 @@ class FailedDialog(QDialog):
         lay.addWidget(self.message)
         lay.addWidget(self.buttons)
         self.load()
+
+    def _apply_icons(self) -> None:
+        self.retry_button.setIcon(theme_icon("view-refresh", widget=self))
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
+            self._apply_icons()
 
     def load(self) -> None:
         self.summary.setText("Loading…")
@@ -125,6 +134,7 @@ class StatusPage(QWidget):
         self.pages.addWidget(self._build_waiting())
         self.pages.addWidget(self._build_running())
         self.pages.addWidget(self._build_not_running())
+        self._apply_icons()
         self.error = MessageBar(self)
         lay = QVBoxLayout(self)
         lay.addWidget(self.error)
@@ -142,43 +152,53 @@ class StatusPage(QWidget):
     def _build_running(self) -> QWidget:
         w = QWidget(self)
         lay = QVBoxLayout(w)
-        lay.setSpacing(6)
+        lay.setContentsMargins(20, 18, 20, 18)
+        lay.setSpacing(12)
 
-        self.headline = QLabel(w)
+        summary_card = QFrame(w)
+        summary_card.setObjectName("statusSummaryCard")
+        sl = QVBoxLayout(summary_card)
+        sl.setContentsMargins(16, 14, 16, 14)
+        sl.setSpacing(8)
+
+        self.headline = QLabel(summary_card)
         self.headline.setFont(scaled_font(self, 1.35, bold=True))
         self.headline.setWordWrap(True)
         self.headline.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.progress = QProgressBar(w)
+        self.progress = QProgressBar(summary_card)
         self.progress.setTextVisible(False)
-        self.detail = ElidedLabel("", w)
-        self.secondary = QLabel(w)
+        self.detail = ElidedLabel("", summary_card)
+        self.secondary = QLabel(summary_card)
         for label in (self.detail, self.secondary):
             label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-        lay.addWidget(self.headline)
-        lay.addWidget(self.progress)
-        lay.addWidget(self.detail)
-        lay.addWidget(self.secondary)
+        sl.addWidget(self.headline)
+        sl.addWidget(self.progress)
+        sl.addWidget(self.detail)
+        sl.addWidget(self.secondary)
 
         actions = QHBoxLayout()
-        self.pause_button = QPushButton(w)
+        actions.setSpacing(8)
+        self.pause_button = QPushButton(summary_card)
         self.pause_button.clicked.connect(self.toggle_pause)
-        self.rescan_button = QPushButton(theme_icon("view-refresh", widget=self), "Rescan now", w)
+        self.rescan_button = QPushButton(theme_icon("view-refresh", widget=self), "Rescan now", summary_card)
         self.rescan_button.setToolTip("Look for new, changed and deleted files in every indexed folder now")
         self.rescan_button.clicked.connect(self.rescan)
         actions.addWidget(self.pause_button)
         actions.addWidget(self.rescan_button)
         actions.addStretch(1)
-        lay.addSpacing(4)
-        lay.addLayout(actions)
-        lay.addSpacing(8)
+        sl.addSpacing(4)
+        sl.addLayout(actions)
+        lay.addWidget(summary_card)
 
         files = QGroupBox("Files", w)
         fl = QVBoxLayout(files)
+        fl.setSpacing(10)
         self.kinds_grid = QGridLayout()
-        self.kinds_grid.setHorizontalSpacing(24)
-        self.kinds_grid.setVerticalSpacing(4)
+        self.kinds_grid.setHorizontalSpacing(28)
+        self.kinds_grid.setVerticalSpacing(6)
         self._kind_rows: list[list[QLabel]] = []
         self._kind_keys: list[str] = []
+        self._kind_separator: QFrame | None = None
         heads = ["", "Indexed", "Waiting", "Failed"]
         self._kind_heads: list[QLabel] = []
         for col, text in enumerate(heads):
@@ -190,9 +210,11 @@ class StatusPage(QWidget):
         self.kinds_grid.setColumnStretch(4, 1)
         fl.addLayout(self.kinds_grid)
         self.no_files = QLabel("No files found yet.", files)
+        self.no_files.setForegroundRole(QPalette.ColorRole.PlaceholderText)
         fl.addWidget(self.no_files)
 
         line = QHBoxLayout()
+        line.setSpacing(8)
         self.failed_label = QLabel(files)
         self.show_failed_button = QPushButton("Show failed files…", files)
         self.show_failed_button.clicked.connect(self.show_failed)
@@ -201,11 +223,12 @@ class StatusPage(QWidget):
         line.addWidget(self.failed_label, 1)
         line.addWidget(self.show_failed_button)
         line.addWidget(self.retry_button)
-        fl.addSpacing(6)
+        fl.addSpacing(4)
         fl.addLayout(line)
         lay.addWidget(files)
 
         self.last_scan = QLabel(w)
+        self.last_scan.setForegroundRole(QPalette.ColorRole.PlaceholderText)
         lay.addWidget(self.last_scan)
         lay.addStretch(1)
         return w
@@ -213,34 +236,64 @@ class StatusPage(QWidget):
     def _build_not_running(self) -> QWidget:
         w = QWidget(self)
         lay = QVBoxLayout(w)
+        lay.setContentsMargins(20, 18, 20, 18)
+        lay.setSpacing(10)
         lay.addStretch(1)
-        icon = QLabel(w)
+        self._not_running_icon = QLabel(w)
         size = self.style().pixelMetric(QStyle.PixelMetric.PM_LargeIconSize) * 2
-        icon.setPixmap(theme_icon("dialog-warning", widget=self).pixmap(size, size))
-        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._not_running_icon.setPixmap(theme_icon("dialog-warning", widget=self).pixmap(size, size))
+        self._not_running_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title = QLabel("The Semma service is not running", w)
         title.setFont(scaled_font(self, 1.35, bold=True))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         text = QLabel("New and changed files are not indexed and searches find nothing until it runs.", w)
         text.setWordWrap(True)
+        text.setMaximumWidth(420)
         text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        text.setForegroundRole(QPalette.ColorRole.PlaceholderText)
         self.start_button = QPushButton(theme_icon("media-playback-start", widget=self), "Start service", w)
         self.start_button.clicked.connect(self.start_service)
         self.start_message = QLabel(w)
         self.start_message.setWordWrap(True)
+        self.start_message.setMaximumWidth(460)
         self.start_message.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.start_message.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         row = QHBoxLayout()
         row.addStretch(1)
         row.addWidget(self.start_button)
         row.addStretch(1)
-        for widget in (icon, title, text):
-            lay.addWidget(widget)
+
+        def centered_label(label: QLabel) -> QHBoxLayout:
+            box = QHBoxLayout()
+            box.addStretch(1)
+            box.addWidget(label, 100)
+            box.addStretch(1)
+            return box
+
+        lay.addWidget(self._not_running_icon)
+        lay.addWidget(title)
+        lay.addLayout(centered_label(text))
         lay.addSpacing(8)
         lay.addLayout(row)
-        lay.addWidget(self.start_message)
+        lay.addLayout(centered_label(self.start_message))
         lay.addStretch(2)
         return w
+
+    def _apply_icons(self) -> None:
+        self.rescan_button.setIcon(theme_icon("view-refresh", widget=self))
+        self.retry_button.setIcon(theme_icon("view-refresh", widget=self))
+        self.start_button.setIcon(theme_icon("media-playback-start", widget=self))
+        paused = self.view.paused if self.view is not None else False
+        self.pause_button.setIcon(
+            theme_icon("media-playback-start" if paused else "media-playback-pause", widget=self)
+        )
+        size = self.style().pixelMetric(QStyle.PixelMetric.PM_LargeIconSize) * 2
+        self._not_running_icon.setPixmap(theme_icon("dialog-warning", widget=self).pixmap(size, size))
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
+            self._apply_icons()
 
     # -- polling ----------------------------------------------------------------------------
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
@@ -327,16 +380,29 @@ class StatusPage(QWidget):
                 for label in labels:
                     self.kinds_grid.removeWidget(label)
                     label.deleteLater()
+            if self._kind_separator is not None:
+                self.kinds_grid.removeWidget(self._kind_separator)
+                self._kind_separator.deleteLater()
+                self._kind_separator = None
             self._kind_rows = []
             parent = self.no_files.parentWidget()
-            for row, key in enumerate(keys, start=1):
+            grid_row = 1
+            for key in keys:
+                if key == "total":
+                    sep = QFrame(parent)
+                    sep.setFrameShape(QFrame.Shape.HLine)
+                    sep.setFrameShadow(QFrame.Shadow.Sunken)
+                    self.kinds_grid.addWidget(sep, grid_row, 0, 1, 4)
+                    self._kind_separator = sep
+                    grid_row += 1
                 labels = [QLabel(parent) for _ in range(4)]
                 for col, label in enumerate(labels):
                     label.setAlignment(Qt.AlignmentFlag.AlignLeft if col == 0 else Qt.AlignmentFlag.AlignRight)
                     if key == "total":
                         label.setFont(scaled_font(self, 1.0, bold=True))
-                    self.kinds_grid.addWidget(label, row, col)
+                    self.kinds_grid.addWidget(label, grid_row, col)
                 self._kind_rows.append(labels)
+                grid_row += 1
             self._kind_keys = keys
         rows = [(r.name, r.indexed, r.pending, r.failed) for r in view.kinds]
         if len(view.kinds) > 1:

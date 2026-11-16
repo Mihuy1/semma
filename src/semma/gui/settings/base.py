@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from PySide6.QtCore import Signal
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from ..widgets import scaled_font
@@ -33,6 +34,7 @@ class SettingsSection(QWidget):
     key: ClassVar[str] = ""
     title: ClassVar[str] = ""
     icon: ClassVar[str] = "preferences-other"
+    icon_fallbacks: ClassVar[tuple[str, ...]] = ()
     description: ClassVar[str] = ""
 
     edited = Signal()
@@ -41,14 +43,17 @@ class SettingsSection(QWidget):
         super().__init__(parent)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(8)
         heading = QLabel(self.title, self)
         heading.setFont(scaled_font(self, 1.25, bold=True))
         outer.addWidget(heading)
         if self.description:
             desc = QLabel(self.description, self)
             desc.setWordWrap(True)
+            desc.setForegroundRole(QPalette.ColorRole.PlaceholderText)
             outer.addWidget(desc)
         self.body = QVBoxLayout()
+        self.body.setSpacing(10)
         outer.addLayout(self.body)
         outer.addStretch(1)
         self.ctx: SettingsContext | None = None

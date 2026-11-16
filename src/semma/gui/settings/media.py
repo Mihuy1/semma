@@ -23,6 +23,9 @@ class MediaSection(SettingsSection):
     key = "media"
     title = "Media"
     icon = "applications-multimedia"
+    icon_fallbacks = (
+        "applications-multimedia-symbolic", "folder-music-symbolic", "audio-x-generic-symbolic", "video-x-generic",
+    )
     description = "How much of each audio and video file Semma indexes."
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -31,6 +34,7 @@ class MediaSection(SettingsSection):
 
         box = QGroupBox("Audio and video", self)
         bl = QVBoxLayout(box)
+        bl.setSpacing(8)
 
         row = QHBoxLayout()
         prefix = QLabel("Index the first", box)

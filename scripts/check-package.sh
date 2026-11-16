@@ -73,26 +73,51 @@ for plugin in /usr/lib/semma/python/lib/python3.13/site-packages/PySide6/Qt/plug
 done
 semma gui --help > /dev/null
 QT_QPA_PLATFORM=offscreen /usr/lib/semma/python/bin/python3.13 -I -c "
+import os, sys, traceback
 import PySide6.QtCore, PySide6.QtGui, PySide6.QtWidgets
 from PySide6.QtCore import QLibraryInfo, QTimer
 from semma.gui import app as gui_app, main as gui_main
+from semma.gui.onboarding import OnboardingWindow
 assert QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath).startswith(\"/usr/lib/semma/\")
+# Qt only prints an exception raised in a slot and keeps running, so a failed check must end the
+# process itself, and a window that never settles must not hang the job.
+def fail(*exc):
+    traceback.print_exception(*exc)
+    sys.stderr.flush()
+    os._exit(1)
+sys.excepthook = fail
+def timed_out():
+    print(\"window: timed out\", file=sys.stderr, flush=True)
+    os._exit(1)
 app = gui_app.make_app()
-def check():
-    wins = [w for w in app.topLevelWidgets() if isinstance(w, gui_app.MainWindow) and w.isVisible()]
-    assert len(wins) == 1, wins
-    win = wins[0]
-    if win.status_page.running is None:
-        QTimer.singleShot(50, check)
-        return
-    assert win.status_page.running is False, win.status_page.running
-    win.tabs.setCurrentIndex(1)
+QTimer.singleShot(120_000, timed_out)
+def visible(kind):
+    return [w for w in app.topLevelWidgets() if isinstance(w, kind) and w.isVisible()]
+def grab(win):
     app.processEvents()
     pix = win.grab()
     assert not pix.isNull() and pix.width() > 0 and pix.height() > 0
-    print(f\"window: ok ({pix.width()}x{pix.height()}, {len(win.settings_page.sections)} settings sections)\")
+    return f\"{pix.width()}x{pix.height()}\"
+def check_setup():
+    # A fresh install has not been set up, so the setup window opens first; finishing it opens the
+    # main window in its place.
+    wizards = visible(OnboardingWindow)
+    assert len(wizards) == 1 and not visible(gui_app.MainWindow), app.topLevelWidgets()
+    print(f\"setup window: ok ({grab(wizards[0])})\", flush=True)
+    wizards[0]._complete()  # what a finished setup does once its settings are saved
+    QTimer.singleShot(50, check_main)
+def check_main():
+    wins = visible(gui_app.MainWindow)
+    assert len(wins) == 1 and not visible(OnboardingWindow), app.topLevelWidgets()
+    win = wins[0]
+    if win.status_page.running is None:
+        QTimer.singleShot(50, check_main)
+        return
+    assert win.status_page.running is False, win.status_page.running
+    win.tabs.setCurrentIndex(1)
+    print(f\"window: ok ({grab(win)}, {len(win.settings_page.sections)} settings sections)\", flush=True)
     app.quit()
-QTimer.singleShot(100, check)
+QTimer.singleShot(100, check_setup)
 raise SystemExit(gui_main())"
 
 mkdir -p ~/Documents
