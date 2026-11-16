@@ -114,6 +114,7 @@ PRIORITY_FIELDS: dict[str, str] = {
 NEXT_FILE_FIELDS: dict[str, str] = {
     "max_media_seconds": "media.max_minutes", "media_segment_seconds": "media.segment_seconds",
     "prefetch_chunks": "index.prefetch_chunks",
+    "ocr_enabled": "ocr.enabled", "ocr_languages": "ocr.languages",
 }
 # Read at use time (or pushed to the component that copied them).
 LIVE_FIELDS: dict[str, str] = {

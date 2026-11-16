@@ -232,6 +232,11 @@ class Config:
     krunner_max_results: int = 10
     query_debounce_ms: float = 100  # search-as-you-type: only the last keystroke is searched
 
+    # OCR of screenshots (semma.ocr): off by default. Languages: Tesseract codes, the first is
+    # the primary one; None picks the locale's language and English.
+    ocr_enabled: bool = False
+    ocr_languages: tuple[str, ...] | None = None
+
     # None: the key is absent. The daemon then indexes only when this user already has an
     # index (see onboarding.onboarding_done). False pauses indexing until setup finishes.
     onboarding_complete: bool | None = None
@@ -346,7 +351,7 @@ def load_config(path: Path | None = None, home: Path | None = None, *, strict: b
 
 
 KNOWN_KEYS: dict[str, frozenset[str]] = {
-    "": frozenset({"db_path", "onboarding_complete", "scan", "priority", "media", "model", "index",
+    "": frozenset({"db_path", "onboarding_complete", "scan", "priority", "media", "ocr", "model", "index",
                    "search", "daemon"}),
     "scan": frozenset({"roots", "include_mounts", "skip_hidden", "skip_app_installs", "kinds",
                        "exclude_extensions", "exclude_dir_names",
@@ -356,6 +361,7 @@ KNOWN_KEYS: dict[str, frozenset[str]] = {
                            "depth_penalty_per_level", "depth_penalty_max", "tiny_penalty", "huge_video_penalty",
                            "depth_free_levels", "recency"}),
     "media": frozenset({"max_minutes", "segment_seconds"}),
+    "ocr": frozenset({"enabled", "languages"}),
     "model": frozenset({"name", "device", "query_device", "llama_lib_dir", "model_dir"}),
     "index": frozenset({"batch_sizes", "prefetch_chunks"}),
     "search": frozenset({"z_gate", "z_floor", "knn_k", "location_prior", "duplicate_similarity", "vector_cache_max_chunks"}),
@@ -474,6 +480,29 @@ def _parse_max_file_mb(raw: Any) -> dict[str, int]:
     return out
 
 
+def _parse_ocr_languages(raw: Any, default: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    """Tesseract codes, most important first; checked by shape only (whether one is installed
+    is decided when OCR runs). An empty list means automatic (None)."""
+    from .ocr import LANGUAGE_CODE, MAX_LANGUAGES
+
+    if not isinstance(raw, list):
+        _warn(f"ocr.languages must be a list of Tesseract language codes like ['fin', 'eng'] (got {raw!r}); "
+              f"keeping default")
+        return default
+    out: list[str] = []
+    for item in raw:
+        code = item.strip().lower() if isinstance(item, str) else None
+        if code is None or not LANGUAGE_CODE.fullmatch(code):
+            _warn(f"ocr.languages entry {item!r} is not a Tesseract language code like 'eng' or 'chi_sim'; ignored")
+            continue
+        if code not in out:
+            out.append(code)
+    if len(out) > MAX_LANGUAGES:
+        _warn(f"ocr.languages has more than {MAX_LANGUAGES} languages; using {', '.join(out[:MAX_LANGUAGES])}")
+        out = out[:MAX_LANGUAGES]
+    return tuple(out) or None
+
+
 def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
     home = cfg.home
     for key in check_unknown_keys(data):
@@ -487,6 +516,7 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
     scan = data.get("scan", {})
     prio = data.get("priority", {})
     media = data.get("media", {})
+    ocr = data.get("ocr", {})
     model = data.get("model", {})
     index = data.get("index", {})
     search = data.get("search", {})
@@ -538,6 +568,17 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
         cfg.max_media_seconds = float(media["max_minutes"]) * 60
     if "segment_seconds" in media:
         cfg.media_segment_seconds = float(media["segment_seconds"])
+
+    if not isinstance(ocr, dict):
+        _warn(f"[ocr] must be a table (got {ocr!r}); ignored")
+        ocr = {}
+    if "enabled" in ocr:
+        if isinstance(ocr["enabled"], bool):
+            cfg.ocr_enabled = ocr["enabled"]
+        else:
+            _warn(f"ocr.enabled must be true or false (got {ocr['enabled']!r}); ignored")
+    if "languages" in ocr:
+        cfg.ocr_languages = _parse_ocr_languages(ocr["languages"], cfg.ocr_languages)
 
     if "name" in model:
         cfg.model_name = str(model["name"])
