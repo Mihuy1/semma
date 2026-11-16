@@ -15,6 +15,7 @@ from semma.gui.settings import filetypes_model as ftm
 from semma.gui.settings import media_model as mm
 from semma.gui.settings import performance_model as pfm
 from semma.gui.settings import priorities_model as pm
+from semma.gui.settings import screenshots_model as sm
 from semma.gui.settings.context import SettingsContext
 
 
@@ -96,7 +97,8 @@ def test_filetypes_problems(home: Path) -> None:
 def test_filetypes_models_do_not_import_pyside6() -> None:
     code = (
         "import sys, semma.gui.settings.filetypes_model, semma.gui.settings.priorities_model, "
-        "semma.gui.settings.media_model, semma.gui.settings.performance_model; "
+        "semma.gui.settings.media_model, semma.gui.settings.performance_model, "
+        "semma.gui.settings.screenshots_model; "
         "bad = [m for m in sys.modules if m.startswith(('PySide6', 'shiboken6'))]; "
         "assert not bad, bad"
     )
@@ -322,6 +324,120 @@ def test_performance_problems(home: Path) -> None:
     bad = pfm.PerformanceValues(gpu_busy_threshold=0, device="tpu", rescan_hours=0, krunner_max_results=0)
     probs = pfm.problems(bad, ctx)
     assert len(probs) == 4 and all(p.blocking for p in probs)
+
+
+# -- Screenshots model ---------------------------------------------------------------------
+
+def _fake_ocr_facts(
+    *,
+    library_available: bool = True,
+    installed_languages: tuple[str, ...] = ("deu", "eng", "fin"),
+    default_languages: tuple[str, ...] = ("fin", "eng"),
+    hint_prefix: str = "sudo dnf install",
+) -> sm.OcrFacts:
+    def _hint(code: str | None = None) -> str:
+        if not hint_prefix:
+            return ""
+        if code is None:
+            return f"{hint_prefix} tesseract-libs tesseract-langpack-eng"
+        return f"{hint_prefix} tesseract-langpack-{code}"
+
+    return sm.OcrFacts(
+        library_available=library_available,
+        installed_languages=installed_languages,
+        default_languages=default_languages,
+        install_hint=_hint,
+    )
+
+
+def test_screenshots_load_defaults_and_configured(home: Path) -> None:
+    facts = _fake_ocr_facts()
+    ctx = ctx_for(home)
+    saved = sm.load(ctx, facts)
+    assert saved == sm.ScreenshotsValues(enabled=False, languages=["fin", "eng"])
+    assert sm.changes(saved, saved.copy(), facts) == {}
+
+    ctx_cfg = ctx_for(home, '[ocr]\nenabled = true\nlanguages = ["deu", "eng"]\n')
+    loaded = sm.load(ctx_cfg, facts)
+    assert loaded == sm.ScreenshotsValues(enabled=True, languages=["deu", "eng"])
+    assert sm.changes(loaded, loaded.copy(), facts) == {}
+
+
+def test_screenshots_changes_automatic_and_back_to_default(home: Path) -> None:
+    facts = _fake_ocr_facts()
+    ctx = ctx_for(home)
+    saved = sm.load(ctx, facts)
+
+    # Turning on while keeping the automatic choice writes only enabled = true.
+    turn_on = saved.copy()
+    turn_on.enabled = True
+    ch_on = sm.changes(saved, turn_on, facts)
+    assert ch_on == {"ocr": {"enabled": True}}
+    update_config(ctx.config_path, ch_on)
+    assert read_raw(ctx.config_path) == {"ocr": {"enabled": True}}
+
+    # Choosing explicit languages writes them in order, deduped and capped at 3.
+    reloaded = sm.load(ctx_for(home), facts)
+    edited = reloaded.copy()
+    edited.languages = ["deu", "fin", "deu", "eng", "spa"]
+    ch_langs = sm.changes(reloaded, edited, facts)
+    assert ch_langs == {"ocr": {"languages": ["deu", "fin", "eng"]}}
+    update_config(ctx.config_path, ch_langs)
+    assert read_raw(ctx.config_path) == {"ocr": {"enabled": True, "languages": ["deu", "fin", "eng"]}}
+
+    # Returning to the automatic choice writes languages = None (removes the key).
+    reloaded2 = sm.load(ctx_for(home), facts)
+    back_auto = reloaded2.copy()
+    back_auto.languages = ["fin", "eng"]
+    ch_auto = sm.changes(reloaded2, back_auto, facts)
+    assert ch_auto == {"ocr": {"languages": None}}
+    update_config(ctx.config_path, ch_auto)
+    assert read_raw(ctx.config_path) == {"ocr": {"enabled": True}}
+
+    # Turning off removes enabled (and empty [ocr]).
+    reloaded3 = sm.load(ctx_for(home), facts)
+    turn_off = reloaded3.copy()
+    turn_off.enabled = False
+    ch_off = sm.changes(reloaded3, turn_off, facts)
+    assert ch_off == {"ocr": {"enabled": None}}
+    update_config(ctx.config_path, ch_off)
+    assert read_raw(ctx.config_path) == {}
+
+
+def test_screenshots_problems_and_language_choices(home: Path) -> None:
+    facts = _fake_ocr_facts(installed_languages=("eng", "fin"), default_languages=("eng",))
+    ctx = ctx_for(home, '[ocr]\nenabled = true\nlanguages = ["swe", "eng"]\n')
+    saved = sm.load(ctx, facts)
+    assert saved.languages == ["swe", "eng"]  # uninstalled language is kept
+
+    choices = sm.language_choices(saved.languages, facts)
+    assert choices[0] == ("None", None)
+    assert ("English", "eng") in choices
+    assert ("Finnish", "fin") in choices
+    assert ("Swedish (not installed)", "swe") in choices
+
+    probs = sm.problems(saved, ctx, facts)
+    assert len(probs) == 1
+    assert not probs[0].blocking
+    assert "Swedish" in probs[0].text
+    assert "tesseract-langpack-swe" in probs[0].text
+
+    # Enabled with no usable language (none selected, or none installed) -> non-blocking problem.
+    none_selected = sm.ScreenshotsValues(enabled=True, languages=[])
+    p_empty = sm.problems(none_selected, ctx, facts)
+    assert len(p_empty) == 1 and not p_empty[0].blocking
+    assert "no text will be read" in p_empty[0].text
+
+    only_missing = sm.ScreenshotsValues(enabled=True, languages=["swe"])
+    p_missing = sm.problems(only_missing, ctx, facts)
+    assert len(p_missing) == 2 and all(not p.blocking for p in p_missing)
+    assert any("Swedish" in p.text and "tesseract-langpack-swe" in p.text for p in p_missing)
+    assert any("no text will be read" in p.text for p in p_missing)
+
+    # Unknown distro (empty install_hint) does not leave a dangling colon.
+    no_hint_facts = _fake_ocr_facts(installed_languages=("eng",), default_languages=("eng",), hint_prefix="")
+    p_no_hint = sm.problems(only_missing, ctx, no_hint_facts)
+    assert p_no_hint[0].text == "The Swedish language pack is not installed."
 
 
 # -- Widgets -------------------------------------------------------------------------------
