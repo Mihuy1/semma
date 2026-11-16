@@ -516,17 +516,39 @@ class Store:
             return db.execute(f"UPDATE files SET status = 'pending', error = NULL, attempts = 0 WHERE {where}",
                               args).rowcount
 
+    def requeue_files(self, file_ids: Iterable[int], batch: int = 500) -> int:
+        """Mark these indexed files pending again (chunks stay searchable until replaced)."""
+        ids = list(file_ids)
+        n = 0
+        with self.write() as (db, _):
+            for i in range(0, len(ids), batch):
+                part = ids[i:i + batch]
+                n += db.execute(f"UPDATE files SET status = 'pending', error = NULL, attempts = 0 "
+                                f"WHERE status = 'indexed' AND id IN ({','.join('?' * len(part))})", part).rowcount
+        return n
+
     def trim_positions(self, kinds: Sequence[str], max_position: float) -> int:
         """Delete the chunks of files of these kinds at or after `max_position` (media: past a
         shorter indexing limit). Returns the number of chunks deleted."""
         marks = ",".join("?" * len(kinds))
-        match = (f"position >= ? AND file_id IN (SELECT id FROM files WHERE kind IN ({marks}))",
-                 [max_position, *kinds])
+        return self._delete_chunks(f"position >= ? AND file_id IN (SELECT id FROM files WHERE kind IN ({marks}))",
+                                   [max_position, *kinds])
+
+    def delete_modality(self, kinds: Sequence[str], modality: str) -> int:
+        """Delete the `modality` chunks of files of these kinds (OCR turned off: the text chunks
+        of images), without re-embedding anything. Returns the number of chunks deleted."""
+        marks = ",".join("?" * len(kinds))
+        return self._delete_chunks(f"modality = ? AND file_id IN (SELECT id FROM files WHERE kind IN ({marks}))",
+                                   [modality, *kinds])
+
+    def _delete_chunks(self, where: str, args: Sequence[Any]) -> int:
+        """Delete the chunks matching `where`; the files keep their other chunks (and the
+        vector cache is patched to match)."""
         with self.write() as (db, delta):
-            files = [r[0] for r in db.execute(f"SELECT DISTINCT file_id FROM chunks WHERE {match[0]}", match[1])]
+            files = [r[0] for r in db.execute(f"SELECT DISTINCT file_id FROM chunks WHERE {where}", args)]
             if not files:
                 return 0
-            deleted = db.execute(f"DELETE FROM chunks WHERE {match[0]}", match[1]).rowcount  # triggers clear vec/fts
+            deleted = db.execute(f"DELETE FROM chunks WHERE {where}", args).rowcount  # triggers clear vec/fts
             # The vector cache drops whole files: re-add the chunks these files keep.
             delta.removed_files.update(files)
             fmarks = ",".join("?" * len(files))

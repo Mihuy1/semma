@@ -110,7 +110,8 @@ PRIORITY_FIELDS: dict[str, str] = {
     "huge_video_bytes": "priority.huge_video_bytes", "huge_video_penalty": "priority.huge_video_penalty",
 }
 # Read when a file is indexed (or a slice starts): files indexed from then on. A new media limit
-# or segment length also re-queues or trims indexed audio/video (Indexer.reconcile_media).
+# or segment length also re-queues or trims indexed audio/video (Indexer.reconcile_media), and
+# new OCR settings re-queue the screenshots or delete their OCR text (Indexer.reconcile_ocr).
 NEXT_FILE_FIELDS: dict[str, str] = {
     "max_media_seconds": "media.max_minutes", "media_segment_seconds": "media.segment_seconds",
     "prefetch_chunks": "index.prefetch_chunks",
@@ -1122,6 +1123,8 @@ class Daemon:
             rescan = diff(SCAN_FIELDS) + diff(PRIORITY_FIELDS)
             setup = diff(ONBOARDING_FIELDS)
             changed = rescan + diff(NEXT_FILE_FIELDS) + diff(LIVE_FIELDS) + setup + hot
+            if not changed and self._ocr_languages_changed(new):
+                changed = ["ocr (installed languages)"]
             setup_done = onboarding_done(new, self.store) if setup else None
             if changed:
                 self._accepted_cfg = new
@@ -1144,6 +1147,16 @@ class Daemon:
             log.info("settings reloaded: nothing changed")
         return restart
 
+    def _ocr_languages_changed(self, cfg: Config) -> bool:
+        """The OCR languages these settings give now differ from those the index was built with:
+        a language package installed or removed since (applied by `_apply_config`)."""
+        recorded = getattr(self.indexer, "ocr_setup", None)
+        if recorded is None or not cfg.ocr_enabled:
+            return False  # not reconciled yet (the next slice does it), or off either way
+        from . import ocr
+
+        return "+".join(ocr.effective_languages(cfg)) != recorded
+
     def _apply_config(self, cfg: Config) -> None:
         """On the worker, between scans and slices: every holder of the Config gets the new one
         (the next scan builds its Scanner and Scorer from it)."""
@@ -1156,6 +1169,10 @@ class Daemon:
                 self.indexer.reconcile_media()
             except Exception:
                 log.exception("applying the new media settings to the index failed")
+        try:  # cheap when nothing changed (also catches a language installed since)
+            self.indexer.reconcile_ocr()
+        except Exception:
+            log.exception("applying the new OCR settings to the index failed")
         self._setup_done = onboarding_done(cfg, self.store)
         if self._setup_done:
             self._logged_wait_setup = False

@@ -190,12 +190,65 @@ SHOT = "Screenshot From 2026-09-25 14-20-31.png"
 def test_screenshots_are_indexed_with_their_text(env) -> None:
     cfg, store, _, _ = env
     assert modalities(store) == {SHOT: ["image", "text"], "kuva.png": ["image", "text"], "holiday.png": ["image"]}
+    assert store.get_meta("ocr_languages") == "eng"
     assert fts(store, "interpreter") == {SHOT}
     assert fts(store, "hakumenetelmien") == {"kuva.png"}
     # Search finds it by a word only in the screenshot, and shows the text.
     res = Searcher(store, cfg, FakeEmbedder()).search("select interpreter")
     assert res[0].path.endswith(SHOT)
     assert res[0].modality == "text" and res[0].snippet.startswith("Select Interpreter")
+
+
+def test_turning_ocr_off_deletes_the_text_without_reindexing(env) -> None:
+    cfg, store, ix, calls = env
+    cache = store.warm_vector_cache()
+    cfg.ocr_enabled = False
+    assert ix.reconcile_ocr() == 0
+    assert pending(store) == set()
+    assert modalities(store) == {SHOT: ["image"], "kuva.png": ["image"], "holiday.png": ["image"]}
+    assert fts(store, "interpreter") == set()
+    assert store.get_meta("ocr_languages") == ""
+    n_chunks = store.db.execute("SELECT count(*) FROM chunks").fetchone()[0]
+    assert store.db.execute("SELECT count(*) FROM vec_chunks").fetchone()[0] == n_chunks == 3
+    alive = cache.alive[: cache.n]
+    assert int(alive.sum()) == 3
+    assert set(cache.chunk_ids[: cache.n][alive].tolist()) == {r[0] for r in store.db.execute("SELECT id FROM chunks")}
+    row = cache.row_of[int(cache.chunk_ids[: cache.n][alive][0])]
+    stored = store.db.execute("SELECT embedding FROM vec_chunks WHERE chunk_id = ?",
+                              (int(cache.chunk_ids[row]),)).fetchone()[0]
+    assert np.array_equal(cache.mat[row], np.frombuffer(stored, dtype=np.float32))
+    assert ix.reconcile_ocr() == 0 and calls == []  # recorded: nothing more to do
+
+    # On again: only the screenshots are read again.
+    cfg.ocr_enabled = True
+    assert ix.reconcile_ocr() == 2
+    assert pending(store) == {SHOT, "kuva.png"}
+    ix.run()
+    assert sorted(calls) == sorted([SHOT, "kuva.png"])
+    assert modalities(store)[SHOT] == ["image", "text"] and store.get_meta("ocr_languages") == "eng"
+
+
+def test_other_languages_reread_the_screenshots(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, store, ix, _ = env
+    monkeypatch.setattr(ocr, "effective_languages", lambda cfg: ["fin", "eng"])
+    assert ix.reconcile_ocr() == 2
+    assert pending(store) == {SHOT, "kuva.png"}
+    assert modalities(store)[SHOT] == ["image", "text"]  # searchable until replaced
+    assert store.get_meta("ocr_languages") == "fin+eng"
+    assert ix.reconcile_ocr() == 0
+
+
+def test_index_from_before_ocr_counts_as_off(env) -> None:
+    cfg, store, ix, _ = env
+    cfg.ocr_enabled = False
+    ix.reconcile_ocr()  # no OCR chunks left, like an index from before OCR existed
+    store.db.execute("DELETE FROM meta WHERE key = 'ocr_languages'")
+    store.db.commit()
+    assert ix.reconcile_ocr() == 0 and store.get_meta("ocr_languages") == ""
+    store.db.execute("DELETE FROM meta WHERE key = 'ocr_languages'")
+    store.db.commit()
+    cfg.ocr_enabled = True
+    assert ix.reconcile_ocr() == 2
 
 
 def test_the_engine_is_freed_on_the_extraction_thread(tmp_path: Path, fake_ocr: list[str],
