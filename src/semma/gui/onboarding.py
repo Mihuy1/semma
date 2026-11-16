@@ -16,9 +16,7 @@ from typing import Any
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QPalette, QShowEvent
 from PySide6.QtWidgets import (
-    QComboBox,
     QFrame,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -43,8 +41,10 @@ from .settings.folders import FoldersSection
 from .settings.folders_model import NOTHING_INDEXED
 from .settings.media import MediaSection
 from .settings.page import RESTART_NOTICE
+from .settings.performance import GraphicsCardGroup
+from .settings.performance_model import PerformanceValues
 from .settings.performance_model import changes as device_changes
-from .settings.performance_model import device_choices, load as load_performance, normalise_device
+from .settings.performance_model import load as load_performance
 from .settings.performance_model import problems as device_problems
 from .widgets import scaled_font, theme_icon
 
@@ -106,7 +106,7 @@ class _WelcomePage(QWidget):
 
 
 class _DevicePage(QWidget):
-    """Only the model device. The rest of Performance stays on the Settings page."""
+    """Model device and GPU-busy pause settings. The rest of Performance stays on Settings."""
 
     key = "device"
     edited = Signal()
@@ -114,74 +114,52 @@ class _DevicePage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.ctx: SettingsContext | None = None
-        self._saved_values = None
+        self._saved_values: PerformanceValues | None = None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
-        title = QLabel("Device", self)
+        title = QLabel("Performance", self)
         title.setFont(scaled_font(self, 1.25, bold=True))
         desc = QLabel(
-            "Where the model runs. Automatic uses the graphics card when one is available, "
-            "and the processor otherwise. This is the same setting as Settings → Performance.",
+            "Where the model runs and whether indexing pauses while other programs use the graphics card. "
+            "These are the same settings as Settings → Performance.",
             self,
         )
         desc.setWordWrap(True)
         desc.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-        box = QGroupBox("Graphics card and processor", self)
-        bl = QVBoxLayout(box)
-        bl.setSpacing(8)
-        row = QHBoxLayout()
-        label = QLabel("Run the model on:", box)
-        self.device_combo = QComboBox(box)
-        self.device_combo.currentIndexChanged.connect(self.edited.emit)
-        label.setBuddy(self.device_combo)
-        row.addWidget(label)
-        row.addWidget(self.device_combo)
-        row.addStretch(1)
-        bl.addLayout(row)
-        note = QLabel(
+        self.box = GraphicsCardGroup(
             "Applied before the model is loaded. If it is already loaded, the service needs a restart.",
-            box,
+            self,
         )
-        note.setWordWrap(True)
-        note.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-        bl.addWidget(note)
+        self.device_combo = self.box.device_combo
+        self.pause_when_gpu_busy = self.box.pause_when_gpu_busy
+        self.gpu_busy_label = self.box.gpu_busy_label
+        self.gpu_busy_threshold = self.box.gpu_busy_threshold
+        self.box.edited.connect(self.edited)
         lay.addWidget(title)
         lay.addWidget(desc)
-        lay.addWidget(box)
+        lay.addWidget(self.box)
         lay.addStretch(1)
 
     def load(self, ctx: SettingsContext) -> None:
         self.ctx = ctx
         saved = load_performance(ctx)
         self._saved_values = saved
-        self.device_combo.blockSignals(True)
-        self.device_combo.clear()
-        norm = normalise_device(saved.device)
-        selected = 0
-        for idx, (label, value) in enumerate(device_choices(saved.device)):
-            self.device_combo.addItem(label, value)
-            if value == norm:
-                selected = idx
-        self.device_combo.setCurrentIndex(selected)
-        self.device_combo.blockSignals(False)
+        self.box.load(saved)
 
-    def _device(self) -> str | None:
-        return normalise_device(self.device_combo.currentData())
+    def _edited_values(self) -> PerformanceValues:
+        assert self._saved_values is not None
+        return self.box.apply_to(self._saved_values)
 
     def changes(self) -> dict[str, dict[str, Any]]:
         if self._saved_values is None:
             return {}
-        edited = self._saved_values.copy()
-        edited.device = self._device()
-        return device_changes(self._saved_values, edited)
+        return device_changes(self._saved_values, self._edited_values())
 
     def problems(self) -> list[Any]:
         if self._saved_values is None or self.ctx is None:
             return []
-        edited = self._saved_values.copy()
-        edited.device = self._device()
-        return device_problems(edited, self.ctx)
+        return device_problems(self._edited_values(), self.ctx)
 
 
 class OnboardingWindow(QMainWindow):

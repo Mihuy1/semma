@@ -15,6 +15,7 @@ from gui_fakes import FakeClient, status  # noqa: E402
 from semma.config_write import read_raw  # noqa: E402
 from semma.gui.app import MainWindow, make_app  # noqa: E402
 from semma.gui.onboarding import OnboardingWindow  # noqa: E402
+from semma.gui.settings.performance_model import DEFAULT_GPU_BUSY_THRESHOLD  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -194,3 +195,58 @@ def test_closing_after_a_save_that_needs_a_restart_counts_as_finished(
     wizard.close()
     app.processEvents()
     assert finished == [True] and closed == []
+
+
+def test_wizard_gpu_busy_pause_and_threshold(
+    app: QtWidgets.QApplication, home: Path,
+) -> None:
+    finished: list[bool] = []
+    client = FakeClient(status())
+    wizard = OnboardingWindow(client, config_path(home), home)
+    wizard.finished_ok.connect(lambda: finished.append(True))
+    wizard.show()
+    for _ in range(4):
+        wizard.next_button.click()
+
+    assert wizard.device.pause_when_gpu_busy.isChecked()
+    assert wizard.device.gpu_busy_threshold.isEnabled()
+    assert wizard.device.gpu_busy_label.isEnabled()
+    assert wizard.device.gpu_busy_threshold.value() == DEFAULT_GPU_BUSY_THRESHOLD
+
+    # Turning GPU pause off disables the threshold input and writes pause_when_gpu_busy = false.
+    wizard.device.pause_when_gpu_busy.setChecked(False)
+    assert not wizard.device.gpu_busy_threshold.isEnabled()
+    assert not wizard.device.gpu_busy_label.isEnabled()
+    wizard.next_button.click()
+    app.processEvents()
+    assert finished == [True]
+    assert "ReloadConfig" in client.calls
+    assert not wizard.restart_button.isVisible()
+    assert read_raw(config_path(home)) == {
+        "onboarding_complete": True,
+        "daemon": {"pause_when_gpu_busy": False},
+    }
+
+    # Re-opening setup loads the disabled state, and re-enabling + setting a value saves both.
+    finished.clear()
+    client.calls.clear()
+    wizard = OnboardingWindow(client, config_path(home), home, rerun=True)
+    wizard.finished_ok.connect(lambda: finished.append(True))
+    wizard.show()
+    for _ in range(4):
+        wizard.next_button.click()
+    assert not wizard.device.pause_when_gpu_busy.isChecked()
+    assert not wizard.device.gpu_busy_threshold.isEnabled()
+
+    wizard.device.pause_when_gpu_busy.setChecked(True)
+    assert wizard.device.gpu_busy_threshold.isEnabled()
+    wizard.device.gpu_busy_threshold.setValue(45)
+    wizard.next_button.click()
+    app.processEvents()
+    assert finished == [True]
+    assert "ReloadConfig" in client.calls
+    assert not wizard.restart_button.isVisible()
+    assert read_raw(config_path(home)) == {
+        "onboarding_complete": True,
+        "daemon": {"gpu_busy_threshold": 45},
+    }
