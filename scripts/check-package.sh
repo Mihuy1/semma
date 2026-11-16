@@ -6,8 +6,8 @@
 # installed and open cleanly with QT_QPA_PLATFORM=offscreen, and Semma must index a note and a
 # picture with the real model, find both by meaning, and start its service when something asks for
 # it on the session bus (as KRunner and GNOME Shell do).
-#   scripts/check-package.sh dist/semma-0.3.0-1.x86_64.rpm [image]   (default: fedora:latest)
-#   scripts/check-package.sh dist/semma_0.3.0-1_amd64.deb [image]    (default: ubuntu:24.04)
+#   scripts/check-package.sh dist/semma-0.4.0-1.x86_64.rpm [image]   (default: fedora:latest)
+#   scripts/check-package.sh dist/semma_0.4.0-1_amd64.deb [image]    (default: ubuntu:24.04)
 # The model comes from ~/.local/share/semma/models when it is there, else it is downloaded into
 # build/models once. Needs podman or docker.
 set -euo pipefail
