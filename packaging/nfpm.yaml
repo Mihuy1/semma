@@ -33,6 +33,9 @@ scripts:
 # libraries linked by the bundled Qt Widgets subset (`semma gui` on Wayland and X11) are in
 # recommends: a normal desktop install brings them in, while a minimal or headless install with
 # --no-install-recommends / install_weak_deps=False keeps the daemon free of the desktop stack.
+# Tesseract (the library and English; OCR of screenshots, off by default, loaded with dlopen only
+# when on) is a recommend too: Debian's libtesseract5 brings no language data, Fedora's
+# tesseract-libs brings English already. Other languages are the distribution's language packs.
 overrides:
   deb:
     depends:
@@ -43,6 +46,8 @@ overrides:
     recommends:
       - libvulkan1
       - ffmpeg
+      - libtesseract5
+      - tesseract-ocr-eng
       - libdbus-1-3
       - libegl1
       - libfontconfig1
@@ -78,6 +83,8 @@ overrides:
     recommends:
       - vulkan-loader
       - /usr/bin/ffmpeg
+      - tesseract-libs
+      - tesseract-langpack-eng
       - dbus-libs
       - fontconfig
       - freetype

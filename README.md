@@ -13,6 +13,10 @@ sudo apt install ./semma_0.3.0-1_amd64.deb      # Ubuntu, Debian
 
 Then open **Semma** from the application menu and go through the setup wizard. Semma does not index anything until you finish the wizard. The model (865 MB) downloads in the background the first time.
 
+## Text in screenshots
+
+Semma can also read the text in your screenshots with Tesseract, so you can find a screenshot by the words in it. This is off by default; turn it on in Semma's settings (or with `enabled = true` under `[ocr]` in `~/.config/semma/config.toml`). It reads your system's language and English when their language data is installed. To add a language, install its Tesseract language pack, for example `sudo dnf install tesseract-langpack-deu` (Fedora) or `sudo apt install tesseract-ocr-deu` (Ubuntu, Debian).
+
 ## Uninstall
 
 ```sh
