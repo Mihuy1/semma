@@ -135,7 +135,7 @@ def test_settings_apply_writes_config_and_reloads(app: QtWidgets.QApplication, h
     client = FakeClient(status())
     page = make_settings(home, client, '# keep me\n[scan]\nroots = ["~/Documents"]\n')
     assert [page.nav.item(i).text() for i in range(page.nav.count())] == [
-        "Folders", "File types", "Priorities", "Media", "Performance"]
+        "Folders", "File types", "Priorities", "Media", "Screenshots", "Performance"]
     folders = page.select("folders")
     assert not page.apply_button.isEnabled() and not page.revert_button.isEnabled()
     folders.roots.add(str(home / "Pictures"))
@@ -463,7 +463,7 @@ def test_all_settings_sections_resolve_icons_in_adwaita(
         if Path("/usr/share/icons/Adwaita/index.theme").is_file():
             QIcon.setThemeName("Adwaita")
         page = make_settings(home, FakeClient(status()))
-        assert page.nav.count() == 5
+        assert page.nav.count() == 6
         for i in range(page.nav.count()):
             icon = page.nav.item(i).icon()
             assert not icon.isNull(), f"missing icon for section {page.nav.item(i).text()}"

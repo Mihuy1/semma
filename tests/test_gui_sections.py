@@ -628,4 +628,111 @@ def test_performance_section_widget(app: QtWidgets.QApplication, home: Path) -> 
     }
 
 
+def _select_combo_data(combo: QtWidgets.QComboBox, value: object) -> None:
+    for i in range(combo.count()):
+        if combo.itemData(i) == value:
+            combo.setCurrentIndex(i)
+            return
+    raise AssertionError(f"combo value {value!r} not found")
+
+
+def test_screenshots_section_widget(
+    app: QtWidgets.QApplication, home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from PySide6.QtCore import Qt
+
+    facts = _fake_ocr_facts(installed_languages=("deu", "eng", "fin"), default_languages=("fin", "eng"))
+    monkeypatch.setattr(sm.OcrFacts, "detect", lambda: facts)
+
+    page = SettingsPage(FakeClient(status()), config_path(home), home)
+    sec = page.select("screenshots")
+    assert not sec.is_modified()
+    assert sec.enabled_check.isEnabled()
+    assert not sec.enabled_check.isChecked()
+    assert all(not combo.isEnabled() for combo in sec.language_combos)
+    assert all(not lbl.isEnabled() for lbl in sec.language_labels)
+    assert sec.missing_note.isHidden()
+    assert "tesseract-langpack-deu" in sec.more_languages_command.text()
+    assert sec.more_languages_command.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
+
+    # Loaded automatic languages: fin, eng, None
+    assert [c.currentData() for c in sec.language_combos] == ["fin", "eng", None]
+
+    # Checking enables language rows and writes only enabled = true
+    sec.enabled_check.setChecked(True)
+    assert all(combo.isEnabled() for combo in sec.language_combos)
+    assert all(lbl.isEnabled() for lbl in sec.language_labels)
+    assert sec.changes() == {"ocr": {"enabled": True}}
+
+    # Gaps are closed and duplicates are collapsed
+    _select_combo_data(sec.language_combos[0], None)
+    _select_combo_data(sec.language_combos[1], "deu")
+    _select_combo_data(sec.language_combos[2], "deu")
+    assert sec.values().languages == ["deu"]
+    assert sec.changes() == {"ocr": {"enabled": True, "languages": ["deu"]}}
+
+    page.apply()
+    assert read_raw(config_path(home)) == {"ocr": {"enabled": True, "languages": ["deu"]}}
+
+    # Returning to automatic choice removes languages; unchecking removes enabled
+    _select_combo_data(sec.language_combos[0], "fin")
+    _select_combo_data(sec.language_combos[1], "eng")
+    _select_combo_data(sec.language_combos[2], None)
+    assert sec.changes() == {"ocr": {"languages": None}}
+    sec.enabled_check.setChecked(False)
+    assert sec.changes() == {"ocr": {"enabled": None, "languages": None}}
+    page.apply()
+    assert read_raw(config_path(home)) == {}
+
+
+def test_screenshots_section_missing_library_and_uninstalled_language(
+    app: QtWidgets.QApplication, home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from PySide6.QtCore import Qt
+
+    # Missing Tesseract library with nothing configured: checkbox is disabled and unchecked
+    missing_lib = _fake_ocr_facts(library_available=False, installed_languages=(), default_languages=())
+    monkeypatch.setattr(sm.OcrFacts, "detect", lambda: missing_lib)
+    page = SettingsPage(FakeClient(status()), config_path(home), home)
+    sec = page.select("screenshots")
+    assert not sec.enabled_check.isChecked()
+    assert not sec.enabled_check.isEnabled()
+    assert not sec.missing_note.isHidden()
+    assert "Tesseract" in sec.missing_note.text()
+    assert "tesseract-libs" in sec.missing_command.text()
+    assert sec.missing_command.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
+
+    # Missing library when saved config has enabled = true: stays checked and enabled so user can turn it off
+    config_path(home).write_text('[ocr]\nenabled = true\nlanguages = ["swe"]\n', encoding="utf-8")
+    page.reload()
+    assert sec.enabled_check.isChecked()
+    assert sec.enabled_check.isEnabled()
+    assert sec.language_combos[0].currentText() == "Swedish (not installed)"
+    assert sec.language_combos[0].currentData() == "swe"
+    assert "Swedish" in page.problems_label.text()
+    assert "no text will be read" in page.problems_label.text()
+    assert page.apply_button.isEnabled() is False  # not modified yet
+
+    sec.enabled_check.setChecked(False)
+    assert page.apply_button.isEnabled()  # problems are non-blocking
+    page.apply()
+    assert read_raw(config_path(home)) == {"ocr": {"languages": ["swe"]}}
+    assert not sec.enabled_check.isChecked()
+    assert not sec.enabled_check.isEnabled()
+
+    # Library available, no language packs installed, empty install_hint (unknown distro)
+    no_langs = _fake_ocr_facts(
+        library_available=True, installed_languages=(), default_languages=(), hint_prefix="",
+    )
+    monkeypatch.setattr(sm.OcrFacts, "detect", lambda: no_langs)
+    config_path(home).write_text("", encoding="utf-8")
+    page.reload()
+    assert not sec.enabled_check.isChecked()
+    assert not sec.enabled_check.isEnabled()
+    assert not sec.missing_note.isHidden()
+    assert sec.missing_command.isHidden()
+    assert sec.more_languages_command.isHidden()
+
+
+
 

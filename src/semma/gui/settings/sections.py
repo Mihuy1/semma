@@ -8,11 +8,13 @@ from .folders import FoldersSection
 from .media import MediaSection
 from .performance import PerformanceSection
 from .priorities import PrioritiesSection
+from .screenshots import ScreenshotsSection
 
 SECTIONS: list[type[SettingsSection]] = [
     FoldersSection,
     FiletypesSection,
     PrioritiesSection,
     MediaSection,
+    ScreenshotsSection,
     PerformanceSection,
 ]
