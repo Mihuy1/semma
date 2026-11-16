@@ -180,7 +180,7 @@ class Config:
     max_bytes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_MAX_BYTES))
 
     # Media: only the first N seconds of an audio or video file are indexed.
-    max_media_seconds: float = 30 * 60
+    max_media_seconds: float = 60 * 60
     media_segment_seconds: float = 60
 
     # Embedding model and indexing.
