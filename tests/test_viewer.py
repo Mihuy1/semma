@@ -13,10 +13,13 @@ from semma import viewer
 from semma.gnome_search import GnomeLauncher, GnomeSearchService
 from semma.krunner import KRunnerService, Launcher
 from semma.search import SearchResult
-from semma.viewer import Spot, build_argv, parse_exec, spot_for, viewer_name
+from semma.viewer import Spot, build_argv, media_mime, parse_exec, spot_for, viewer_name
 
 PDF = "/home/u/Docs/paper one.pdf"
+VIDEO = "/m/a b.mp4"
+AUDIO = "/m/song one.flac"
 SPOT = Spot(7)
+TIME_SPOT = Spot(seconds=120)
 
 
 def _pdf_result(position: float | None = 7.0, modality: str = "text",
@@ -27,12 +30,32 @@ def _pdf_result(position: float | None = 7.0, modality: str = "text",
     )
 
 
+def _media_result(kind: str = ft.VIDEO, position: float | None = 12.5) -> SearchResult:
+    return SearchResult(
+        path=VIDEO if kind == ft.VIDEO else AUDIO,
+        kind=kind, score=3.0, similarity=0.7, modality=kind, locator="0:12",
+        snippet="", position=position, mtime=1.0, matched=["vector"],
+    )
+
+
 def test_spot_for_only_pdf_hits_with_a_page() -> None:
     assert spot_for(_pdf_result()) == Spot(7)
+    assert not Spot(7).is_time
     assert spot_for(_pdf_result(modality="image")) == Spot(7)  # a scanned page
     assert spot_for(_pdf_result(position=None)) is None
     assert spot_for(_pdf_result(position=0.0)) is None
     assert spot_for(replace(_pdf_result(), kind=ft.OFFICE)) is None
+
+
+def test_spot_for_audio_and_video() -> None:
+    for kind in (ft.AUDIO, ft.VIDEO):
+        spot = spot_for(_media_result(kind, 12.5))
+        assert spot == Spot(seconds=12.5)
+        assert spot is not None and spot.is_time and spot.page is None
+        assert spot_for(_media_result(kind, 0.0)) is None
+        assert spot_for(_media_result(kind, -1.0)) is None
+        assert spot_for(_media_result(kind, None)) is None
+    assert spot_for(replace(_media_result(ft.VIDEO, 10.0), kind=ft.IMAGE)) is None
 
 
 def test_viewer_name_native_env_and_flatpak() -> None:
@@ -82,6 +105,76 @@ def test_build_argv_field_codes() -> None:
     assert build_argv(["okular", "--file=%f"], PDF, SPOT) is None
 
 
+def test_build_argv_time_players_and_end_of_options() -> None:
+    assert build_argv(["mpv", "--player-operation-mode=pseudo-gui", "--", "%U"], VIDEO, TIME_SPOT) == [
+        "mpv", "--player-operation-mode=pseudo-gui", "--start=120", "--", VIDEO]
+    assert build_argv(["/usr/bin/vlc", "--started-from-file", "%U"], VIDEO, TIME_SPOT) == [
+        "/usr/bin/vlc", "--started-from-file", "--start-time=120", VIDEO]
+    assert build_argv(["cvlc", "%U"], AUDIO, Spot(seconds=12.5)) == ["cvlc", "--start-time=12.5", AUDIO]
+    assert build_argv(["celluloid", "%U"], VIDEO, Spot(seconds=45)) == ["celluloid", "--mpv-start=45", VIDEO]
+    assert build_argv(["gnome-mpv", "%U"], VIDEO, Spot(seconds=45.25)) == ["gnome-mpv", "--mpv-start=45.25", VIDEO]
+    # Browsers use HTML media fragments.
+    assert build_argv(["firefox", "%u"], VIDEO, TIME_SPOT) == ["firefox", "file:///m/a%20b.mp4#t=120"]
+    assert build_argv(["/usr/bin/google-chrome-stable", "%U"], AUDIO, Spot(seconds=12.5)) == [
+        "/usr/bin/google-chrome-stable", "file:///m/song%20one.flac#t=12.5"]
+    # Unknown media players (handled via MPRIS by caller) -> None.
+    for exe in ("dragon", "elisa", "haruna", "totem", "showtime"):
+        assert build_argv([exe, "%U"], VIDEO, TIME_SPOT) is None
+
+
+def test_build_argv_time_flatpak_and_markers() -> None:
+    mpv_flatpak = ["/usr/bin/flatpak", "run", "--branch=stable", "--file-forwarding",
+                   "io.mpv.Mpv", "--", "@@u", "%U", "@@"]
+    assert build_argv(mpv_flatpak, VIDEO, TIME_SPOT) == [
+        "/usr/bin/flatpak", "run", "--branch=stable", "--file-forwarding",
+        "io.mpv.Mpv", "--start=120", "--", "@@u", VIDEO, "@@"]
+    mpv_flatpak_reversed = ["/usr/bin/flatpak", "run", "io.mpv.Mpv", "@@u", "--", "%U", "@@"]
+    assert build_argv(mpv_flatpak_reversed, VIDEO, TIME_SPOT) == [
+        "/usr/bin/flatpak", "run", "io.mpv.Mpv", "--start=120", "@@u", "--", VIDEO, "@@"]
+    vlc_flatpak = ["/usr/bin/flatpak", "run", "--branch=stable", "--file-forwarding",
+                   "org.videolan.VLC", "@@u", "%U", "@@"]
+    assert build_argv(vlc_flatpak, VIDEO, TIME_SPOT) == [
+        "/usr/bin/flatpak", "run", "--branch=stable", "--file-forwarding",
+        "org.videolan.VLC", "--start-time=120", "@@u", VIDEO, "@@"]
+    assert viewer_name(["flatpak", "run", "io.github.celluloid_player.Celluloid", "%U"]) == "celluloid"
+
+
+def test_build_argv_seconds_formatting() -> None:
+    for secs, expected in ((120.0, "120"), (10.0, "10"), (12.5, "12.5"), (12.500, "12.5"), (1.23456, "1.235")):
+        assert build_argv(["mpv", "%U"], VIDEO, Spot(seconds=secs)) == ["mpv", f"--start={expected}", VIDEO]
+
+
+def test_build_argv_spot_type_mismatch() -> None:
+    assert build_argv(["okular", "%U"], VIDEO, TIME_SPOT) is None
+    assert build_argv(["mpv", "%U"], PDF, SPOT) is None
+    assert build_argv(["vlc", "%U"], PDF, SPOT) is None
+    assert build_argv(["okular", "%U"], PDF, Spot()) is None
+
+
+def test_media_mime(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert media_mime("/m/video.mp4") == "video/mp4"
+    assert media_mime("/m/song.mp3") == "audio/mpeg"
+    for ext in ("mkv", "WEBM"):
+        mime = media_mime(f"/m/clip.{ext}")
+        assert mime is not None and mime.startswith("video/")
+    for ext in ("opus", "m4a", "flac"):
+        mime = media_mime(f"/m/track.{ext}")
+        assert mime is not None and mime.startswith("audio/")
+    assert media_mime("/m/doc.pdf") is None
+    assert media_mime("/m/notes.txt") is None
+    assert media_mime("/m/noext") is None
+    # Fallback still works when system mimetypes database does not know or returns non-audio/video.
+    monkeypatch.setattr(viewer.mimetypes, "guess_type", lambda _p: ("application/ogg", None))
+    assert media_mime("/m/voice.opus") == "audio/ogg"
+    assert media_mime("/m/song.mp3") is None
+    monkeypatch.setattr(viewer.mimetypes, "guess_type", lambda _p: (None, None))
+    assert media_mime("/m/movie.mkv") == "video/x-matroska"
+    assert media_mime("/m/clip.WEBM") == "video/webm"
+    assert media_mime("/m/voice.opus") == "audio/ogg"
+    assert media_mime("/m/track.m4a") == "audio/mp4"
+    assert media_mime("/m/lossless.flac") == "audio/flac"
+
+
 def test_parse_exec_escapes_and_quotes() -> None:
     assert parse_exec('"/opt/My Viewer/okular" %U') == ["/opt/My Viewer/okular", "%U"]
     assert parse_exec(r'sh -c "echo \\"hi\\"" %f') == ["sh", "-c", 'echo "hi"', "%f"]
@@ -129,6 +222,30 @@ def test_viewer_argv_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     for missing in ("draw.desktop", "gone.desktop", None):
         default[0] = missing
         assert asyncio.run(viewer.viewer_argv(PDF, SPOT)) is None
+
+
+def test_viewer_argv_time_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _desktop(tmp_path, "mpv.desktop", "[Desktop Entry]\nExec=mpv --player-operation-mode=pseudo-gui -- %U\n")
+    _desktop(tmp_path, "elisa.desktop", "[Desktop Entry]\nExec=elisa %U\n")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_DIRS", str(tmp_path / "none"))
+    seen_mimes: list[str] = []
+    default: list[str | None] = ["mpv.desktop"]
+
+    async def fake_default(mime: str = viewer.PDF_MIME) -> str | None:
+        seen_mimes.append(mime)
+        return default[0]
+
+    monkeypatch.setattr(viewer, "default_desktop_id", fake_default)
+    assert asyncio.run(viewer.viewer_argv(VIDEO, TIME_SPOT)) == [
+        "mpv", "--player-operation-mode=pseudo-gui", "--start=120", "--", VIDEO]
+    assert seen_mimes == ["video/mp4"]
+    for missing in ("elisa.desktop", "gone.desktop", None):
+        default[0] = missing
+        assert asyncio.run(viewer.viewer_argv(VIDEO, TIME_SPOT)) is None
+    seen_mimes.clear()
+    assert asyncio.run(viewer.viewer_argv("/m/unknown.xyz", TIME_SPOT)) is None
+    assert seen_mimes == []
 
 
 def test_default_desktop_id_runs_xdg_mime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,6 +338,56 @@ def test_gnome_launcher_opens_viewer_at_spot(monkeypatch: pytest.MonkeyPatch) ->
     _fake_viewer_argv(monkeypatch, gs, None)
     asyncio.run(launcher.open_file(PDF, spot=SPOT))
     assert spawned == [["/usr/bin/gio", "open", PDF]]
+
+
+def _fake_mpris(monkeypatch: pytest.MonkeyPatch, events: list) -> None:
+    from semma import mpris
+
+    async def snapshot() -> set[str]:
+        events.append("snapshot")
+        return {"org.mpris.MediaPlayer2.old"}
+
+    monkeypatch.setattr(mpris, "snapshot", snapshot)
+    monkeypatch.setattr(mpris, "seek_in_background",
+                        lambda path, seconds, before: events.append(("seek", path, seconds, before)))
+
+
+def test_launchers_seek_over_mpris_when_the_player_has_no_start_option(monkeypatch: pytest.MonkeyPatch) -> None:
+    media, spot = "/m/pod cast.mp3", Spot(seconds=720.0)
+    seek = ("seek", media, 720.0, {"org.mpris.MediaPlayer2.old"})
+
+    events: list = []
+    _fake_mpris(monkeypatch, events)
+    monkeypatch.setattr(kr.shutil, "which", lambda n: "/usr/bin/kde-open" if n == "kde-open" else None)
+    launcher = Launcher()
+    monkeypatch.setattr(launcher, "_spawn_detached", lambda argv, activation_token=None: events.append(argv) or True)
+    _fake_viewer_argv(monkeypatch, kr, None)
+    asyncio.run(launcher.open_file(media, activation_token="tok", spot=spot))
+    assert events == ["snapshot", ["/usr/bin/kde-open", media], seek]  # snapshot before the open
+
+    # A player with a start option is started directly; no MPRIS.
+    events.clear()
+    _fake_viewer_argv(monkeypatch, kr, ["mpv", "--start=720", media])
+    asyncio.run(launcher.open_file(media, spot=spot))
+    assert events == [["mpv", "--start=720", media]]
+
+    events.clear()
+    monkeypatch.setattr(gs.shutil, "which", lambda n: "/usr/bin/gio" if n == "gio" else None)
+    glauncher = GnomeLauncher()
+
+    async def spawn(argv: list[str]) -> bool:
+        events.append(argv)
+        return True
+
+    monkeypatch.setattr(glauncher, "spawn", spawn)
+    _fake_viewer_argv(monkeypatch, gs, None)
+    asyncio.run(glauncher.open_file(media, spot=spot))
+    assert events == ["snapshot", ["/usr/bin/gio", "open", media], seek]
+
+    # A PDF page spot never goes to MPRIS.
+    events.clear()
+    asyncio.run(glauncher.open_file(PDF, spot=SPOT))
+    assert events == [["/usr/bin/gio", "open", PDF]]
 
 
 class _Recorder:
