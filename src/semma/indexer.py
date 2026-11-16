@@ -291,8 +291,9 @@ class Indexer:
                 requeued = store.requeue_files(r[0] for r in rows if ocr.is_screenshot(r[1]))
             else:
                 removed = store.delete_modality((ft.IMAGE,), "text")
-            log.info("OCR changed (%s -> %s): %d screenshots re-queued, %d text chunks of images deleted",
-                     old or "off", setup or "off", requeued, removed)
+            if requeued or removed:
+                log.info("OCR changed (%s -> %s): %d screenshots re-queued, %d text chunks of images deleted",
+                         old or "off", setup or "off", requeued, removed)
         if store.get_meta("ocr_languages") != setup:
             store.set_meta("ocr_languages", setup)
         self.ocr_setup = setup

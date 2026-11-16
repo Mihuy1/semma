@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from fakes import FakeEmbedder
+from fakes import FakeEmbedder, bag_of_words
 from PIL import Image
 from test_ocr import needs_tesseract, text_image
 
@@ -193,9 +193,16 @@ def test_screenshots_are_indexed_with_their_text(env) -> None:
     assert store.get_meta("ocr_languages") == "eng"
     assert fts(store, "interpreter") == {SHOT}
     assert fts(store, "hakumenetelmien") == {"kuva.png"}
-    # Search finds it by a word only in the screenshot, and shows the text.
+    # Search finds it by a word only in the screenshot, and shows the text, even when the
+    # picture is the closer match in meaning (its chunk has no snippet to show).
+    image_chunk = store.db.execute("SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id "
+                                   "WHERE f.path LIKE ? AND c.modality = 'image'", (f"%{SHOT}",)).fetchone()[0]
+    store.db.execute("UPDATE vec_chunks SET embedding = ? WHERE chunk_id = ?",
+                     (bag_of_words("select interpreter").tobytes(), image_chunk))
+    store.db.commit()
+    cfg.z_gate, cfg.z_floor = 0.5, 0.0  # 5 chunks: no z can exceed 2
     res = Searcher(store, cfg, FakeEmbedder()).search("select interpreter")
-    assert res[0].path.endswith(SHOT)
+    assert res[0].path.endswith(SHOT) and res[0].similarity == pytest.approx(1.0, abs=1e-4)
     assert res[0].modality == "text" and res[0].snippet.startswith("Select Interpreter")
 
 
