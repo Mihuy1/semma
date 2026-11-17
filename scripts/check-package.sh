@@ -6,22 +6,24 @@
 # installed and open cleanly with QT_QPA_PLATFORM=offscreen, and Semma must index a note and a
 # picture with the real model, find both by meaning, and start its service when something asks for
 # it on the session bus (as KRunner and GNOME Shell do).
-#   scripts/check-package.sh dist/semma-0.3.0-1.x86_64.rpm [image]   (default: fedora:latest)
-#   scripts/check-package.sh dist/semma_0.3.0-1_amd64.deb [image]    (default: ubuntu:24.04)
+#   scripts/check-package.sh dist/semma-0.4.0-1.x86_64.rpm [image]   (default: fedora:latest)
+#   scripts/check-package.sh dist/semma_0.4.0-1_amd64.deb [image]    (default: ubuntu:24.04)
 # The model comes from ~/.local/share/semma/models when it is there, else it is downloaded into
 # build/models once. Needs podman or docker.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 package=${1:?usage: scripts/check-package.sh <package> [image]}
+# install_gui: the recommends without Vulkan, ffmpeg and Tesseract (optional for the daemon, not
+# libraries of the window, and OCR is off by default), so only the window's libraries come in.
 case $package in
   *.rpm) image=${2:-registry.fedoraproject.org/fedora:latest}
          install="dnf install -y -q --setopt=install_weak_deps=False /pkg/$(basename "$package") dbus-daemon systemd > /dev/null"
-         install_gui="dnf install -y -q --setopt=install_weak_deps=False \$(rpm -qp --recommends /pkg/$(basename "$package") | grep -vE '^(vulkan-loader|/usr/bin/ffmpeg)\$') > /dev/null"
+         install_gui="dnf install -y -q --setopt=install_weak_deps=False \$(rpm -qp --recommends /pkg/$(basename "$package") | grep -vE '^(vulkan-loader|/usr/bin/ffmpeg|tesseract-libs|tesseract-langpack-eng)\$') > /dev/null"
          reinstall="rpm -U --nosignature --replacepkgs /pkg/$(basename "$package")" remove="rpm -e semma" ;;
   *.deb) image=${2:-docker.io/library/ubuntu:24.04}
          install="apt-get update -q > /dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
            --no-install-recommends /pkg/$(basename "$package") dbus-daemon systemd > /dev/null"
-         install_gui="DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \$(dpkg-deb -f /pkg/$(basename "$package") Recommends | tr ',' '\n' | grep -vE '(libvulkan1|ffmpeg)') > /dev/null"
+         install_gui="DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \$(dpkg-deb -f /pkg/$(basename "$package") Recommends | tr ',' '\n' | grep -vE '(libvulkan1|ffmpeg|tesseract)') > /dev/null"
          reinstall="dpkg -i /pkg/$(basename "$package")" remove="dpkg --purge semma" ;;
   *) echo "not an .rpm or a .deb: $package" >&2; exit 1 ;;
 esac

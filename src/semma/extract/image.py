@@ -1,7 +1,14 @@
-"""Images via Pillow (+ pillow-heif for HEIC/HEIF; AVIF is native in Pillow 13)."""
+"""Images via Pillow (+ pillow-heif for HEIC/HEIF; AVIF is native in Pillow 13).
+
+With OCR on (`[ocr]`, see semma.ocr), a screenshot also yields its recognised text as text
+chunks after the image chunk. OCR decodes the file again at full resolution (the image chunk
+is downscaled to MAX_SIDE for the model, too small for UI text); screenshots are small files.
+Any OCR failure only loses the text: the image chunk is indexed regardless.
+"""
 
 from __future__ import annotations
 
+import logging
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
@@ -13,6 +20,8 @@ if TYPE_CHECKING:
     from PIL import Image as PILImage
 
     from ..config import Config
+
+log = logging.getLogger(__name__)
 
 MAX_SIDE = 1536  # px; the model's processor resizes anyway, this bounds memory
 MIN_SIDE = 32  # smaller images (icons, spacer gifs) are not worth indexing
@@ -99,5 +108,41 @@ def load_image(path: Path) -> PILImage.Image | None:
 
 def extract_image(path: Path, cfg: Config | None = None) -> Iterator[Chunk]:
     img = load_image(path)
-    if img is not None:
-        yield Chunk("image", img)
+    if img is None:
+        return
+    yield Chunk("image", img)
+    del img
+    if cfg is None or not cfg.ocr_enabled:
+        return
+    from .. import ocr
+
+    if not ocr.is_screenshot(path):
+        return
+    languages = ocr.effective_languages(cfg)
+    if not languages:
+        return
+    try:
+        text = ocr_text(path, languages)
+    except Exception as exc:  # a broken library or an odd image must not fail the file
+        log.warning("OCR of %s failed: %s", path, exc)
+        return
+    if text:
+        from .text import chunk_text, spans_to_chunks
+
+        yield from spans_to_chunks(chunk_text(text), lambda span, i: ("", None))
+
+
+def ocr_text(path: Path, languages: list[str]) -> str:
+    """The recognised text of the image file at `path`, decoded at full resolution."""
+    _init()
+    from PIL import Image, ImageOps
+
+    from .. import ocr
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+        with Image.open(path) as img:
+            img.seek(0)
+            img.load()
+            img = ImageOps.exif_transpose(img)
+            return ocr.recognize(img, languages)

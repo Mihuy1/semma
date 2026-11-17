@@ -173,6 +173,16 @@ def _error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
 
 
+def _release_extraction() -> None:
+    """Free the calling thread's extraction resources (see extract.release_thread)."""
+    try:
+        from .extract import release_thread
+
+        release_thread()
+    except Exception:  # pragma: no cover - never let cleanup fail a run
+        log.debug("releasing extraction resources failed", exc_info=True)
+
+
 class Indexer:
     def __init__(self, store: Store, cfg: Config, embedder: EmbedderLike, extract_fn: ExtractFn | None = None,
                  prefetch: bool = True):
@@ -181,6 +191,7 @@ class Indexer:
         self.embedder = embedder
         self.extract_fn = extract_fn
         self.prefetch = prefetch  # False: extract and embed on one thread (for comparison/debugging)
+        self.ocr_setup: str | None = None  # the OCR languages last recorded (reconcile_ocr)
 
     # -- preparation -------------------------------------------------------------
     def prepare(self, rebuild: bool = False, retry_failed: bool = False) -> int:
@@ -213,6 +224,7 @@ class Indexer:
             requeued += store.requeue(("failed",))
             store.set_meta("extractor_version", version)
         requeued += self.reconcile_media()
+        requeued += self.reconcile_ocr()
         if retry_failed:
             requeued += store.requeue(("failed",), reset_attempts=False)
         else:
@@ -254,6 +266,37 @@ class Indexer:
         for key, value in (("media_max_seconds", str(limit)), ("media_segment_seconds", str(seg))):
             if store.get_meta(key) != value:
                 store.set_meta(key, value)
+        return requeued
+
+    def reconcile_ocr(self) -> int:
+        """Bring indexed screenshots in line with the OCR setup (`[ocr]` and the installed
+        languages: ocr.effective_languages, recorded in meta 'ocr_languages' joined with "+",
+        "" when off; an index from before OCR existed has no OCR text, i.e. "off"):
+
+        - OCR turned on or other languages: re-queue the indexed screenshots (old chunks stay
+          searchable until replaced);
+        - OCR off (or no longer possible): delete the text chunks of images, re-embedding nothing.
+        Returns the number of files re-queued.
+        """
+        from . import ocr
+
+        store = self.store
+        setup = "+".join(ocr.effective_languages(self.cfg))
+        old = store.get_meta("ocr_languages") or ""
+        requeued = removed = 0
+        if setup != old:
+            if setup:
+                rows = store.db.execute("SELECT id, path FROM files WHERE kind = ? AND status = 'indexed'",
+                                        (ft.IMAGE,)).fetchall()
+                requeued = store.requeue_files(r[0] for r in rows if ocr.is_screenshot(r[1]))
+            else:
+                removed = store.delete_modality((ft.IMAGE,), "text")
+            if requeued or removed:
+                log.info("OCR changed (%s -> %s): %d screenshots re-queued, %d text chunks of images deleted",
+                         old or "off", setup or "off", requeued, removed)
+        if store.get_meta("ocr_languages") != setup:
+            store.set_meta("ocr_languages", setup)
+        self.ocr_setup = setup
         return requeued
 
     def _has_media_chunks(self) -> bool:
@@ -362,6 +405,7 @@ class Indexer:
                 return
             finally:
                 self.store.release_thread()  # the queue reader's connection (one per run)
+                _release_extraction()  # the OCR engine: loaded per run, not for the daemon's life
             put((_DONE,))
 
         thread = threading.Thread(target=work, name="semma-extract", daemon=True)
@@ -526,6 +570,8 @@ class Indexer:
             close = getattr(source, "close", None)
             if close:
                 close()
+            if not self.prefetch:
+                _release_extraction()
         stats.stopped = stop.is_set()
         stats.current = ""
         report()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
     from ..config import Config
 
 __all__ = ["Chunk", "ExtractionError", "EXTRACTORS", "EXTRACTOR_VERSION", "chunk_text", "clean_str",
-           "extract", "make_snippet"]
+           "extract", "make_snippet", "release_thread"]
 
 # Bump when extraction output changes in a way that could fix previously failed files.
 EXTRACTOR_VERSION = 2
@@ -109,6 +110,14 @@ def _drop_stub(chunks: Iterator[Chunk]) -> Iterator[Chunk]:
     yield first
     yield second
     yield from chunks
+
+
+def release_thread() -> None:
+    """Free what extraction keeps loaded for the calling thread (the OCR engine, 25-50 MB).
+    The indexer calls it when a run's extraction thread is done."""
+    ocr = sys.modules.get(f"{__package__.rpartition('.')[0]}.ocr")
+    if ocr is not None:  # never loaded: nothing to free
+        ocr.release_thread()
 
 
 def extract(path: Path, kind: str, cfg: Config) -> Iterator[Chunk]:

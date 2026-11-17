@@ -50,7 +50,9 @@ over every stored vector), plus how many of the query's words the file contains.
    highest priority, then the best-ranked; `duplicates` says how many were folded into it.
 6. drop results whose file no longer exists (lstat; deleted since the last scan)
 
-The snippet/locator is the best meaning chunk if it passes the gate, else the best text match.
+The snippet/locator is the best meaning chunk if it passes the gate, else the best text match;
+for an image (whose picture chunk has no snippet) the text match whenever there is one: the
+recognised text of a screenshot (semma.ocr) that contains the query's words.
 """
 
 from __future__ import annotations
@@ -68,6 +70,7 @@ import numpy as np
 
 from . import filetypes as ft
 from .config import MAX_KNN_K, Config
+from .ocr import is_screenshot
 from .store import Store
 from .vectors import chunks_version
 
@@ -326,12 +329,6 @@ def _exists(path: str) -> bool:
     return True
 
 
-def _is_screenshot(path: str) -> bool:
-    name = os.path.basename(path).casefold()
-    folder = os.path.basename(os.path.dirname(path)).casefold()
-    return name.startswith(("screenshot", "kuvakaappaus")) or folder in ("screenshots", "kuvakaappaukset")
-
-
 @dataclass
 class _Meaning:
     best: dict[int, tuple[float, float, int]]  # file_id -> (z, cosine, chunk_id) of its best chunk
@@ -498,7 +495,7 @@ class Searcher:
                 score += NAME_BONUS
             if row["kind"] in words.kinds:
                 score += TYPE_BONUS
-                if words.screenshot and row["kind"] == ft.IMAGE and _is_screenshot(row["path"]):
+                if words.screenshot and row["kind"] == ft.IMAGE and is_screenshot(row["path"]):
                     score += SCREENSHOT_BONUS
             score += cfg.location_prior * (row["priority"] / 100.0)
             scores[f] = score
@@ -519,9 +516,12 @@ class Searcher:
         candidates = candidates[:max(limit * 5, 50)]
 
         # The chunk to show: the best meaning chunk if it stands out, else the best text match.
+        # An image's own chunk has nothing to show: its OCR text with the words comes first.
         hit: dict[int, int] = {}
         for f in candidates:  # (both orders of preference fall back to whatever exists)
-            if f in best and (best[f][0] >= gate or f not in text_best):
+            if f in text_best and files[f]["kind"] == ft.IMAGE:
+                hit[f] = text_best[f]
+            elif f in best and (best[f][0] >= gate or f not in text_best):
                 hit[f] = best[f][2]
             elif f in text_best:
                 hit[f] = text_best[f]

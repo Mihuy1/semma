@@ -393,6 +393,37 @@ def test_new_media_settings_reconcile_the_index_at_once(home: Path) -> None:
     asyncio.run(main())
 
 
+def test_ocr_settings_and_newly_installed_languages_reconcile(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from semma import ocr
+
+    installed = ["eng"]
+    monkeypatch.setattr(ocr, "effective_languages", lambda cfg: list(installed) if cfg.ocr_enabled else [])
+
+    async def main() -> None:
+        d = make_daemon(start_cfg(home))
+        d.start()
+        try:
+            await until_idle(d)
+            assert d.indexer.ocr_setup == ""
+            settings = base_settings(home)
+            settings["ocr"] = {"enabled": True}
+            assert await reload_and_settle(d, home, settings, rescan=False) == []
+            await wait_until(lambda: d.indexer.ocr_setup == "eng", what="OCR turned on")
+            # A language package installed since: a reload with unchanged settings applies it.
+            installed.insert(0, "fin")
+            assert await reload_and_settle(d, home, settings, rescan=False) == []
+            await wait_until(lambda: d.indexer.ocr_setup == "fin+eng", what="new language picked up")
+            s = Store(d.cfg.db_path)
+            try:
+                assert s.get_meta("ocr_languages") == "fin+eng"
+            finally:
+                s.close()
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
 def test_reload_toggles_pause_when_gpu_busy_live(home: Path) -> None:
     from test_daemon import StubGpu
 

@@ -15,6 +15,7 @@ from semma.gui.settings import filetypes_model as ftm
 from semma.gui.settings import media_model as mm
 from semma.gui.settings import performance_model as pfm
 from semma.gui.settings import priorities_model as pm
+from semma.gui.settings import screenshots_model as sm
 from semma.gui.settings.context import SettingsContext
 
 
@@ -96,7 +97,8 @@ def test_filetypes_problems(home: Path) -> None:
 def test_filetypes_models_do_not_import_pyside6() -> None:
     code = (
         "import sys, semma.gui.settings.filetypes_model, semma.gui.settings.priorities_model, "
-        "semma.gui.settings.media_model, semma.gui.settings.performance_model; "
+        "semma.gui.settings.media_model, semma.gui.settings.performance_model, "
+        "semma.gui.settings.screenshots_model; "
         "bad = [m for m in sys.modules if m.startswith(('PySide6', 'shiboken6'))]; "
         "assert not bad, bad"
     )
@@ -324,6 +326,120 @@ def test_performance_problems(home: Path) -> None:
     assert len(probs) == 4 and all(p.blocking for p in probs)
 
 
+# -- Screenshots model ---------------------------------------------------------------------
+
+def _fake_ocr_facts(
+    *,
+    library_available: bool = True,
+    installed_languages: tuple[str, ...] = ("deu", "eng", "fin"),
+    default_languages: tuple[str, ...] = ("fin", "eng"),
+    hint_prefix: str = "sudo dnf install",
+) -> sm.OcrFacts:
+    def _hint(code: str | None = None) -> str:
+        if not hint_prefix:
+            return ""
+        if code is None:
+            return f"{hint_prefix} tesseract-libs tesseract-langpack-eng"
+        return f"{hint_prefix} tesseract-langpack-{code}"
+
+    return sm.OcrFacts(
+        library_available=library_available,
+        installed_languages=installed_languages,
+        default_languages=default_languages,
+        install_hint=_hint,
+    )
+
+
+def test_screenshots_load_defaults_and_configured(home: Path) -> None:
+    facts = _fake_ocr_facts()
+    ctx = ctx_for(home)
+    saved = sm.load(ctx, facts)
+    assert saved == sm.ScreenshotsValues(enabled=False, languages=["fin", "eng"])
+    assert sm.changes(saved, saved.copy(), facts) == {}
+
+    ctx_cfg = ctx_for(home, '[ocr]\nenabled = true\nlanguages = ["deu", "eng"]\n')
+    loaded = sm.load(ctx_cfg, facts)
+    assert loaded == sm.ScreenshotsValues(enabled=True, languages=["deu", "eng"])
+    assert sm.changes(loaded, loaded.copy(), facts) == {}
+
+
+def test_screenshots_changes_automatic_and_back_to_default(home: Path) -> None:
+    facts = _fake_ocr_facts()
+    ctx = ctx_for(home)
+    saved = sm.load(ctx, facts)
+
+    # Turning on while keeping the automatic choice writes only enabled = true.
+    turn_on = saved.copy()
+    turn_on.enabled = True
+    ch_on = sm.changes(saved, turn_on, facts)
+    assert ch_on == {"ocr": {"enabled": True}}
+    update_config(ctx.config_path, ch_on)
+    assert read_raw(ctx.config_path) == {"ocr": {"enabled": True}}
+
+    # Choosing explicit languages writes them in order, deduped and capped at 3.
+    reloaded = sm.load(ctx_for(home), facts)
+    edited = reloaded.copy()
+    edited.languages = ["deu", "fin", "deu", "eng", "spa"]
+    ch_langs = sm.changes(reloaded, edited, facts)
+    assert ch_langs == {"ocr": {"languages": ["deu", "fin", "eng"]}}
+    update_config(ctx.config_path, ch_langs)
+    assert read_raw(ctx.config_path) == {"ocr": {"enabled": True, "languages": ["deu", "fin", "eng"]}}
+
+    # Returning to the automatic choice writes languages = None (removes the key).
+    reloaded2 = sm.load(ctx_for(home), facts)
+    back_auto = reloaded2.copy()
+    back_auto.languages = ["fin", "eng"]
+    ch_auto = sm.changes(reloaded2, back_auto, facts)
+    assert ch_auto == {"ocr": {"languages": None}}
+    update_config(ctx.config_path, ch_auto)
+    assert read_raw(ctx.config_path) == {"ocr": {"enabled": True}}
+
+    # Turning off removes enabled (and empty [ocr]).
+    reloaded3 = sm.load(ctx_for(home), facts)
+    turn_off = reloaded3.copy()
+    turn_off.enabled = False
+    ch_off = sm.changes(reloaded3, turn_off, facts)
+    assert ch_off == {"ocr": {"enabled": None}}
+    update_config(ctx.config_path, ch_off)
+    assert read_raw(ctx.config_path) == {}
+
+
+def test_screenshots_problems_and_language_choices(home: Path) -> None:
+    facts = _fake_ocr_facts(installed_languages=("eng", "fin"), default_languages=("eng",))
+    ctx = ctx_for(home, '[ocr]\nenabled = true\nlanguages = ["swe", "eng"]\n')
+    saved = sm.load(ctx, facts)
+    assert saved.languages == ["swe", "eng"]  # uninstalled language is kept
+
+    choices = sm.language_choices(saved.languages, facts)
+    assert choices[0] == ("None", None)
+    assert ("English", "eng") in choices
+    assert ("Finnish", "fin") in choices
+    assert ("Swedish (not installed)", "swe") in choices
+
+    probs = sm.problems(saved, ctx, facts)
+    assert len(probs) == 1
+    assert not probs[0].blocking
+    assert "Swedish" in probs[0].text
+    assert "tesseract-langpack-swe" in probs[0].text
+
+    # Enabled with no usable language (none selected, or none installed) -> non-blocking problem.
+    none_selected = sm.ScreenshotsValues(enabled=True, languages=[])
+    p_empty = sm.problems(none_selected, ctx, facts)
+    assert len(p_empty) == 1 and not p_empty[0].blocking
+    assert "no text will be read" in p_empty[0].text
+
+    only_missing = sm.ScreenshotsValues(enabled=True, languages=["swe"])
+    p_missing = sm.problems(only_missing, ctx, facts)
+    assert len(p_missing) == 2 and all(not p.blocking for p in p_missing)
+    assert any("Swedish" in p.text and "tesseract-langpack-swe" in p.text for p in p_missing)
+    assert any("no text will be read" in p.text for p in p_missing)
+
+    # Unknown distro (empty install_hint) does not leave a dangling colon.
+    no_hint_facts = _fake_ocr_facts(installed_languages=("eng",), default_languages=("eng",), hint_prefix="")
+    p_no_hint = sm.problems(only_missing, ctx, no_hint_facts)
+    assert p_no_hint[0].text == "The Swedish language pack is not installed."
+
+
 # -- Widgets -------------------------------------------------------------------------------
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -510,6 +626,116 @@ def test_performance_section_widget(app: QtWidgets.QApplication, home: Path) -> 
             "krunner_max_results": 15,
         }
     }
+
+
+def _select_combo_data(combo: QtWidgets.QComboBox, value: object) -> None:
+    for i in range(combo.count()):
+        if combo.itemData(i) == value:
+            combo.setCurrentIndex(i)
+            return
+    raise AssertionError(f"combo value {value!r} not found")
+
+
+def test_screenshots_section_widget(
+    app: QtWidgets.QApplication, home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from PySide6.QtCore import Qt
+
+    facts = _fake_ocr_facts(installed_languages=("deu", "eng", "fin"), default_languages=("fin", "eng"))
+    monkeypatch.setattr(sm.OcrFacts, "detect", lambda: facts)
+
+    page = SettingsPage(FakeClient(status()), config_path(home), home)
+    sec = page.select("screenshots")
+    assert not sec.is_modified()
+    assert sec.enabled_check.isEnabled()
+    assert not sec.enabled_check.isChecked()
+    assert all(not combo.isEnabled() for combo in sec.language_combos)
+    assert all(not lbl.isEnabled() for lbl in sec.language_labels)
+    assert sec.missing_note.isHidden()
+    assert "for example: " in sec.more_languages_note.text()
+    assert "tesseract-langpack-deu" in sec.more_languages_note.text()
+    assert sec.more_languages_note.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
+
+    # Loaded automatic languages: fin, eng, None
+    assert [c.currentData() for c in sec.language_combos] == ["fin", "eng", None]
+
+    # Checking enables language rows and writes only enabled = true
+    sec.enabled_check.setChecked(True)
+    assert all(combo.isEnabled() for combo in sec.language_combos)
+    assert all(lbl.isEnabled() for lbl in sec.language_labels)
+    assert sec.changes() == {"ocr": {"enabled": True}}
+
+    # Gaps are closed and duplicates are collapsed
+    _select_combo_data(sec.language_combos[0], None)
+    _select_combo_data(sec.language_combos[1], "deu")
+    _select_combo_data(sec.language_combos[2], "deu")
+    assert sec.values().languages == ["deu"]
+    assert sec.changes() == {"ocr": {"enabled": True, "languages": ["deu"]}}
+
+    page.apply()
+    assert read_raw(config_path(home)) == {"ocr": {"enabled": True, "languages": ["deu"]}}
+
+    # Returning to automatic choice removes languages; unchecking removes enabled
+    _select_combo_data(sec.language_combos[0], "fin")
+    _select_combo_data(sec.language_combos[1], "eng")
+    _select_combo_data(sec.language_combos[2], None)
+    assert sec.changes() == {"ocr": {"languages": None}}
+    sec.enabled_check.setChecked(False)
+    assert sec.changes() == {"ocr": {"enabled": None, "languages": None}}
+    page.apply()
+    assert read_raw(config_path(home)) == {}
+
+
+def test_screenshots_section_missing_library_and_uninstalled_language(
+    app: QtWidgets.QApplication, home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from PySide6.QtCore import Qt
+
+    # Missing Tesseract library with nothing configured: checkbox is disabled and unchecked
+    missing_lib = _fake_ocr_facts(library_available=False, installed_languages=(), default_languages=())
+    monkeypatch.setattr(sm.OcrFacts, "detect", lambda: missing_lib)
+    page = SettingsPage(FakeClient(status()), config_path(home), home)
+    sec = page.select("screenshots")
+    assert not sec.enabled_check.isChecked()
+    assert not sec.enabled_check.isEnabled()
+    assert not sec.missing_note.isHidden()
+    assert "Tesseract" in sec.missing_note.text()
+    assert "tesseract-libs" in sec.missing_command.text()
+    assert sec.missing_command.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
+
+    # Missing library when saved config has enabled = true: stays checked and enabled so user can turn it off
+    config_path(home).write_text('[ocr]\nenabled = true\nlanguages = ["swe"]\n', encoding="utf-8")
+    page.reload()
+    assert sec.enabled_check.isChecked()
+    assert sec.enabled_check.isEnabled()
+    assert sec.language_combos[0].currentText() == "Swedish (not installed)"
+    assert sec.language_combos[0].currentData() == "swe"
+    assert "Swedish" in page.problems_label.text()
+    assert "no text will be read" in page.problems_label.text()
+    assert page.apply_button.isEnabled() is False  # not modified yet
+
+    sec.enabled_check.setChecked(False)
+    assert page.apply_button.isEnabled()  # problems are non-blocking
+    page.apply()
+    assert read_raw(config_path(home)) == {"ocr": {"languages": ["swe"]}}
+    assert not sec.enabled_check.isChecked()
+    assert not sec.enabled_check.isEnabled()
+
+    # Library available, no language packs installed, empty install_hint (unknown distro)
+    no_langs = _fake_ocr_facts(
+        library_available=True, installed_languages=(), default_languages=(), hint_prefix="",
+    )
+    monkeypatch.setattr(sm.OcrFacts, "detect", lambda: no_langs)
+    config_path(home).write_text("", encoding="utf-8")
+    page.reload()
+    assert not sec.enabled_check.isChecked()
+    assert not sec.enabled_check.isEnabled()
+    assert not sec.missing_note.isHidden()
+    assert sec.missing_command.isHidden()
+    assert sec.more_languages_note.text() == (
+        "More languages can be added by installing their Tesseract language pack."
+    )
+
 
 
 

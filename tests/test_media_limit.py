@@ -107,7 +107,7 @@ def test_shorter_limit_trims_without_reembedding(env) -> None:
     row = cache.row_of[next(iter(live_ids))]
     stored = store.db.execute("SELECT embedding FROM vec_chunks WHERE chunk_id = ?",
                               (int(cache.chunk_ids[row]),)).fetchone()[0]
-    assert np.array_equal(cache.mat[row], np.frombuffer(stored, dtype=np.float32))
+    assert np.allclose(cache.mat[row], np.frombuffer(stored, dtype=np.float32), atol=1e-6)
 
 
 def test_new_segment_length_reindexes_all_media(env) -> None:

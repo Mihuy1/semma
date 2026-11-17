@@ -451,3 +451,31 @@ def test_scan_max_file_mb_config(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert "scan.max_file_mb" in capsys.readouterr().err
     assert cfg_nondict.max_bytes == DEFAULT_MAX_BYTES
 
+
+
+def test_ocr_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cfg = make_cfg(tmp_path)
+    assert cfg.ocr_enabled is False and cfg.ocr_languages is None  # off, automatic languages
+    assert check_unknown_keys({"ocr": {"enabled": True, "languages": ["eng"]}}) == []
+    assert check_unknown_keys({"ocr": {"langs": ["eng"]}}) == ["ocr.langs"]
+
+    apply_overrides(cfg, {"ocr": {"enabled": True, "languages": ["fin", "ENG", "fin", "chi_sim"]}})
+    assert cfg.ocr_enabled is True
+    assert cfg.ocr_languages == ("fin", "eng", "chi_sim")  # duplicates dropped, order kept
+    assert capsys.readouterr().err == ""
+
+    # More than three: the first three, with a warning. Bad entries are skipped.
+    apply_overrides(cfg, {"ocr": {"languages": ["deu", "fra", 7, "English", "swe", "ita"]}})
+    err = capsys.readouterr().err
+    assert "7" in err and "'English'" in err and "more than 3" in err
+    assert cfg.ocr_languages == ("deu", "fra", "swe")
+
+    # Wrong types warn and keep what was there; an empty list means automatic.
+    apply_overrides(cfg, {"ocr": {"enabled": "yes", "languages": "eng"}})
+    err = capsys.readouterr().err
+    assert "ocr.enabled" in err and "ocr.languages" in err
+    assert cfg.ocr_enabled is True and cfg.ocr_languages == ("deu", "fra", "swe")
+    apply_overrides(cfg, {"ocr": {"languages": []}})
+    assert cfg.ocr_languages is None
+    apply_overrides(cfg, {"ocr": "on"})
+    assert "[ocr] must be a table" in capsys.readouterr().err
