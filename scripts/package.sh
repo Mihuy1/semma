@@ -39,6 +39,9 @@ uv build --quiet --wheel --out-dir build/wheel
 uv export --quiet --frozen --no-dev --no-emit-project --format requirements-txt -o build/requirements.txt
 uv pip install --quiet --python "$py" --require-hashes -r build/requirements.txt
 uv pip install --quiet --python "$py" --no-deps build/wheel/semma-"$version"-*.whl
+# While every wheel is still installed (before the Qt trim), build all notices and fail if a
+# licence we need is missing. Qt/PySide licences are fetched from the matching upstream sources.
+"$py" -I scripts/notices.py "$prefix/python" build/THIRD_PARTY_NOTICES.txt
 # The commands beside the interpreter name this build folder in their first line; /usr/bin/semma
 # starts Semma instead.
 find "$prefix/python/bin" -mindepth 1 ! -name "python$PYTHON_VERSION" -delete
@@ -46,7 +49,7 @@ find "$prefix/python/bin" -mindepth 1 ! -name "python$PYTHON_VERSION" -delete
 # PySide6-Essentials carries all of Qt Quick, QML, Designer, Network, SQL, PrintSupport, translations
 # and developer tools (~250 MB). Semma's window uses only Qt Widgets on Wayland and X11; keep an
 # explicit allow-list (a missing path fails the build; everything else in PySide6/ and shiboken6/ is
-# deleted, along with their dist-info). libqgtk3.so is left out so the window does not pull in GTK 3
+# deleted, the dist-info and the notices built above aside). libqgtk3.so is left out so the window does not pull in GTK 3
 # beside Qt; libqxdgdesktopportal.so uses the desktop portal over D-Bus instead.
 qt_keep=(
   shiboken6/__init__.py
@@ -103,7 +106,7 @@ mkdir -p "$qt_trim"
     cp -a --parents "${matches[@]}" "$OLDPWD/$qt_trim/"
   done
 )
-rm -rf "$lib/site-packages"/{PySide6,shiboken6,pyside6_essentials-*.dist-info,shiboken6-*.dist-info}
+rm -rf "$lib/site-packages"/{PySide6,shiboken6}
 cp -a "$qt_trim"/. "$lib/site-packages/"
 rm -rf "$qt_trim"
 
@@ -118,6 +121,7 @@ cp -a build/llama/lib/. "$prefix/llama/"
 
 install -m 755 packaging/semma "$stage/usr/bin/semma"
 install -D -m 644 README.md "$stage/usr/share/doc/semma/README.md"
+install -D -m 644 build/THIRD_PARTY_NOTICES.txt "$stage/usr/share/doc/semma/THIRD_PARTY_NOTICES.txt"
 install -D -m 644 build/llama/LICENSE.llama.cpp "$stage/usr/share/doc/semma/LICENSE.llama.cpp"
 install -D -m 644 "$lib/LICENSE.txt" "$stage/usr/share/doc/semma/LICENSE.python"
 install -D -m 644 LICENSE "$stage/usr/share/doc/semma/LICENSE"

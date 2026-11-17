@@ -43,6 +43,24 @@ echo "checking $package on $image"
   -e SEMMA_MODEL_DIR=/models -e install_gui="$install_gui" -e reinstall="$reinstall" -e remove="$remove" "$image" bash -c "
 set -euo pipefail
 $install"'
+# The licenses of everything the package carries (scripts/notices.py); a .deb also keeps them where
+# Debian looks for them, in copyright.
+doc=/usr/share/doc/semma
+notices=$doc/THIRD_PARTY_NOTICES.txt
+for file in $doc/{LICENSE,LICENSE.python,LICENSE.llama.cpp} "$notices"; do
+  test -s "$file" || { echo "missing license notice: $file"; exit 1; }
+done
+if command -v dpkg > /dev/null; then
+  cmp -s "$notices" $doc/copyright || { echo "the .deb has no copyright file matching the notices"; exit 1; }
+fi
+for text in "GNU LESSER GENERAL PUBLIC LICENSE" "Version 3, 29 June 2007" "PYTHON SOFTWARE FOUNDATION LICENSE" \
+    "Unicode" "ggml authors" "x265" "sqlite-vec" "pillow-heif"; do
+  grep -qF "$text" "$notices" || { echo "notices lack \"$text\""; exit 1; }
+done
+for dist in pyside6_essentials shiboken6; do
+  test -s /usr/lib/semma/python/lib/python3.13/site-packages/"$dist"-*.dist-info/METADATA ||
+    { echo "missing $dist metadata"; exit 1; }
+done
 # Without recommends (a minimal or headless install), everything the daemon and CLI use must
 # already find its libraries; only PySide6 waits for the recommended desktop libraries.
 missing=$(find /usr/lib/semma \( -path "*/site-packages/PySide6" -o -path "*/site-packages/shiboken6" \) -prune \

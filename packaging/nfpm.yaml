@@ -20,6 +20,12 @@ contents:
   - src: build/stage/usr
     dst: /usr
     type: tree
+  # Debian looks for a package's licenses in /usr/share/doc/<package>/copyright.
+  - src: build/THIRD_PARTY_NOTICES.txt
+    dst: /usr/share/doc/semma/copyright
+    packager: deb
+    file_info:
+      mode: 0644
 
 scripts:
   postinstall: packaging/postinstall.sh
