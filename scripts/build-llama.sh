@@ -24,7 +24,7 @@ OUT=build/llama
 
 if [[ ${1:-} != --native ]]; then
   stamp="$COMMIT $IMAGE"
-  if [[ -f $OUT/lib/libllama.so && "$(cat "$OUT/BUILD" 2>/dev/null)" == "$stamp" ]]; then
+  if [[ -f $OUT/lib/libllama.so && -d $OUT/licenses && "$(cat "$OUT/BUILD" 2>/dev/null)" == "$stamp" ]]; then
     exit 0
   fi
   engine=$(command -v podman || command -v docker) || { echo "needs podman or docker (or --native)" >&2; exit 1; }
@@ -77,7 +77,11 @@ done
 # Under a name ggml does not look for: embedder.py loads it, and only in a worker that uses the GPU.
 mv "$OUT/lib/libggml-vulkan.so" "$OUT/lib/libsemma-ggml-vulkan.so"
 strip --strip-unneeded "$OUT"/lib/*.so.* "$OUT"/lib/lib*ggml-*.so 2>/dev/null || true
+# Its licenses beside the libraries, so a cached build/llama (CI keeps only that) still has them
+# for scripts/notices.py.
 cp "$SOURCE/LICENSE" "$OUT/LICENSE.llama.cpp"
+rm -rf "$OUT/licenses"
+cp -r "$SOURCE/licenses" "$OUT/licenses"
 echo "$COMMIT native" > "$OUT/BUILD"
 echo "Built llama.cpp ${COMMIT:0:10} into $OUT/lib:"
 ls "$OUT/lib"

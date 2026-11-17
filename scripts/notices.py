@@ -375,11 +375,13 @@ def main() -> None:
 
     # 2. Semma itself, followed by 3. the llama.cpp licences.
     section("Semma", ("LICENSE", read(repo / "LICENSE")))
-    llama = repo / "build" / "llama.cpp"
-    llama_texts = [("build/llama.cpp/LICENSE", read(llama / "LICENSE"))]
+    # build/llama is scripts/build-llama.sh's output (the libraries and their licenses), which CI
+    # restores from its cache without the llama.cpp source.
+    llama = repo / "build" / "llama"
+    llama_texts = [("llama.cpp/LICENSE", read(llama / "LICENSE.llama.cpp"))]
     for path in sorted(need_dir(llama / "licenses").iterdir()):
         if path.is_file():
-            llama_texts.append((f"build/llama.cpp/licenses/{path.name}", read(path)))
+            llama_texts.append((f"llama.cpp/licenses/{path.name}", read(path)))
     section("llama.cpp licences", *llama_texts)
 
     # 4. CPython and the python-build-standalone component licences.
