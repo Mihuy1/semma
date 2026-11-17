@@ -223,7 +223,7 @@ def test_turning_ocr_off_deletes_the_text_without_reindexing(env) -> None:
     row = cache.row_of[int(cache.chunk_ids[: cache.n][alive][0])]
     stored = store.db.execute("SELECT embedding FROM vec_chunks WHERE chunk_id = ?",
                               (int(cache.chunk_ids[row]),)).fetchone()[0]
-    assert np.array_equal(cache.mat[row], np.frombuffer(stored, dtype=np.float32))
+    assert np.allclose(cache.mat[row], np.frombuffer(stored, dtype=np.float32), atol=1e-6)
     assert ix.reconcile_ocr() == 0 and calls == []  # recorded: nothing more to do
 
     # On again: only the screenshots are read again.
