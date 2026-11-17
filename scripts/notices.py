@@ -202,6 +202,7 @@ def icu_version(qt_lib: Path) -> str:
 def fetch(url: str, dest: Path) -> Path:
     if dest.is_file():
         return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
     run(["curl", "-fsSI", "-o", os.devnull, url])
     part = dest.with_name(dest.name + ".part")
     run(["curl", "-fsSL", "-o", str(part), url])

@@ -67,6 +67,16 @@ jobs:
           path: build/llama
           key: llama-${{ hashFiles('scripts/build-llama.sh') }}
 
+      # The license files scripts/notices.py takes from the Qt, PySide and Python sources (~175 MB of
+      # downloads; only the licenses are kept). Its folders are named by version, so an older cache
+      # is a fine start: only a changed version downloads again.
+      - name: Notices sources cache
+        uses: actions/cache@v4
+        with:
+          path: build/notices-src
+          key: notices-${{ hashFiles('uv.lock', 'scripts/package.sh') }}
+          restore-keys: notices-
+
       - name: Build the packages
         run: scripts/package.sh
 
