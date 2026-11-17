@@ -54,7 +54,7 @@ if command -v dpkg > /dev/null; then
   cmp -s "$notices" $doc/copyright || { echo "the .deb has no copyright file matching the notices"; exit 1; }
 fi
 for text in "GNU LESSER GENERAL PUBLIC LICENSE" "Version 3, 29 June 2007" "PYTHON SOFTWARE FOUNDATION LICENSE" \
-    "Unicode" "ggml authors" "x265" "sqlite-vec" "pillow-heif"; do
+    "Unicode" "ggml authors" "sqlite-vec"; do
   grep -qF "$text" "$notices" || { echo "notices lack \"$text\""; exit 1; }
 done
 for dist in pyside6_essentials shiboken6; do

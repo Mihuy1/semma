@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import shutil
 import struct
 import time
 import zipfile
@@ -619,15 +620,19 @@ def test_sixteen_bit_and_cmyk(tmp_path, cfg):
         assert c.content.mode == "RGB" and c.content.size == (64, 64)
 
 
-def test_heic(tmp_path, cfg):
-    pillow_heif = pytest.importorskip("pillow_heif")
-    p = tmp_path / "photo.heic"
+def test_heic_through_ffmpeg(cfg):
+    if not shutil.which("ffmpeg"):
+        pytest.skip("no ffmpeg")
+    p = Path(__file__).parent / "data" / "photo.heic"  # 128x96 orange, blue top-left quarter
     try:
-        pillow_heif.from_pillow(Image.new("RGB", (128, 96), "orange")).save(p, quality=80)
-    except Exception as e:  # pragma: no cover - libheif built without an encoder
-        pytest.skip(f"no HEIC encoder: {e}")
-    (c,) = run(p, "image", cfg)
-    assert c.content.size == (128, 96)
+        (c,) = run(p, "image", cfg)
+    except ExtractionError as e:  # pragma: no cover - an ffmpeg without an HEVC decoder
+        pytest.skip(f"ffmpeg cannot decode HEVC: {e}")
+    assert c.content.mode == "RGB" and c.content.size == (128, 96)
+    r, g, b = c.content.getpixel((10, 10))
+    assert b > 200 and r < 50
+    r, g, b = c.content.getpixel((120, 90))
+    assert r > 200 and b < 50
 
 
 def _png_header(width: int, height: int) -> bytes:

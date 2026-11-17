@@ -5,8 +5,8 @@ Looks up thumbnails in:
 2. The freedesktop thumbnail cache (``$XDG_CACHE_HOME/thumbnails/{normal,large}/<md5(uri)>.png``),
    accepted only when its ``Thumb::MTime`` PNG text chunk matches ``int(mtime)``.
 3. Our own on-disk cache (``$XDG_CACHE_HOME/semma/thumbnails/<sha1(path|mtime|size)>.png``).
-4. On-the-fly generation: Pillow for images (with EXIF transpose, JPEG draft mode, and pillow-heif
-   when available), or a single frame via ``ffmpeg`` for videos. Newly generated thumbnails are
+4. On-the-fly generation: Pillow for images (with EXIF transpose and JPEG draft mode; HEIC/HEIF
+   through ``ffmpeg``), or a single frame via ``ffmpeg`` for videos. Newly generated thumbnails are
    saved atomically to our own cache.
 
 Returns the ``(iiibiiay)`` struct expected by KRunner's ``icon-data`` property:
@@ -30,6 +30,8 @@ import threading
 import warnings
 
 from . import filetypes as ft
+from .extract.base import ExtractionError
+from .extract.image import decode_heif, is_heif
 from .extract.media import probe
 
 log = logging.getLogger(__name__)
@@ -42,27 +44,17 @@ DEFAULT_LRU_CAPACITY = 256
 FFMPEG_TIMEOUT = 10.0
 MAX_IMAGE_PIXELS = 50_000_000
 
-_heif_registered = False
-_heif_lock = threading.Lock()
+_pillow_initialised = False
 
 
 def _ensure_pillow_init() -> None:
-    global _heif_registered
-    if _heif_registered:
+    global _pillow_initialised
+    if _pillow_initialised:
         return
-    with _heif_lock:
-        if _heif_registered:
-            return
-        from PIL import Image
+    from PIL import Image
 
-        try:
-            import pillow_heif
-
-            pillow_heif.register_heif_opener()
-        except ImportError:  # pragma: no cover
-            pass
-        Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
-        _heif_registered = True
+    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+    _pillow_initialised = True
 
 
 def xdg_cache_home() -> Path:
@@ -178,6 +170,14 @@ def _generate_image_thumb(path: Path, size: int):
     _ensure_pillow_init()
     from PIL import Image, ImageOps
 
+    if is_heif(path):
+        try:
+            img = decode_heif(path, max(size * 2, 128), timeout=FFMPEG_TIMEOUT).convert("RGBA")
+        except ExtractionError as e:
+            log.debug("cannot generate image thumbnail for %s: %s", path, e)
+            return None
+        img.thumbnail((size, size), Image.Resampling.LANCZOS, reducing_gap=3.0)
+        return img
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", Image.DecompressionBombWarning)
