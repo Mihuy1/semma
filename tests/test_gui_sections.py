@@ -652,8 +652,9 @@ def test_screenshots_section_widget(
     assert all(not combo.isEnabled() for combo in sec.language_combos)
     assert all(not lbl.isEnabled() for lbl in sec.language_labels)
     assert sec.missing_note.isHidden()
-    assert "tesseract-langpack-deu" in sec.more_languages_command.text()
-    assert sec.more_languages_command.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
+    assert "for example: " in sec.more_languages_note.text()
+    assert "tesseract-langpack-deu" in sec.more_languages_note.text()
+    assert sec.more_languages_note.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
 
     # Loaded automatic languages: fin, eng, None
     assert [c.currentData() for c in sec.language_combos] == ["fin", "eng", None]
@@ -731,7 +732,9 @@ def test_screenshots_section_missing_library_and_uninstalled_language(
     assert not sec.enabled_check.isEnabled()
     assert not sec.missing_note.isHidden()
     assert sec.missing_command.isHidden()
-    assert sec.more_languages_command.isHidden()
+    assert sec.more_languages_note.text() == (
+        "More languages can be added by installing their Tesseract language pack."
+    )
 
 
 

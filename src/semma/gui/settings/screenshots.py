@@ -106,16 +106,10 @@ class ScreenshotsSection(SettingsSection):
         self.more_languages_note = QLabel(lang_box)
         self.more_languages_note.setWordWrap(True)
         self.more_languages_note.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-        ll.addWidget(self.more_languages_note)
-
-        self.more_languages_command = QLabel(lang_box)
-        self.more_languages_command.setWordWrap(True)
-        self.more_languages_command.setTextInteractionFlags(
+        self.more_languages_note.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        self.more_languages_command.setContentsMargins(16, 0, 0, 0)
-        self.more_languages_command.hide()
-        ll.addWidget(self.more_languages_command)
+        ll.addWidget(self.more_languages_note)
 
         self.body.addWidget(text_box)
         self.body.addWidget(lang_box)
@@ -215,16 +209,12 @@ class ScreenshotsSection(SettingsSection):
         hint = facts.install_hint(sm.EXAMPLE_LANGUAGE)
         if hint:
             self.more_languages_note.setText(
-                "More languages can be added by installing their Tesseract language pack, for example:"
+                f"More languages can be added by installing their Tesseract language pack, for example: {hint}"
             )
-            self.more_languages_command.setText(hint)
-            self.more_languages_command.show()
         else:
             self.more_languages_note.setText(
                 "More languages can be added by installing their Tesseract language pack."
             )
-            self.more_languages_command.setText("")
-            self.more_languages_command.hide()
 
     def _on_enabled_toggled(self, _checked: bool) -> None:
         self._update_language_rows_enabled()
