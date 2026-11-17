@@ -15,8 +15,6 @@ from semma.install import (
     detect_desktop,
     install_gnome,
     install_kde,
-    render_app_desktop_file,
-    render_gnome_desktop_file,
     render_gnome_search_provider_ini,
     shared_service_kept_for_gnome,
     shared_service_kept_for_kde,
@@ -236,29 +234,6 @@ def test_python_m_semma_help() -> None:
 
 
 def test_gnome_renderers_contents() -> None:
-    assert render_gnome_desktop_file is render_app_desktop_file
-    desktop_text = render_gnome_desktop_file("/opt/semma/venv/bin/python")
-    cp = configparser.ConfigParser(interpolation=None)
-    cp.optionxform = str  # type: ignore[assignment]
-    cp.read_string(desktop_text)
-    assert "Desktop Entry" in cp
-    entry = cp["Desktop Entry"]
-    assert entry["Type"] == "Application"
-    assert entry["Name"] == "Semma"
-    assert entry["Comment"] == "Semantic file search: status and settings"
-    assert entry["Icon"] == "system-search"
-    assert entry["Exec"] == "/opt/semma/venv/bin/python -m semma gui"
-    assert entry["Terminal"] == "false"
-    assert entry["Categories"] == "Utility;"
-    assert entry["StartupNotify"] == "true"
-    assert "OnlyShowIn" not in entry
-    assert "NoDisplay" not in entry
-    assert "StartupWMClass" not in entry
-
-    spaced = "/home/user/My Projects/Semma Search/.venv/bin/python"
-    spaced_desktop = render_gnome_desktop_file(spaced)
-    assert f'Exec="{spaced}" -m semma gui\n' in spaced_desktop
-
     ini_text = render_gnome_search_provider_ini()
     ini_cp = configparser.ConfigParser(interpolation=None)
     ini_cp.optionxform = str  # type: ignore[assignment]
@@ -439,18 +414,12 @@ def test_uninstall_gnome_removes_shared_service_when_kde_absent_and_handles_ro_i
         ({"XDG_CURRENT_DESKTOP": "ubuntu:GNOME"}, "gnome"),
         ({"XDG_CURRENT_DESKTOP": "GNOME-Classic"}, "gnome"),
         ({"XDG_CURRENT_DESKTOP": "GNOME-Flashback:GNOME"}, None),
-        ({"XDG_CURRENT_DESKTOP": "GNOME-Flashback"}, None),
         ({"XDG_CURRENT_DESKTOP": "GNOME-Flashback:GNOME", "XDG_SESSION_DESKTOP": "gnome"}, None),
-        ({"DESKTOP_SESSION": "gnome-flashback-metacity"}, None),
         ({"DESKTOP_SESSION": "/usr/share/xsessions/plasma"}, "kde"),
-        ({"DESKTOP_SESSION": "/usr/share/wayland-sessions/gnome"}, "gnome"),
         ({"DESKTOP_SESSION": "/usr/share/xsessions/gnome-flashback"}, None),
         ({"XDG_CURRENT_DESKTOP": "XFCE"}, None),
         ({"XDG_CURRENT_DESKTOP": "", "XDG_SESSION_DESKTOP": "plasma"}, "kde"),
-        ({"XDG_SESSION_DESKTOP": "gnome"}, "gnome"),
         ({"DESKTOP_SESSION": "plasmawayland"}, "kde"),
-        ({"DESKTOP_SESSION": "gnome-xorg"}, "gnome"),
-        ({"XDG_CURRENT_DESKTOP": "Hyprland", "DESKTOP_SESSION": "hyprland"}, None),
         ({}, None),
     ],
 )

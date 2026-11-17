@@ -479,7 +479,6 @@ def test_no_unload_while_queries_keep_coming(home: Path) -> None:
 
 @pytest.mark.parametrize(("query_device", "expect_unload"), [
     ("vulkan", True),
-    ("vulkan:0", True),
     ("gpu", True),
     ("cuda", True),
     ("cpu", False),

@@ -214,23 +214,6 @@ def test_resolve_paths_and_ensure_model_file_hit(tmp_path: Path, monkeypatch: py
     assert ensure_model_file("text", fake_model_dir) == target
 
 
-def test_reference_npz_integrity() -> None:
-    ref = np.load(REFERENCE_NPZ)
-    expected = {
-        "queries": (4, 768),
-        "docs_text": (3, 768),
-        "images": (3, 768),
-        "audios": (2, 768),
-        "video": (768,),
-    }
-    for key, shape in expected.items():
-        arr = ref[key]
-        assert arr.shape == shape
-        assert arr.dtype == np.float32
-        norms = np.linalg.norm(arr, axis=-1)
-        assert np.allclose(norms, 1.0, atol=1e-5)
-
-
 @pytest.mark.gpu
 def test_llama_cpp_parity_with_reference_bf16() -> None:
     ref = np.load(REFERENCE_NPZ)

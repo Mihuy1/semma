@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -92,17 +90,6 @@ def test_filetypes_problems(home: Path) -> None:
     assert len(hints) == 2
     assert all(not p.blocking for p in hints)
     assert any("bak" in p.text for p in hints) and any("exe" in p.text for p in hints)
-
-
-def test_filetypes_models_do_not_import_pyside6() -> None:
-    code = (
-        "import sys, semma.gui.settings.filetypes_model, semma.gui.settings.priorities_model, "
-        "semma.gui.settings.media_model, semma.gui.settings.performance_model, "
-        "semma.gui.settings.screenshots_model; "
-        "bad = [m for m in sys.modules if m.startswith(('PySide6', 'shiboken6'))]; "
-        "assert not bad, bad"
-    )
-    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 # -- Priorities model ----------------------------------------------------------------------

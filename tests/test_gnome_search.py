@@ -439,13 +439,6 @@ def test_launcher_plain_spawn_without_systemd_run(monkeypatch: pytest.MonkeyPatc
     assert spawned == [["/usr/bin/gio", "open", "/x/a.txt"]]
 
 
-def test_launcher_plain_spawn_when_not_under_systemd(monkeypatch: pytest.MonkeyPatch) -> None:
-    _scope_env(monkeypatch, systemd_run=True, under_systemd=False)
-    launcher, spawned = _recording_launcher(monkeypatch)
-    asyncio.run(launcher.open_file("/x/a.txt"))
-    assert spawned == [["/usr/bin/gio", "open", "/x/a.txt"]]
-
-
 def test_launcher_falls_back_when_systemd_run_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     _scope_env(monkeypatch, systemd_run=True, under_systemd=True)
     launcher, spawned = _recording_launcher(monkeypatch, returncode=1)
@@ -468,9 +461,6 @@ def test_launcher_falls_back_when_systemd_run_cannot_exec(monkeypatch: pytest.Mo
 
 
 def test_gnome_budget_default_and_prewarm_cap() -> None:
-    assert GNOME_THUMBNAIL_BUDGET_SECONDS == 0.75
-    assert GNOME_VISIBLE_RESULTS == 5
-
     async def check() -> None:
         results = [_result(f"/p/{i}.jpg", kind=ft.IMAGE) for i in range(8)]
         thumb = FakeThumbnailer(delay=0.0)

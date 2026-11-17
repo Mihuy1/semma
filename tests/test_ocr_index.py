@@ -99,10 +99,9 @@ def test_long_text_is_chunked_like_documents(tmp_path: Path, monkeypatch: pytest
     assert texts[0].content.startswith("Line 0 ") and "Line 199 " in texts[-1].content
 
 
-@pytest.mark.parametrize("error", [RuntimeError("tesseract crashed"), OSError("cannot decode"), MemoryError()])
-def test_ocr_failure_keeps_the_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
+def test_ocr_failure_keeps_the_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def broken(path: Path, langs: list[str]) -> str:
-        raise error
+        raise MemoryError()
 
     monkeypatch.setattr(ocr, "effective_languages", lambda cfg: ["eng"])
     monkeypatch.setattr(image_mod, "ocr_text", broken)

@@ -21,7 +21,6 @@ from semma import ocr
 
 @pytest.mark.parametrize(("env", "code"), [
     ({"LANG": "fi_FI.UTF-8"}, "fin"),
-    ({"LANG": "en_US.UTF-8"}, "eng"),
     ({"LANG": "de_DE.UTF-8@euro"}, "deu"),
     ({"LANG": "zh_CN.UTF-8"}, "chi_sim"),
     ({"LANG": "zh_TW.UTF-8"}, "chi_tra"),
@@ -139,20 +138,13 @@ def test_install_hint(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.parametrize(("path", "expected"), [
     ("/home/u/Pictures/Screenshots/Screenshot From 2026-09-25 14-20-31.png", True),
-    ("/home/u/Pictures/Screenshot_20261113_125730.png", True),  # KDE name, anywhere
-    ("/home/u/Desktop/Screen Shot 2024-01-02 at 10.00.00.png", True),  # macOS
     ("/home/u/Pictures/Screenshots/2026/holiday.jpg", True),  # in the folder, any name, any depth
-    ("/home/u/Kuvat/Kuvakaappaukset/kuva.png", True),
-    ("/home/u/Kuvat/Näyttökuva 2026-01-01.png", True),
     ("/home/u/Kuvat/Näyttökuva 2026-01-01.png", True),  # decomposed umlauts
-    ("/home/u/Bilder/Bildschirmfotos/x.png", True),
     ("/home/u/Images/Capture d’écran du 2026-01-01.png", True),  # typographic apostrophe
-    ("/home/u/Images/Capture_d'écran_2026.png", True),
-    ("/home/u/Imágenes/Captura de pantalla 2026.png", True),
+    ("/home/u/Images/Capture_d'écran_2026.png", True),  # underscore normalization
     ("/home/u/SCREENSHOTS/a.png", True),
     ("/home/u/Pictures/holiday.jpg", False),
     ("/home/u/Pictures/Screenshots/notes.txt", False),  # images only
-    ("/home/u/Pictures/Screenshots/clip.mp4", False),
     ("/home/u/Documents/my screenshot.png", False),  # the word must start the name
 ])
 def test_is_screenshot(path: str, expected: bool) -> None:

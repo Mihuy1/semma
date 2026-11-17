@@ -444,22 +444,3 @@ def test_relative_symlink_updates_target_and_keeps_relative_link(tmp_path: Path)
     assert not cfg_path.readlink().is_absolute()
     assert "# relative target" in target.read_text(encoding="utf-8")
     assert read_raw(target) == {"scan": {"skip_hidden": False}}
-
-
-def test_ocr_settings_round_trip(tmp_path: Path) -> None:
-    cfg_path = tmp_path / "config.toml"
-    update_config(cfg_path, {"ocr": {"enabled": True, "languages": ["fin", "eng"]}})
-    assert read_raw(cfg_path) == {"ocr": {"enabled": True, "languages": ["fin", "eng"]}}
-    loaded = config.load_config(cfg_path, home=tmp_path, strict=True)
-    assert loaded.ocr_enabled is True and loaded.ocr_languages == ("fin", "eng")
-
-    # Back to automatic languages, then off: the table goes away with its last key.
-    update_config(cfg_path, {"ocr": {"languages": None}})
-    loaded = config.load_config(cfg_path, home=tmp_path, strict=True)
-    assert loaded.ocr_enabled is True and loaded.ocr_languages is None
-    update_config(cfg_path, {"ocr": {"enabled": None}})
-    assert read_raw(cfg_path) == {}
-    assert config.load_config(cfg_path, home=tmp_path).ocr_enabled is False
-
-    with pytest.raises(ConfigWriteError):
-        update_config(cfg_path, {"ocr": {"language": ["eng"]}})

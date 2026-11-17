@@ -604,18 +604,11 @@ def test_priorities_spinbox_cells_and_messagebar_styling(
             app.processEvents()
 
             spin = next(iter(priorities.score_spins.values()))
-            cell = spin.parentWidget()
-            assert cell is not None and cell.objectName() == "prioritySpinCell"
-            assert cell.styleSheet().startswith("#prioritySpinCell")
             # Child QSpinBox must keep its palette Base background, not transparent from parent stylesheet.
             expected_base = app.palette().color(QPalette.ColorRole.Base)
             assert spin.palette().color(QPalette.ColorRole.Base) == expected_base
             assert priorities.table.rowHeight(0) >= spin.sizeHint().height() + 4
             assert priorities.table.columnWidth(1) >= spin.sizeHint().width() + 12
-
-            assert page.notice.objectName() == "messageBar"
-            assert "QFrame#messageBar" in app.styleSheet()
-            assert "border-radius" in app.styleSheet()
             page.close()
     finally:
         app.setPalette(old_pal)

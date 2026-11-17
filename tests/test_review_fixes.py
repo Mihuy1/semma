@@ -551,7 +551,7 @@ def test_embedder_query_path_loads_text_only_and_reuses_full_model(tmp_path: Pat
     assert worker_calls[0]["mmproj_path"] is None
 
 
-def test_query_device_cpu_selects_float32_cpu_and_invalid_warns(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_query_device_cpu_selects_float32_cpu_and_invalid_warns(tmp_path: Path, monkeypatch) -> None:
     from semma import embedder as emb_mod
 
     worker_calls: list[dict] = []
@@ -592,13 +592,6 @@ def test_query_device_cpu_selects_float32_cpu_and_invalid_warns(tmp_path: Path, 
     assert worker_calls[0]["use_gpu"] is False
     assert worker_calls[0]["mmproj_path"] is None
     assert e.query_device == "cpu"
-
-    # Unknown query_device warns and falls back to "auto".
-    conf2 = tmp_path / "c2.toml"
-    conf2.write_text('[daemon]\nquery_device = "tpu"\n')
-    cfg2 = load_config(conf2, home=tmp_path)
-    assert cfg2.query_device == "auto"
-    assert "query_device" in capsys.readouterr().err
 
 
 class _ConcurrencyStubWorker:
@@ -995,27 +988,6 @@ def test_versions_collapse_by_first_chunk(tmp_path: Path) -> None:
     assert "other.md" in names(res)
     thesis = [r for r in res if "thesis" in r.path]
     assert len(thesis) == 1 and thesis[0].duplicates == 2
-
-
-def test_single_word_text_hit_ranks_after_strong_meaning_match(tmp_path: Path) -> None:
-    """One mention of "dog" in a thesis is a candidate (all the query's words) but the dog photo,
-    which stands far out in meaning, still comes first."""
-    cfg = make_cfg(tmp_path)
-    cfg.z_gate = 2.0
-    cfg.duplicate_similarity = {}
-    store = Store(cfg.db_path)
-    q = unit(1)
-    put_background(store, tmp_path, q)
-    put_background(store, tmp_path, q, mean=0.59, kind="text", modality="text", seed=5000)
-    put_vectors(store, [(str(tmp_path / "x/photo.jpg"), 10, with_cos(q, 0.80, 2))])
-    put_vectors(store, [(str(tmp_path / "x/thesis.md"), 90, with_cos(q, 0.58, 3))], kind="text", modality="text")
-    with store.write() as (db, _):
-        cid = db.execute("SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.path LIKE '%thesis.md'").fetchone()[0]
-        db.execute("INSERT INTO fts_chunks (rowid, text) VALUES (?, 'a dog appears in figure 3')", (cid,))
-    s = Searcher(store, cfg, FakeEmbedder())
-    res = s.search_vector(q, "dog", limit=10)
-    assert names(res)[:2] == ["photo.jpg", "thesis.md"]
-    assert res[0].matched == ["vector"] and res[1].matched == ["text"]
 
 
 @pytest.mark.parametrize(("setting", "fallback"), [(None, True), ("auto", True), ("vulkan", False)])

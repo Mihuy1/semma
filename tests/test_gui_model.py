@@ -307,7 +307,10 @@ def test_cli_and_qt_free_modules_do_not_import_pyside6() -> None:
     import sys
 
     code = ("import sys, semma.cli, semma.gui, semma.gui.model, semma.gui.client, semma.gui.single, "
-            "semma.gui.settings.context, semma.gui.settings.folders_model; "
+            "semma.gui.settings.context, semma.gui.settings.folders_model, "
+            "semma.gui.settings.filetypes_model, semma.gui.settings.priorities_model, "
+            "semma.gui.settings.media_model, semma.gui.settings.performance_model, "
+            "semma.gui.settings.screenshots_model; "
             "semma.cli.build_parser(); "
             "bad = [m for m in sys.modules if m.startswith(('PySide6', 'shiboken6'))]; "
             "assert not bad, bad")
