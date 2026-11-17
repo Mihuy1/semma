@@ -1,4 +1,8 @@
-"""Images via Pillow (+ pillow-heif for HEIC/HEIF; AVIF is native in Pillow 13).
+"""Images via Pillow; HEIC/HEIF through ffmpeg (AVIF is native in Pillow 13).
+
+HEIC is decoded by the system ffmpeg rather than pillow-heif, whose wheel bundles the GPL x265
+encoder. ffmpeg composes multi-tile photos (as phones take them) and applies their rotation
+from FFmpeg 7.1 on; it needs an HEVC decoder (Fedora's ffmpeg-free may lack one).
 
 With OCR on (`[ocr]`, see semma.ocr), a screenshot also yields its recognised text as text
 chunks after the image chunk. OCR decodes the file again at full resolution (the image chunk
@@ -8,7 +12,9 @@ Any OCR failure only loses the text: the image chunk is indexed regardless.
 
 from __future__ import annotations
 
+import io
 import logging
+import subprocess
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
@@ -31,6 +37,9 @@ MIN_SIDE = 32  # smaller images (icons, spacer gifs) are not worth indexing
 # fully decoded before downscaling, i.e. up to ~400 MB for a 100 MP RGBA image.
 MAX_IMAGE_PIXELS = 50_000_000
 
+HEIF_SUFFIXES = frozenset({".heic", ".heif", ".hif"})
+HEIF_TIMEOUT = 60.0  # s for ffmpeg to decode one picture
+
 _initialised = False
 
 
@@ -40,14 +49,49 @@ def _init() -> None:
         return
     from PIL import Image
 
-    try:
-        import pillow_heif
-
-        pillow_heif.register_heif_opener()
-    except ImportError:  # pragma: no cover - HEIC simply stays unsupported
-        pass
     Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
     _initialised = True
+
+
+def is_heif(path: Path) -> bool:
+    return path.suffix.lower() in HEIF_SUFFIXES
+
+
+def decode_heif(path: Path, max_side: int, timeout: float = HEIF_TIMEOUT) -> PILImage.Image:
+    """Decode a HEIC/HEIF picture with ffmpeg, rotated and scaled down to fit max_side.
+
+    ffmpeg writes the full picture as uncompressed PPM (a scale filter there would conflict with
+    the filter ffmpeg itself uses to join a multi-tile photo); Pillow scales it down, with its
+    usual pixel limit. Raises ExtractionError when ffmpeg is missing, fails or times out."""
+    from PIL import Image
+
+    from .media import FFMPEG_FLAGS, input_args, tool
+
+    try:
+        res = subprocess.run(
+            [tool("ffmpeg"), *FFMPEG_FLAGS, *input_args(path), "-frames:v", "1",
+             "-f", "image2pipe", "-c:v", "ppm", "pipe:1"],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout, start_new_session=True,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ExtractionError("ffmpeg timed out decoding the picture") from e
+    except OSError as e:
+        raise ExtractionError(f"cannot run ffmpeg: {e}") from e
+    if res.returncode != 0 or not res.stdout:
+        msg = res.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise ExtractionError(f"cannot decode HEIF: {msg[-1] if msg else 'ffmpeg exit ' + str(res.returncode)}")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            img = Image.open(io.BytesIO(res.stdout))
+            img.load()
+    except Image.DecompressionBombError as e:
+        raise ExtractionError(f"image too large: {e}") from e
+    except (OSError, ValueError, SyntaxError) as e:
+        raise ExtractionError(f"cannot decode HEIF: {e}") from e
+    if max(img.size) > max_side:
+        img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS, reducing_gap=3.0)
+    return img
 
 
 def to_rgb(img: PILImage.Image) -> PILImage.Image:
@@ -75,6 +119,9 @@ def load_image(path: Path) -> PILImage.Image | None:
     _init()
     from PIL import Image, ImageOps, UnidentifiedImageError
 
+    if is_heif(path):
+        img = decode_heif(path, MAX_SIDE)
+        return None if min(img.size) < MIN_SIDE else to_rgb(img)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", Image.DecompressionBombWarning)

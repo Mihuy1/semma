@@ -1,6 +1,6 @@
 [project]
 name = "semma"
-version = "0.4.0"
+version = "0.5.0"
 description = "Semantic desktop search for KDE KRunner and GNOME Shell, powered by EmbeddingGemma 2 and sqlite-vec"
 readme = "README.md"
 license = "MIT"
@@ -12,7 +12,6 @@ dependencies = [
     "inotify-simple>=2.0.1",
     "numpy>=2",
     "pillow>=13.0.0",
-    "pillow-heif>=1.8.1",
     "pypdfium2>=5.15.2",
     "pyside6-essentials>=6.12.0",
     "sqlite-vec>=0.1.9",

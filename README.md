@@ -17,6 +17,8 @@ Describe what you remember, rather than the filename. These are illustrative que
 
 File types and size limits are configurable. By default, only the first hour of each audio/video file is indexed; adjust this in **Settings → Media**. Source-code files are not indexed.
 
+HEIC/HEIF photos are decoded with ffmpeg, which needs an HEVC decoder (Fedora's `ffmpeg-free` may not include one); multi-tile photos, as phones take them, need FFmpeg 7.1 or newer.
+
 ## Requirements
 
 - Linux with KDE Plasma/KRunner or GNOME Shell, a session D-Bus, and a systemd user service for desktop integration. Release packages target x86-64 Fedora 41+, Ubuntu 24.04+, and Debian 13+.
@@ -28,8 +30,8 @@ File types and size limits are configurable. By default, only the first hour of 
 Download the package for x86-64 Fedora 41+, Ubuntu 24.04+, or Debian 13+ from [Releases](https://github.com/Mihuy1/semma/releases/latest), then install it:
 
 ```sh
-sudo dnf install ./semma-0.4.0-1.x86_64.rpm     # Fedora
-sudo apt install ./semma_0.4.0-1_amd64.deb      # Ubuntu, Debian
+sudo dnf install ./semma-0.5.0-1.x86_64.rpm     # Fedora
+sudo apt install ./semma_0.5.0-1_amd64.deb      # Ubuntu, Debian
 ```
 
 Then open **Semma** from the application menu and go through the setup wizard. Semma does not index anything until you finish the wizard. Review the indexed folders, exclusions, file types, and device settings before starting. The model (865 MB) downloads in the background the first time.
@@ -83,7 +85,7 @@ For a native build, use `scripts/build-llama.sh --native` instead of the contain
 
 **System runtime dependencies are not installed by `uv sync`:**
 
-- Audio/video: `ffmpeg` and `ffprobe` on `PATH`, with codecs for your files.
+- Audio/video and HEIC: `ffmpeg` and `ffprobe` on `PATH`, with codecs for your files.
 - Optional screenshot OCR: the Tesseract shared library and language data (`tesseract-libs` / `tesseract-langpack-eng` on Fedora; `libtesseract5` / `tesseract-ocr-eng` on Ubuntu/Debian).
 - GUI: PySide6 provides Qt, but its platform plugins still need system D-Bus, EGL/OpenGL, font, GLib, Wayland or X11/XCB, and xkbcommon libraries. See [the package dependency lists](packaging/nfpm.yaml) for distribution-specific names, including XCB helper libraries.
 - Inference/downloads: the C/C++ and OpenMP runtimes and system CA certificates; a Vulkan loader and GPU driver for optional acceleration.
@@ -114,4 +116,4 @@ Semma's code is **MIT** licensed; see [LICENSE](LICENSE).
 
 Semma is built on [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) by Google DeepMind and its [GGUF conversion](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF) (**Apache-2.0**), [llama.cpp](https://github.com/ggml-org/llama.cpp) (**MIT**), and [sqlite-vec](https://github.com/asg017/sqlite-vec) (**MIT or Apache-2.0**). The window uses [Qt/PySide6](https://doc.qt.io/qtforpython-6/) under **LGPL-3.0**. Packages also include [Python](https://www.python.org/) (**PSF license**) and Python dependencies under their own licenses; optional [Tesseract](https://github.com/tesseract-ocr/tesseract) OCR is **Apache-2.0**.
 
-The packages carry the license of everything they include in `/usr/share/doc/semma/THIRD_PARTY_NOTICES.txt`, generated from the shipped files by [scripts/notices.py](scripts/notices.py) at build time. These dependencies retain their own terms, including the GPL-licensed codecs in the current `pillow-heif` wheel; Semma's MIT license does not replace them.
+The packages carry the license of everything they include in `/usr/share/doc/semma/THIRD_PARTY_NOTICES.txt`, generated from the shipped files by [scripts/notices.py](scripts/notices.py) at build time. These dependencies keep their own terms; Semma's MIT license does not replace them.

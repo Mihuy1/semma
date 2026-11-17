@@ -47,17 +47,6 @@ https://ftp.osuosl.org/pub/blfs/conglomeration/db/db-6.0.19.tar.gz
 Semma source and packaging: https://github.com/Mihuy1/semma
 Semma trims unused Python/Qt components, not their source code.
 
-Important: the pillow-heif {ph_version} binary wheel bundles libheif {libheif_version} and
-libde265 {libde265_version} (LGPL-3.0) and x265 {x265_version} (GPL-2.0-or-later). The wheel's
-LICENSES_bundled.txt ships in its dist-info/licenses directory. The BSD license
-of pillow-heif's Python code does not cover these native binaries. Redistribution
-of that bundle requires meeting the applicable GPL and source-availability terms;
-this notice is not a declaration that Semma's binary distribution is MIT-only.
-Sources/build recipes: https://github.com/bigcat88/pillow_heif/tree/v{ph_version}
-https://github.com/strukturag/libheif/tree/v{libheif_version}
-https://github.com/strukturag/libde265/tree/v{libde265_version}
-https://github.com/Multicorewareinc/x265/tree/{x265_version}
-
 The texts below are collected by scripts/notices.py at build time from the files
 the package ships and from version-matched upstream sources. Upstream notice sets
 may mention optional components removed from Semma's package. Shared texts are
@@ -210,51 +199,10 @@ def icu_version(qt_lib: Path) -> str:
     return version_from_binary(lib, match.group(1))
 
 
-def codec_versions(site: Path) -> dict[str, str]:
-    """Versions of the native libraries shipped in pillow_heif.libs.
-
-    The file names are authoritative about which libraries are bundled. libheif's
-    SO suffix is its release (1.23.6), but libde265 and x265 use ABI numbers
-    (0.2.3, 217): for those, the release is given by the wheel's own bundled
-    notice and embedded in the binary. Cross-check both rather than guess.
-    """
-    libs_dir = site / "pillow_heif.libs"
-    if not libs_dir.is_dir():
-        sys.exit(f"notices: missing bundled codec libraries in {libs_dir}")
-    notices = list(site.glob("pillow_heif-*.dist-info/licenses/LICENSES_bundled.txt"))
-    if len(notices) != 1:
-        sys.exit(f"notices: expected one pillow-heif bundled licence notice in {site}")
-    bundled = read(notices[0])
-    versions: dict[str, str] = {}
-    # x265's project URL omits the "lib" prefix used by its library file name.
-    url_names = {"libheif": "libheif", "libde265": "libde265", "libx265": "x265"}
-    for lib, url_name in url_names.items():
-        matches = sorted(libs_dir.glob(f"{lib}-*.so.*"))
-        if len(matches) != 1:
-            sys.exit(
-                f"notices: expected one {lib}-*.so.* in {libs_dir}, found {len(matches)}"
-            )
-        path = matches[0]
-        suffix = path.name.rsplit(".so.", 1)[-1]
-        stated = set(
-            m.group(1)
-            for m in re.finditer(rf"{url_name}/tree/v?(\d+(?:\.\d+)+)", bundled)
-        )
-        if not stated:
-            sys.exit(f"notices: {notices[0]} does not state a {lib} version")
-        release = sorted(stated)[0]
-        if suffix != release and release.encode("ascii") not in path.read_bytes():
-            sys.exit(
-                f"notices: {path.name} (SO {suffix}) does not match the "
-                f"{lib} version {release} in {notices[0]}"
-            )
-        versions[lib] = release
-    return versions
-
-
 def fetch(url: str, dest: Path) -> Path:
     if dest.is_file():
         return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
     run(["curl", "-fsSI", "-o", os.devnull, url])
     part = dest.with_name(dest.name + ".part")
     run(["curl", "-fsSL", "-o", str(part), url])
@@ -392,7 +340,6 @@ def main() -> None:
         return dists[normalise(name)][1]
 
     qt_meta, shiboken_meta = meta_for("PySide6_Essentials"), meta_for("shiboken6")
-    ph_meta = meta_for("pillow-heif")
     qt_version = qt_meta["version"]
     if shiboken_meta["version"] != qt_version:
         sys.exit(
@@ -415,7 +362,6 @@ def main() -> None:
     icu_dir = site / "PySide6" / "Qt" / "lib"
     icu = icu_version(icu_dir)
     icu_parts = icu.split(".")
-    codecs = codec_versions(site)
     out.append(PREAMBLE.format(
         qt_version=qt_version,
         qt_maj_min=".".join(qt_version.split(".")[:2]),
@@ -425,20 +371,18 @@ def main() -> None:
         py_short=py_short,
         py_version=py_version,
         pbs_release=pbs,
-        ph_version=ph_meta["version"],
-        libheif_version=codecs["libheif"],
-        libde265_version=codecs["libde265"],
-        x265_version=codecs["libx265"],
     ).rstrip("\n"))
     out.append("")
 
     # 2. Semma itself, followed by 3. the llama.cpp licences.
     section("Semma", ("LICENSE", read(repo / "LICENSE")))
-    llama = repo / "build" / "llama.cpp"
-    llama_texts = [("build/llama.cpp/LICENSE", read(llama / "LICENSE"))]
+    # build/llama is scripts/build-llama.sh's output (the libraries and their licenses), which CI
+    # restores from its cache without the llama.cpp source.
+    llama = repo / "build" / "llama"
+    llama_texts = [("llama.cpp/LICENSE", read(llama / "LICENSE.llama.cpp"))]
     for path in sorted(need_dir(llama / "licenses").iterdir()):
         if path.is_file():
-            llama_texts.append((f"build/llama.cpp/licenses/{path.name}", read(path)))
+            llama_texts.append((f"llama.cpp/licenses/{path.name}", read(path)))
     section("llama.cpp licences", *llama_texts)
 
     # 4. CPython and the python-build-standalone component licences.
