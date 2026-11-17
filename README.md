@@ -70,7 +70,7 @@ Your index and the model stay in `~/.local/share/semma` (or your configured data
 
 ## From source
 
-Needs Git, [uv](https://docs.astral.sh/uv/), and Python **3.13** (uv can provision it). The default llama.cpp build also needs **Podman or Docker**; it downloads the pinned source and builds the shared libraries inside an Ubuntu container.
+Needs Git, uv, and Python **3.13** (uv can provision it). The default llama.cpp build also needs **Podman or Docker**; it downloads the pinned source and builds the shared libraries inside an Ubuntu container.
 
 ```sh
 git clone https://github.com/Mihuy1/semma.git
