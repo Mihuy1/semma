@@ -43,16 +43,19 @@ echo "checking $package on $image"
   -e SEMMA_MODEL_DIR=/models -e install_gui="$install_gui" -e reinstall="$reinstall" -e remove="$remove" "$image" bash -c "
 set -euo pipefail
 $install"'
-# The licenses of everything the package carries (scripts/notices.py); a .deb also keeps them where
-# Debian looks for them, in copyright.
+# The licenses of everything the package carries (scripts/notices.py). A .deb also has them where
+# Debian looks for them, in copyright: the only file under /usr/share/doc that minimized systems
+# (such as the Ubuntu container here) install, so on Debian/Ubuntu that is what is checked.
 doc=/usr/share/doc/semma
-notices=$doc/THIRD_PARTY_NOTICES.txt
-for file in $doc/{LICENSE,LICENSE.python,LICENSE.llama.cpp} "$notices"; do
-  test -s "$file" || { echo "missing license notice: $file"; exit 1; }
-done
 if command -v dpkg > /dev/null; then
-  cmp -s "$notices" $doc/copyright || { echo "the .deb has no copyright file matching the notices"; exit 1; }
+  notices=$doc/copyright
+else
+  notices=$doc/THIRD_PARTY_NOTICES.txt
+  for file in $doc/{LICENSE,LICENSE.python,LICENSE.llama.cpp}; do
+    test -s "$file" || { echo "missing license notice: $file"; exit 1; }
+  done
 fi
+test -s "$notices" || { echo "missing license notices: $notices"; exit 1; }
 for text in "GNU LESSER GENERAL PUBLIC LICENSE" "Version 3, 29 June 2007" "PYTHON SOFTWARE FOUNDATION LICENSE" \
     "Unicode" "ggml authors" "sqlite-vec"; do
   grep -qF "$text" "$notices" || { echo "notices lack \"$text\""; exit 1; }
