@@ -2,7 +2,7 @@
 
 HEIC is decoded by the system ffmpeg rather than pillow-heif, whose wheel bundles the GPL x265
 encoder. ffmpeg composes multi-tile photos (as phones take them) and applies their rotation
-from FFmpeg 7.1 on; it needs an HEVC decoder (Fedora's ffmpeg-free may lack one).
+from FFmpeg 7.1 on; it needs an HEVC decoder (Fedora's ffmpeg-free has none).
 
 With OCR on (`[ocr]`, see semma.ocr), a screenshot also yields its recognised text as text
 chunks after the image chunk. OCR decodes the file again at full resolution (the image chunk

@@ -17,7 +17,7 @@ Describe what you remember, rather than the filename. These are illustrative que
 
 File types and size limits are configurable. By default, only the first hour of each audio/video file is indexed; adjust this in **Settings → Media**. Source-code files are not indexed.
 
-HEIC/HEIF photos are decoded with ffmpeg, which needs an HEVC decoder (Fedora's `ffmpeg-free` may not include one); multi-tile photos, as phones take them, need FFmpeg 7.1 or newer.
+HEIC/HEIF photos are decoded with ffmpeg, which needs an HEVC decoder; Fedora's `ffmpeg-free` has none (install RPM Fusion's `ffmpeg` or `libavcodec-freeworld`). Multi-tile photos, as phones take them, need FFmpeg 7.1 or newer.
 
 ## Requirements
 
