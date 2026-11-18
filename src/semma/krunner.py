@@ -23,6 +23,7 @@ from dbus_fast.service import ServiceInterface, method
 
 from . import filetypes as ft, mpris
 from .dbus_names import RUNNER_INTERFACE
+from .query_filters import parse_query
 from .search import SearchResult
 from .thumbnails import IconData, Thumbnailer
 from .viewer import Spot, spot_for, viewer_argv
@@ -113,10 +114,20 @@ def format_subtext(result: SearchResult, home: Path | None = None) -> str:
 # strong match and gets KRunner's "Moderate" category relevance; the rest get "Low".
 STRONG_SCORE = 4.0
 # ... but only with lexical evidence (the query's words in its name or text) or a meaning match
-# that stands far out: z is relative, so every query has a z 3-4.5 tail; real vector-only tops
-# sit at z 5-11 (a lone "dog" photo 5.2, "firefox" screenshot 5.2), noise below 4.5.
+# that stands far out: z is relative, so every query has a z 3-4 tail; Strong/Moderate vector-only
+# tops sit at z 5-11 (a lone "dog" photo 5.2, "firefox" screenshot 5.2).
 MODERATE_Z = 5.0
 RELEVANCE_STEP = 1e-4  # relevances strictly decrease by at least this, so ties never reorder
+WEAK_SCORE_RATIO = 0.5
+
+
+def trim_weak_results(results: list[SearchResult], max_results: int | None = None) -> list[SearchResult]:
+    """Drop hits scoring below ``WEAK_SCORE_RATIO`` of the top hit, then cap at ``max_results``."""
+    if not results:
+        return []
+    cutoff = results[0].score * WEAK_SCORE_RATIO
+    kept = [r for r in results if r.score >= cutoff]
+    return kept[:max_results] if max_results is not None else kept
 
 
 def is_strong(r: SearchResult) -> bool:
@@ -362,7 +373,7 @@ class KRunnerService(ServiceInterface):
     @method()
     async def Match(self, query: "s") -> "a(sssida{sv})":  # noqa: F821, UP037
         q = query.strip()
-        if count_alnum(q) < 3:
+        if count_alnum(parse_query(q).text) < 3:
             return []
 
         if self._on_activity is not None:
@@ -379,10 +390,9 @@ class KRunnerService(ServiceInterface):
             log.exception("search failed for query %r", q)
             return []
 
-        if not raw_results:
+        results = trim_weak_results(raw_results, self._max_results)
+        if not results:
             return []
-
-        results = list(raw_results[: self._max_results])
         relevances = compute_monotonic_relevances(results)
         cat_rels = category_relevances(results)
         try:

@@ -229,11 +229,19 @@ def cmd_index(args: argparse.Namespace, cfg: Config) -> int:
 
 def cmd_search(args: argparse.Namespace, cfg: Config) -> int:
     from .embedder import Embedder
+    from .query_filters import parse_query
     from .search import Searcher
 
     if not cfg.db_path.exists():
         print("No index yet. Run `semma scan` and `semma index`.")
         return 1
+    if not parse_query(args.query).text:
+        if args.json:
+            print(json.dumps({"results": [], "timings_ms": {"load": 0, "embed": 0.0, "search": 0.0}},
+                             ensure_ascii=False, indent=2))
+        else:
+            print("No matches.\n\n0 results; model load 0 ms, query embedding 0.0 ms, search 0.0 ms")
+        return 0
     store = Store(cfg.db_path)
     embedder = Embedder(cfg)
     stored_model = store.get_meta("model_id")

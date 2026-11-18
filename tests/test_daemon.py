@@ -283,6 +283,30 @@ def test_search_after_startup_indexing(home: Path) -> None:
             res = await d.search("rocket launch")
             assert res and Path(res[0].path).name == "rockets.md"
             assert await d.search("ro") == []  # too short
+            assert await d.search("image:") == []
+            assert await d.search("image: a") == []
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
+def test_prefix_filter_strips_prefix_for_embedder_and_skips_short_remainder(home: Path) -> None:
+    async def main() -> None:
+        emb = LifecycleEmbedder()
+        d = make_daemon(make_cfg(home), embedder=emb)
+        d.start()
+        try:
+            await until_idle(d)
+            emb.unload_query()
+            emb.queries.clear()
+            assert await d.search("image:") == []
+            assert await d.search("screenshot: ab") == []
+            assert not emb.query_model_loaded
+            assert emb.queries == []
+
+            await d.search("image: rocket launch")
+            assert emb.queries == ["rocket launch"]
         finally:
             await d.stop()
 

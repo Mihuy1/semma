@@ -54,6 +54,7 @@ class VectorScores:
     kind: np.ndarray       # int16 codes
     valid: np.ndarray | None  # alive rows; None = all
     names: list[str]
+    files: np.ndarray      # int64 distinct files per modality code
 
 
 def chunks_version(db: sqlite3.Connection) -> int:
@@ -87,6 +88,7 @@ class VectorCache:
         self.kind = np.zeros(capacity, dtype=np.int16)
         self.alive = np.zeros(capacity, dtype=bool)
         self.row_of: dict[int, int] = {}
+        self._files: np.ndarray | None = None
 
     def _code(self, name: str) -> int:
         code = self._codes.get(name)
@@ -127,6 +129,7 @@ class VectorCache:
                 self.dead += 1
             self.row_of[cid] = self.n + i
         self.n += k
+        self._files = None
 
     def _remove_rows(self, rows: np.ndarray) -> None:
         rows = rows[self.alive[rows]]
@@ -137,6 +140,7 @@ class VectorCache:
         for row, cid in zip(rows.tolist(), self.chunk_ids[rows].tolist(), strict=True):
             if self.row_of.get(cid) == row:
                 del self.row_of[cid]
+        self._files = None
 
     def _maybe_compact(self) -> None:
         if self.dead < max(_GROW_MIN, self.n // 4):
@@ -150,6 +154,7 @@ class VectorCache:
         self.modality[:k], self.kind[:k], self.alive[:k] = mods, kinds, True
         self.row_of = {c: i for i, c in enumerate(cids.tolist())}
         self.n = k
+        self._files = None
 
     @property
     def size(self) -> int:
@@ -184,6 +189,7 @@ class VectorCache:
                                  vecs, [r[2] for r in rows], [r[3] for r in rows])
             self.version = version
             self.loads += 1
+            self._files = None
         finally:
             if own_txn:
                 db.rollback()
@@ -273,6 +279,17 @@ class VectorCache:
                          [a[3] for a in delta.added], [a[4] for a in delta.added])
         self._maybe_compact()
 
+    def _file_counts(self) -> np.ndarray:
+        if self._files is None:
+            n, k = self.n, max(len(self._names), 1)
+            files = np.zeros(k, dtype=np.int64)
+            rows = np.flatnonzero(self.alive[:n])
+            if len(rows):
+                key = self.file_ids[rows].astype(np.int64) * k + self.modality[rows].astype(np.int64)
+                files = np.bincount(np.unique(key) % k, minlength=k)
+            self._files = files
+        return self._files
+
     # -- queries (call with `lock` held) -------------------------------------------
     def scores(self, q: np.ndarray) -> VectorScores:
         """Cosine similarity of q with every stored vector, with each row's chunk id, file id,
@@ -284,7 +301,7 @@ class VectorCache:
         return VectorScores(
             sims=self.mat[:n] @ q, chunk_ids=self.chunk_ids[:n], file_ids=self.file_ids[:n],
             modality=self.modality[:n], kind=self.kind[:n], valid=self.alive[:n] if self.dead else None,
-            names=list(self._names))
+            names=list(self._names), files=self._file_counts())
 
     def codes(self, names: Iterable[str]) -> list[int]:
         """Codes of these modality/kind names (unknown names are skipped)."""

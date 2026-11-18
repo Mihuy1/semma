@@ -13,6 +13,7 @@ from test_review_fixes import make_env, names, put_background, put_vectors, unit
 from semma import filetypes as ft
 from semma import search as search_mod
 from semma.config import load_config
+from semma.query_filters import FILTERS, QueryFilter, parse_query, register, sql_filter_fn
 from semma.search import STD_FLOOR, Searcher, is_lookup, meaning_scale, query_words
 from semma.store import Store
 
@@ -179,7 +180,7 @@ def test_invalid_z_floor_warns_and_keeps_the_default(tmp_path: Path, capsys, val
     cfg_path.write_text(f"[search]\nz_floor = {value!r}\n".replace("'", '"').replace("True", "true"))
     cfg = load_config(path=cfg_path, home=tmp_path)
     assert "search.z_floor must be a number" in capsys.readouterr().err
-    assert cfg.z_floor == 4.5
+    assert cfg.z_floor == 4.0
     cfg_path.write_text("[search]\nz_floor = 0\n")
     assert load_config(path=cfg_path, home=tmp_path).z_floor == 0.0
 
@@ -528,8 +529,8 @@ def test_meaning_scale_matches_a_direct_computation_and_weights_act_as_copies() 
     dup = meaning_scale(np.concatenate([sims, sims[:100]]), np.concatenate([mods, mods[:100]]), ["text", "image"])
     weighted = meaning_scale(sims, mods, ["text", "image"], weights=w)
     assert weighted.std == pytest.approx(dup.std, rel=1e-5) and weighted.means == pytest.approx(dup.means)
-    # `counts` decides MODALITY_MIN: 5 sampled images standing for 50 still get their own mean.
-    few = meaning_scale(sims[:25], np.array([1] * 5 + [0] * 20), ["text", "image"], counts=[20, 50])
+    # `files` decides MODALITY_MIN: 5 sampled images standing for 50 distinct files still get their own mean.
+    few = meaning_scale(sims[:25], np.array([1] * 5 + [0] * 20), ["text", "image"], files=[20, 50])
     assert set(few.means) == {"text", "image"}
 
 
@@ -545,3 +546,300 @@ def test_sqlite_vec_sample_spreads_over_the_whole_index(tmp_path: Path, monkeypa
     sc = Searcher(store, cfg, FakeEmbedder())._sample_scale(store.reader(), q)
     assert sc.means["text"] == pytest.approx(0.55, abs=0.01)
     store.close()
+
+
+def test_parse_query_prefixes_and_extensibility() -> None:
+    for raw in ("image: cats", "image:cats", "  IMAGE:   cats  "):
+        p = parse_query(raw)
+        assert p.text == "cats" and p.flt is not None and p.flt.name == "image"
+    p_vid = parse_query("video: rocket\nlaunch")
+    assert p_vid.text == "rocket\nlaunch" and p_vid.flt is not None and p_vid.flt.name == "video"
+    p_shot = parse_query("screenshot: error")
+    assert p_shot.text == "error" and p_shot.flt is not None and p_shot.flt.name == "screenshot"
+    assert parse_query("image:").text == "" and parse_query("image:").flt is not None
+    assert parse_query("   screenshot:   ").text == "" and parse_query("   screenshot:   ").flt is not None
+    for literal in ("foo: bar", "http://example.com", "0xff32:0x0074", "plain query"):
+        p_lit = parse_query(literal)
+        assert p_lit.flt is None and p_lit.text == literal
+
+    # Registering a new filter in the future works immediately:
+    register(QueryFilter("note", frozenset({ft.TEXT, ft.OFFICE})), "notes")
+    try:
+        assert parse_query("note: budget").flt == FILTERS["note"]
+        assert parse_query("NOTES: budget").flt == FILTERS["note"]
+    finally:
+        FILTERS.pop("note", None)
+        FILTERS.pop("notes", None)
+
+
+def test_sql_filter_fn_mixed_case_name() -> None:
+    register(QueryFilter("Note", frozenset({ft.TEXT}), lambda _p: False), "Notes")
+    try:
+        assert sql_filter_fn("Note", "/x/a.txt") == 0
+    finally:
+        FILTERS.pop("note", None)
+        FILTERS.pop("notes", None)
+
+
+def test_prefix_filters_restrict_candidates_and_strip_prefix(realistic) -> None:
+    cfg, store, q, root = realistic
+    put_vectors(store, [
+        (str(root / "Pictures/Screenshots/err_panel.png"), 30, with_cos(q, 0.72, 2)),
+        (str(root / "Pictures/Screenshot_2026-01-01.png"), 30, with_cos(q, 0.70, 3)),
+        (str(root / "Pictures/vacation_photo.jpg"), 30, with_cos(q, 0.78, 4)),
+        (str(root / "Pictures/connection_refused_photo.png"), 30, with_cos(q, 0.65, 7)),
+    ])
+    put_vectors(store, [
+        (str(root / "Videos/demo_clip.mp4"), 30, with_cos(q, 0.74, 5)),
+    ], kind=ft.VIDEO, modality="video")
+    put_vectors(store, [
+        (str(root / "Documents/error_notes.md"), 40, with_cos(q, 0.82, 6)),
+    ], kind=ft.TEXT, modality="text")
+    add_text(store, "err_panel.png", "connection refused error")
+    add_text(store, "connection_refused_photo.png", "connection refused error")
+    add_text(store, "error_notes.md", "connection refused error in vacation_photo")
+
+    emb = FakeEmbedder()
+    s = Searcher(store, cfg, emb)
+
+    # Empty query after prefix returns [] without calling embed_query.
+    assert s.search("image:") == []
+    assert s.search("screenshot:   ") == []
+    assert s.search_vector(q, "image:", limit=10) == []
+
+    # image: keeps all images (photos + screenshots), drops text and video even when text has higher z.
+    imgs = s.search_vector(q, "image: connection refused", limit=10)
+    assert set(names(imgs)) == {
+        "err_panel.png", "Screenshot_2026-01-01.png", "vacation_photo.jpg", "connection_refused_photo.png",
+    }
+
+    # video: keeps only video files.
+    vids = s.search_vector(q, "video: connection refused", limit=10)
+    assert names(vids) == ["demo_clip.mp4"]
+
+    # screenshot: keeps only files matching ocr.is_screenshot (Screenshots folder or Screenshot prefix),
+    # dropping vacation_photo.jpg (higher cosine 0.78), connection_refused_photo.png (exact lexical match
+    # in both name and chunk text, exercising gs_query_filter in SQL), and error_notes.md (cosine 0.82).
+    shots = s.search_vector(q, "screenshot: connection refused", limit=10)
+    assert set(names(shots)) == {"err_panel.png", "Screenshot_2026-01-01.png"}
+
+    # Explicit kinds argument intersects with prefix filter; disjoint intersection returns [].
+    assert s.search_vector(q, "image: connection refused", limit=10, kinds=[ft.VIDEO]) == []
+    assert set(names(s.search_vector(q, "image: connection refused", limit=10, kinds=[ft.IMAGE, ft.TEXT]))) == {
+        "err_panel.png", "Screenshot_2026-01-01.png", "vacation_photo.jpg", "connection_refused_photo.png",
+    }
+
+
+def test_prefix_filter_sql_predicate_excludes_lexical_non_screenshot(realistic) -> None:
+    cfg, store, q, root = realistic
+    put_vectors(store, [
+        (str(root / "Pictures/Screenshots/err_panel.png"), 30, with_cos(q, 0.72, 2)),
+        (str(root / "Pictures/holiday/beach.png"), 30, with_cos(q, 0.40, 3)),
+    ])
+    add_text(store, "err_panel.png", "sunset beach")
+    add_text(store, "beach.png", "sunset beach")
+
+    s = Searcher(store, cfg, FakeEmbedder())
+    imgs = s.search_vector(q, "image: sunset beach", limit=10)
+    assert {"err_panel.png", "beach.png"} <= set(names(imgs))
+
+    shots = s.search_vector(q, "screenshot: sunset beach", limit=10)
+    assert names(shots) == ["err_panel.png"]
+    assert "beach.png" not in names(shots)
+
+
+def test_meaning_scale_rare_long_file_uses_overall_mean(tmp_path: Path) -> None:
+    """One 21-chunk video among many text files has 21 chunks (>= MODALITY_MIN) but only 1 file
+    (< MODALITY_MIN): it must use the overall mean rather than its own high mean."""
+    rng = np.random.default_rng(7)
+    n_text, n_vid = 1000, 21
+    sims = np.concatenate([
+        np.clip(rng.normal(0.56, 0.02, n_text), -0.99, 0.99),
+        np.full(n_vid, 0.72),
+    ]).astype(np.float32)
+    mods = np.array([0] * n_text + [1] * n_vid, dtype=np.int64)
+    cfg = make_cfg(tmp_path)
+    sc = meaning_scale(sims, mods, ["text", "video"], files=[n_text, 1])
+    assert "video" not in sc.means
+    assert sc.z(0.744, "video") > cfg.z_floor + 0.5
+    # With chunk count as files (the old bug), video gets its own high mean and drops below z_floor (and default z_gate 2.0).
+    sc_chunks = meaning_scale(sims, mods, ["text", "video"], files=[n_text, n_vid])
+    assert "video" in sc_chunks.means
+    assert sc_chunks.z(0.744, "video") < 2.0
+
+    # When image is present in >= MODALITY_MIN files and video is in < MODALITY_MIN files,
+    # video falls back to the image mean (both visual SigLIP) rather than overall.
+    n_img = 200
+    img_sims = np.concatenate([
+        np.clip(rng.normal(0.60, 0.02, n_text), -0.99, 0.99),
+        np.clip(rng.normal(0.52, 0.02, n_img), -0.99, 0.99),
+        np.full(n_vid, 0.72),
+    ]).astype(np.float32)
+    img_mods = np.array([0] * n_text + [1] * n_img + [2] * n_vid, dtype=np.int64)
+    sc_img = meaning_scale(img_sims, img_mods, ["text", "image", "video"], files=[n_text, n_img, 1])
+    assert "video" not in sc_img.means
+    assert "image" in sc_img.means
+    assert sc_img.offset("video") == pytest.approx(sc_img.offset("image"))
+    assert sc_img.offsets(["text", "image", "video"])[2] == pytest.approx(sc_img.offset("image"))
+
+    # If image itself has < MODALITY_MIN files, video falls back to overall.
+    sc_few_img = meaning_scale(img_sims, img_mods, ["text", "image", "video"], files=[n_text, 5, 1])
+    assert "image" not in sc_few_img.means
+    assert sc_few_img.offset("video") == pytest.approx(sc_few_img.overall + sc_few_img.center)
+
+
+def _put_multi_chunk(store: Store, path: str, kind: str, modality: str, vecs: list[np.ndarray]) -> int:
+    """Insert one indexed file with multiple chunks into SQLite (updates delta for live cache)."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_bytes(b"x")
+    with store.write() as (db, delta):
+        fid = db.execute(
+            "INSERT INTO files (path, kind, size, mtime, in_project, priority, status, last_seen) "
+            "VALUES (?, ?, 1, 1.0, 0, 30, 'indexed', 1)",
+            (path, kind),
+        ).lastrowid
+        assert fid is not None
+        for seq, vec in enumerate(vecs):
+            cid = db.execute("INSERT INTO chunks (file_id, seq, modality) VALUES (?, ?, ?)",
+                             (fid, seq, modality)).lastrowid
+            assert cid is not None
+            v = np.asarray(vec, dtype=np.float32)
+            unit_vec = v / np.linalg.norm(v)
+            db.execute("INSERT INTO vec_chunks VALUES (?, ?, ?, ?)",
+                       (cid, unit_vec, modality, kind))
+            delta.added.append((cid, int(fid), unit_vec, modality, kind))
+        return int(fid)
+
+
+@pytest.mark.parametrize("cache", [False, True], ids=["sqlite-vec", "cache"])
+def test_single_multi_chunk_video_is_found_with_and_without_filter(tmp_path: Path, cache: bool) -> None:
+    """A single 21-chunk video with a realistic tight cosine range (0.70-0.74) among background
+    files must use the overall mean (files=1 < MODALITY_MIN), reach z >= 5.0, and rank #1 across
+    plain, prefix-filtered, and vector-only type-hint queries for both sqlite-vec and the cache."""
+    cfg = make_cfg(tmp_path)
+    cfg.z_gate = 2.0
+    cfg.duplicate_similarity = {}
+    store = Store(cfg.db_path, vector_cache=cache)
+    q = unit(1)
+    put_background(store, tmp_path, q, n=500, mean=0.55, std=0.025)
+    put_background(store, tmp_path, q, n=500, mean=0.59, std=0.025, kind="text", modality="text", seed=5000)
+    vpath = str(tmp_path / "Videos/porsche_clip.mp4")
+    _put_multi_chunk(
+        store,
+        vpath,
+        ft.VIDEO,
+        "video",
+        [with_cos(q, 0.74 if seq == 0 else 0.71, 900 + seq) for seq in range(21)],
+    )
+
+    s = Searcher(store, cfg, FakeEmbedder())
+    for query in ("porsche", "video: porsche", "video about car"):
+        res = s.search_vector(q, query, limit=10)
+        assert names(res)[0] == "porsche_clip.mp4", query
+        assert res[0].z is not None and res[0].z >= 5.0, query
+        assert res[0].z >= cfg.z_floor, query
+    store.close()
+
+
+def test_vector_cache_file_stats_invalidate_on_remove_and_replace(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path)
+    store = Store(cfg.db_path, vector_cache=True)
+    q = unit(1)
+    put_background(store, tmp_path, q, n=30, mean=0.55, kind="text", modality="text", seed=100)
+    vpath = str(tmp_path / "Videos/long.mp4")
+    _put_multi_chunk(
+        store,
+        vpath,
+        ft.VIDEO,
+        "video",
+        [with_cos(q, 0.72, 200 + seq) for seq in range(21)],
+    )
+
+    cache = store.vectors
+    assert cache is not None
+    with cache.lock:
+        cache.ensure_fresh(store.reader())
+        sc1 = cache.scores(q)
+        vid_code = cache._codes["video"]
+        txt_code = cache._codes["text"]
+        assert sc1.files[vid_code] == 1
+        assert sc1.files[txt_code] == 30
+
+    # Replace with a 4-chunk video at the same path (local write patches the cache).
+    with store.write() as (db, delta):
+        old_id = db.execute("SELECT id FROM files WHERE path = ?", (vpath,)).fetchone()[0]
+        db.execute("DELETE FROM files WHERE id = ?", (old_id,))
+        delta.removed_files.add(old_id)
+        new_id = db.execute(
+            "INSERT INTO files (path, kind, size, mtime, in_project, priority, status, last_seen) "
+            "VALUES (?, ?, 1, 2.0, 0, 30, 'indexed', 1)",
+            (vpath, ft.VIDEO),
+        ).lastrowid
+        assert new_id is not None
+        for seq in range(4):
+            cid = db.execute("INSERT INTO chunks (file_id, seq, modality) VALUES (?, ?, ?)",
+                             (new_id, seq, "video")).lastrowid
+            assert cid is not None
+            v = np.asarray(with_cos(q, 0.72, 300 + seq), dtype=np.float32)
+            vec = v / np.linalg.norm(v)
+            db.execute("INSERT INTO vec_chunks VALUES (?, ?, ?, ?)", (cid, vec, "video", ft.VIDEO))
+            delta.added.append((cid, new_id, vec, "video", ft.VIDEO))
+
+    with cache.lock:
+        cache.ensure_fresh(store.reader())
+        sc2 = cache.scores(q)
+        assert cache.loads == 1
+        assert sc2.valid is not None
+        assert sc2.files[vid_code] == 1
+        assert sc2.files[txt_code] == 30
+        assert (sc2.valid & (sc2.modality == vid_code)).sum() == 4
+
+    # Add a second video file (distinct video file count becomes 2).
+    vpath2 = str(tmp_path / "Videos/second.mp4")
+    _put_multi_chunk(
+        store,
+        vpath2,
+        ft.VIDEO,
+        "video",
+        [with_cos(q, 0.72, 400 + seq) for seq in range(3)],
+    )
+
+    with cache.lock:
+        cache.ensure_fresh(store.reader())
+        sc3 = cache.scores(q)
+        assert cache.loads == 1
+        assert sc3.valid is not None
+        assert sc3.files[vid_code] == 2
+        assert sc3.files[txt_code] == 30
+        assert (sc3.valid & (sc3.modality == vid_code)).sum() == 7
+
+    # Remove the first video (distinct video file count drops back to 1).
+    with store.write() as (db, delta):
+        old_id = db.execute("SELECT id FROM files WHERE path = ?", (vpath,)).fetchone()[0]
+        db.execute("DELETE FROM files WHERE id = ?", (old_id,))
+        delta.removed_files.add(old_id)
+
+    with cache.lock:
+        cache.ensure_fresh(store.reader())
+        sc4 = cache.scores(q)
+        assert cache.loads == 1
+        assert sc4.valid is not None
+        assert sc4.files[vid_code] == 1
+        assert (sc4.valid & (sc4.modality == vid_code)).sum() == 3
+
+    # Remove the second video (distinct video file count drops to 0).
+    with store.write() as (db, delta):
+        old_id = db.execute("SELECT id FROM files WHERE path = ?", (vpath2,)).fetchone()[0]
+        db.execute("DELETE FROM files WHERE id = ?", (old_id,))
+        delta.removed_files.add(old_id)
+
+    with cache.lock:
+        cache.ensure_fresh(store.reader())
+        sc5 = cache.scores(q)
+        assert cache.loads == 1
+        assert sc5.valid is not None
+        assert sc5.files[vid_code] == 0
+        assert sc5.files[txt_code] == 30
+        assert (sc5.valid & (sc5.modality == vid_code)).sum() == 0
+    store.close()
+

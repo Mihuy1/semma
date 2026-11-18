@@ -4,7 +4,7 @@ Per segment of `media_segment_seconds` (60 s by default) one "video" chunk with 
 sampled uniformly (fps = 32 / segment, i.e. ~0.53 fps), longest side <= 512 px, and, when the
 file has an audio track, one "audio" chunk for the same time range:
 
-    ffmpeg -nostdin -hide_banner -loglevel error -skip_loop_filter all
+    ffmpeg -nostdin -hide_banner -loglevel error -threads 4 -skip_loop_filter all
            -protocol_whitelist file,pipe -i file:FILE -map 0:V -an -sn -dn -t MAX
            -vf fps=32/60,scale=W:H:flags=bilinear,setsar=1 -pix_fmt rgb24 -f rawvideo pipe:1
 
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 FRAME_MAX_SIDE = 512
 MIN_TRAILING_SECONDS = 2.0
+DECODE_THREADS = 4
 
 
 def output_size(width: int, height: int, max_side: int = FRAME_MAX_SIDE) -> tuple[int, int]:
@@ -50,6 +51,7 @@ def video_frames(path: Path, cfg: Config, info: Probe) -> Iterator[tuple[int, li
     w, h = output_size(info.width, info.height)
     frame_bytes = w * h * 3
     args = [
+        "-threads", str(DECODE_THREADS),
         "-skip_loop_filter", "all",  # skip deblocking: ~20-30 % faster decode, invisible at 512 px
         *input_args(path), "-map", f"0:{info.video_index}", "-an", "-sn", "-dn",
         "-t", f"{cfg.max_media_seconds:.3f}",

@@ -79,9 +79,10 @@ def _result(
     snippet: str = "some text",
     locator: str = "",
     duplicates: int = 0,
+    score: float = 3.0,
 ) -> SearchResult:
     return SearchResult(
-        path=path, kind=kind, score=3.0, similarity=0.7, modality="text", locator=locator,
+        path=path, kind=kind, score=score, similarity=0.7, modality="text", locator=locator,
         snippet=snippet, position=None, mtime=1700000000.0, matched=["vector"], duplicates=duplicates,
         duplicate_paths=[], z=None,
     )
@@ -134,7 +135,7 @@ def test_short_query_returns_empty_without_searching() -> None:
             activity += 1
 
         svc, queries = _service([_result("/x/a.txt")], on_activity=on_act)
-        for terms in ([], [""], ["a"], ["a", "b"], ["--", "?"], ["1", "2"]):
+        for terms in ([], [""], ["a"], ["a", "b"], ["--", "?"], ["1", "2"], ["image:"], ["screenshot:", "ab"]):
             assert await svc._run_search(terms) == []
         assert queries == [] and activity == 0
         assert await svc._run_search(["a", "b1"]) == ["/x/a.txt"]
@@ -583,3 +584,17 @@ def test_launch_search_failure_logs_warning_and_never_raises(
     assert len(warnings) >= 2
     assert any("failed to spawn" in r.message for r in warnings)
     assert any("LaunchSearch failed" in r.message for r in warnings)
+
+
+def test_gnome_search_trims_results_below_half_top_score() -> None:
+    async def check() -> None:
+        results = [
+            _result("/x/top.txt", score=4.8),
+            _result("/x/border.txt", score=2.4),  # exact 0.5 * top_score -> kept
+            _result("/x/weak.txt", score=2.39),  # < 0.5 * top_score -> dropped
+            _result("/x/tail.txt", score=1.0),
+        ]
+        svc, _ = _service(results, max_results=10)
+        assert await svc._run_search(["car", "review"]) == ["/x/top.txt", "/x/border.txt"]
+
+    asyncio.run(check())
