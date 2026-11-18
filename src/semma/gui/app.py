@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsPage(client, config_path, home, parent=self.tabs)
         self.tabs.addTab(self.status_page, QIcon(), "Status")
         self.tabs.addTab(self.settings_page, QIcon(), "Settings")
+        self.tabs.currentChanged.connect(self._apply_icons)
         self._apply_icons()
         self.setCentralWidget(self.tabs)
         self.resize(*DEFAULT_SIZE)
@@ -58,10 +59,18 @@ class MainWindow(QMainWindow):
         self._apply_close_result: bool | None = None
         self.settings_page.reload_finished.connect(self._on_reload_finished)
 
-    def _apply_icons(self) -> None:
-        self.tabs.setTabIcon(0, theme_icon("dialog-information-symbolic", "dialog-information", widget=self))
-        self.tabs.setTabIcon(1, theme_icon("configure", "preferences-system-symbolic", "preferences-system",
-                                            "preferences-other", widget=self))
+    def _apply_icons(self, *_args: object) -> None:
+        current = self.tabs.currentIndex()
+        self.tabs.setTabIcon(
+            0, theme_icon("dialog-information-symbolic", "dialog-information", widget=self, selected=(current == 0)),
+        )
+        self.tabs.setTabIcon(
+            1,
+            theme_icon(
+                "configure", "preferences-system-symbolic", "preferences-system", "preferences-other",
+                widget=self, selected=(current == 1),
+            ),
+        )
 
     def changeEvent(self, event: QEvent) -> None:  # noqa: N802
         super().changeEvent(event)

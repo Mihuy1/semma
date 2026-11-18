@@ -123,9 +123,15 @@ class GraphicsCardGroup(QGroupBox):
 class PerformanceSection(SettingsSection):
     key = "performance"
     title = "Performance"
-    icon = "speedometer"
+    icon = "preferences-system-performance"
     icon_fallbacks = (
-        "preferences-system-symbolic", "applications-system-symbolic", "computer-symbolic", "preferences-system",
+        "preferences-devices-cpu",
+        "utilities-system-monitor",
+        "speedometer",
+        "preferences-system-symbolic",
+        "applications-system-symbolic",
+        "computer-symbolic",
+        "preferences-system",
     )
     description = "How Semma uses the graphics card, processor and background scans."
 
