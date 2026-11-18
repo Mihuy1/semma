@@ -279,12 +279,19 @@ class Scale:
     """This query's meaning scale: z = (cos - mean[modality] - center) / std."""
 
     means: dict[str, float]  # per modality
-    overall: float  # for modalities in fewer than MODALITY_MIN files (or unseen)
+    overall: float  # for modalities in fewer than MODALITY_MIN files (or unseen; video falls back to image)
     center: float
     std: float
 
     def offset(self, modality: str | None) -> float:
-        return self.means.get(modality or "", self.overall) + self.center
+        m = modality or ""
+        if m in self.means:
+            base = self.means[m]
+        elif m == "video" and "image" in self.means:
+            base = self.means["image"]
+        else:
+            base = self.overall
+        return base + self.center
 
     def offsets(self, names: Sequence[str]) -> np.ndarray:
         return np.array([self.offset(n) for n in names] or [0.0], dtype=np.float32)
@@ -316,7 +323,12 @@ def meaning_scale(sims: np.ndarray, modality: np.ndarray, names: Sequence[str],
     have = (np.asarray(files if files is not None else w0, dtype=np.float64) >= MODALITY_MIN) & (w0 > 0)
     total = float(w0.sum())
     overall = float(s1.sum() / total)
-    means = np.where(have, s1 / np.maximum(w0, 1e-12), overall)
+    raw_means = s1 / np.maximum(w0, 1e-12)
+    means = np.where(have, raw_means, overall)
+    if "video" in names and "image" in names:
+        vi, im = names.index("video"), names.index("image")
+        if not have[vi] and have[im]:
+            means[vi] = raw_means[im]
     # Centred values c = cos - means[modality]: sum c = s1 - w0*m, sum c^2 = s2 - 2*m*s1 + w0*m^2.
     center = float((s1 - w0 * means).sum() / total)
     var = float((s2 - 2 * means * s1 + w0 * means * means).sum() / total) - center * center

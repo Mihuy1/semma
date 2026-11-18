@@ -202,12 +202,12 @@ class Config:
     z_gate: float = 2.0
     # A file without the query's words is shown only if the query's best meaning match reaches
     # `z_floor` (the kind bonus of a type word counts: "photo of ..."); else nothing stands out
-    # and the query finds only files containing its words, or nothing. Gibberish tops out at
-    # z 2.8-4.5 (median 3.9, 35 strings, all text chunks) on a 2.9k-chunk index; real one-concept
-    # queries at 4.4-7 ("dog" 5.2, "firefox" 5.2, "zebra" 6.9), so 4.5 trades the weakest
-    # (bare "car": its photo at z 4.4) for "nothing found" on noise. Noise tops grow slowly
-    # with the index (the maximum of more draws): a much larger index may want ~5. 0 disables.
-    z_floor: float = 4.5
+    # and the query finds only files containing its words, or nothing. Nonsense queries top out
+    # around median z ~3.0, max ~3.5, while visual/video matches start around 4.1-4.4 ("car"
+    # 4.1, "car review" 4.2, "firefox" 4.35, "nature" 4.4), so 4.0 separates real matches from
+    # noise. Noise tops grow slowly with the index (the maximum of more draws): a much larger
+    # index may want a higher floor. 0 disables.
+    z_floor: float = 4.0
     knn_k: int = 200  # only used without the vector cache (sqlite-vec KNN)
     # Score bonus in z units for priority 100 (scaled linearly; 0 disables). Only meant to break
     # near-ties in favour of files in the user's own folders.

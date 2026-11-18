@@ -180,7 +180,7 @@ def test_invalid_z_floor_warns_and_keeps_the_default(tmp_path: Path, capsys, val
     cfg_path.write_text(f"[search]\nz_floor = {value!r}\n".replace("'", '"').replace("True", "true"))
     cfg = load_config(path=cfg_path, home=tmp_path)
     assert "search.z_floor must be a number" in capsys.readouterr().err
-    assert cfg.z_floor == 4.5
+    assert cfg.z_floor == 4.0
     cfg_path.write_text("[search]\nz_floor = 0\n")
     assert load_config(path=cfg_path, home=tmp_path).z_floor == 0.0
 
@@ -666,6 +666,26 @@ def test_meaning_scale_rare_long_file_uses_overall_mean(tmp_path: Path) -> None:
     sc_chunks = meaning_scale(sims, mods, ["text", "video"], files=[n_text, n_vid])
     assert "video" in sc_chunks.means
     assert sc_chunks.z(0.744, "video") < 2.0
+
+    # When image is present in >= MODALITY_MIN files and video is in < MODALITY_MIN files,
+    # video falls back to the image mean (both visual SigLIP) rather than overall.
+    n_img = 200
+    img_sims = np.concatenate([
+        np.clip(rng.normal(0.60, 0.02, n_text), -0.99, 0.99),
+        np.clip(rng.normal(0.52, 0.02, n_img), -0.99, 0.99),
+        np.full(n_vid, 0.72),
+    ]).astype(np.float32)
+    img_mods = np.array([0] * n_text + [1] * n_img + [2] * n_vid, dtype=np.int64)
+    sc_img = meaning_scale(img_sims, img_mods, ["text", "image", "video"], files=[n_text, n_img, 1])
+    assert "video" not in sc_img.means
+    assert "image" in sc_img.means
+    assert sc_img.offset("video") == pytest.approx(sc_img.offset("image"))
+    assert sc_img.offsets(["text", "image", "video"])[2] == pytest.approx(sc_img.offset("image"))
+
+    # If image itself has < MODALITY_MIN files, video falls back to overall.
+    sc_few_img = meaning_scale(img_sims, img_mods, ["text", "image", "video"], files=[n_text, 5, 1])
+    assert "image" not in sc_few_img.means
+    assert sc_few_img.offset("video") == pytest.approx(sc_few_img.overall + sc_few_img.center)
 
 
 def _put_multi_chunk(store: Store, path: str, kind: str, modality: str, vecs: list[np.ndarray]) -> int:

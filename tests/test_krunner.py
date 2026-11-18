@@ -24,11 +24,13 @@ from semma.krunner import (
     Launcher,
     MODERATE_Z,
     STRONG_SCORE,
+    WEAK_SCORE_RATIO,
     category_relevances,
     compute_monotonic_relevances,
     format_subtext,
     icon_name_for,
     raw_relevance,
+    trim_weak_results,
 )
 from semma.search import SearchResult
 from semma.thumbnails import IconData, Thumbnailer
@@ -335,6 +337,7 @@ def test_match_properties_urls_thumbnails_and_actions(tmp_path: Path) -> None:
         _sample_result(
             path=str(img_path),
             kind=ft.IMAGE,
+            score=3.5,
             similarity=0.68,
             locator="",
             snippet="",
@@ -374,7 +377,7 @@ def test_match_properties_urls_thumbnails_and_actions(tmp_path: Path) -> None:
             assert m0_props["actions"].value == [ACTION_OPEN_FOLDER, ACTION_COPY_PATH]
             assert "icon-data" not in m0_props
 
-            # Match 1: Image (has icon-data, score 3.0 < STRONG_SCORE -> cat_rel 30)
+            # Match 1: Image (has icon-data, score 3.5 < STRONG_SCORE -> cat_rel 30)
             m1_id, m1_text, m1_icon, m1_cat_rel, m1_rel, m1_props = matches[1]
             assert m1_id == str(img_path)
             assert m1_text == "kesä kuva (1).png"
@@ -493,5 +496,38 @@ def test_search_exception_and_concurrent_matches_and_thumbnail_budget() -> None:
                 iface.call_match("photo"),
             )
             assert all(len(r) == 1 for r in concurrent)
+
+    asyncio.run(check())
+
+
+def test_trim_weak_results_and_krunner_drops_below_half_top_score() -> None:
+    assert WEAK_SCORE_RATIO == 0.5
+    assert trim_weak_results([]) == []
+    results = [
+        _sample_result(path="/a.txt", score=4.8),
+        _sample_result(path="/b.txt", score=2.4),  # exact 0.5 * top_score -> kept
+        _sample_result(path="/c.txt", score=2.39),  # < 0.5 * top_score -> dropped
+        _sample_result(path="/d.txt", score=1.2),
+    ]
+    assert [r.path for r in trim_weak_results(results)] == ["/a.txt", "/b.txt"]
+    assert [r.path for r in trim_weak_results(results, max_results=1)] == ["/a.txt"]
+
+
+@requires_session_bus
+def test_krunner_match_trims_weak_results_over_dbus() -> None:
+    results = [
+        _sample_result(path="/a.txt", score=4.8),
+        _sample_result(path="/b.txt", score=2.5),
+        _sample_result(path="/c.txt", score=2.3),
+    ]
+
+    async def check() -> None:
+        async def fake_search(q: str) -> list[SearchResult]:
+            return results
+
+        svc = KRunnerService(fake_search)
+        async with exported_krunner(svc) as (iface, _, _):
+            matches = await iface.call_match("car review")
+            assert [m[0] for m in matches] == ["/a.txt", "/b.txt"]
 
     asyncio.run(check())

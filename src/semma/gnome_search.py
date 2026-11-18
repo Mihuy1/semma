@@ -44,6 +44,7 @@ from .krunner import (
     icon_name_for,
     shorten_home,
     trim_snippet,
+    trim_weak_results,
 )
 from .query_filters import parse_query
 from .search import SearchResult
@@ -282,7 +283,7 @@ class GnomeSearchService(ServiceInterface):
             log.exception("search failed for query %r", q)
             return []
 
-        results = list((raw_results or [])[: self._max_results])
+        results = trim_weak_results(raw_results or [], self._max_results)
         ids = [self._remember(r) for r in results]
         # Start thumbnails now so GetResultMetas (which follows right away) finds them cached.
         # Only for the results GNOME will actually display; the rest get one on demand.

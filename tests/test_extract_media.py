@@ -269,3 +269,22 @@ def test_playlist_refused(cfg, tmp_path):
     lst.write_text(f"ffconcat version 1.0\nfile {seg.name}\n")
     with pytest.raises(ExtractionError, match="playlist/concat"):
         list(extract(lst, "audio", cfg))
+
+
+def test_video_decode_caps_threads_before_input(media, cfg, tmp_path, monkeypatch):
+    from semma.extract.video import DECODE_THREADS
+
+    argv_file = tmp_path / "argv.txt"
+    frame = 320 * 240 * 3
+    fake_ffmpeg(
+        tmp_path,
+        monkeypatch,
+        f"import pathlib\n"
+        f"pathlib.Path({str(argv_file)!r}).write_text('\\n'.join(sys.argv[1:]))\n"
+        f"out.write(b'\\x80' * {frame})\n",
+    )
+    list(extract(media["silent_video"], "video", cfg))
+    argv = argv_file.read_text().splitlines()
+    threads_idx = argv.index("-threads")
+    assert argv[threads_idx + 1] == str(DECODE_THREADS)
+    assert threads_idx < argv.index("-i")
