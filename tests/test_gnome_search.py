@@ -134,7 +134,7 @@ def test_short_query_returns_empty_without_searching() -> None:
             activity += 1
 
         svc, queries = _service([_result("/x/a.txt")], on_activity=on_act)
-        for terms in ([], [""], ["a"], ["a", "b"], ["--", "?"], ["1", "2"]):
+        for terms in ([], [""], ["a"], ["a", "b"], ["--", "?"], ["1", "2"], ["image:"], ["screenshot:", "ab"]):
             assert await svc._run_search(terms) == []
         assert queries == [] and activity == 0
         assert await svc._run_search(["a", "b1"]) == ["/x/a.txt"]

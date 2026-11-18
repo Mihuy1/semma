@@ -13,6 +13,7 @@ from test_review_fixes import make_env, names, put_background, put_vectors, unit
 from semma import filetypes as ft
 from semma import search as search_mod
 from semma.config import load_config
+from semma.query_filters import FILTERS, QueryFilter, parse_query, register, sql_filter_fn
 from semma.search import STD_FLOOR, Searcher, is_lookup, meaning_scale, query_words
 from semma.store import Store
 
@@ -545,3 +546,104 @@ def test_sqlite_vec_sample_spreads_over_the_whole_index(tmp_path: Path, monkeypa
     sc = Searcher(store, cfg, FakeEmbedder())._sample_scale(store.reader(), q)
     assert sc.means["text"] == pytest.approx(0.55, abs=0.01)
     store.close()
+
+
+def test_parse_query_prefixes_and_extensibility() -> None:
+    for raw in ("image: cats", "image:cats", "  IMAGE:   cats  "):
+        p = parse_query(raw)
+        assert p.text == "cats" and p.flt is not None and p.flt.name == "image"
+    p_vid = parse_query("video: rocket\nlaunch")
+    assert p_vid.text == "rocket\nlaunch" and p_vid.flt is not None and p_vid.flt.name == "video"
+    p_shot = parse_query("screenshot: error")
+    assert p_shot.text == "error" and p_shot.flt is not None and p_shot.flt.name == "screenshot"
+    assert parse_query("image:").text == "" and parse_query("image:").flt is not None
+    assert parse_query("   screenshot:   ").text == "" and parse_query("   screenshot:   ").flt is not None
+    for literal in ("foo: bar", "http://example.com", "0xff32:0x0074", "plain query"):
+        p_lit = parse_query(literal)
+        assert p_lit.flt is None and p_lit.text == literal
+
+    # Registering a new filter in the future works immediately:
+    register(QueryFilter("note", frozenset({ft.TEXT, ft.OFFICE})), "notes")
+    try:
+        assert parse_query("note: budget").flt == FILTERS["note"]
+        assert parse_query("NOTES: budget").flt == FILTERS["note"]
+    finally:
+        FILTERS.pop("note", None)
+        FILTERS.pop("notes", None)
+
+
+def test_sql_filter_fn_mixed_case_name() -> None:
+    register(QueryFilter("Note", frozenset({ft.TEXT}), lambda _p: False), "Notes")
+    try:
+        assert sql_filter_fn("Note", "/x/a.txt") == 0
+    finally:
+        FILTERS.pop("note", None)
+        FILTERS.pop("notes", None)
+
+
+def test_prefix_filters_restrict_candidates_and_strip_prefix(realistic) -> None:
+    cfg, store, q, root = realistic
+    put_vectors(store, [
+        (str(root / "Pictures/Screenshots/err_panel.png"), 30, with_cos(q, 0.72, 2)),
+        (str(root / "Pictures/Screenshot_2026-01-01.png"), 30, with_cos(q, 0.70, 3)),
+        (str(root / "Pictures/vacation_photo.jpg"), 30, with_cos(q, 0.78, 4)),
+        (str(root / "Pictures/connection_refused_photo.png"), 30, with_cos(q, 0.65, 7)),
+    ])
+    put_vectors(store, [
+        (str(root / "Videos/demo_clip.mp4"), 30, with_cos(q, 0.74, 5)),
+    ], kind=ft.VIDEO, modality="video")
+    put_vectors(store, [
+        (str(root / "Documents/error_notes.md"), 40, with_cos(q, 0.82, 6)),
+    ], kind=ft.TEXT, modality="text")
+    add_text(store, "err_panel.png", "connection refused error")
+    add_text(store, "connection_refused_photo.png", "connection refused error")
+    add_text(store, "error_notes.md", "connection refused error in vacation_photo")
+
+    emb = FakeEmbedder()
+    s = Searcher(store, cfg, emb)
+
+    # Empty query after prefix returns [] without calling embed_query.
+    assert s.search("image:") == []
+    assert s.search("screenshot:   ") == []
+    assert s.search_vector(q, "image:", limit=10) == []
+
+    # image: keeps all images (photos + screenshots), drops text and video even when text has higher z.
+    imgs = s.search_vector(q, "image: connection refused", limit=10)
+    assert set(names(imgs)) == {
+        "err_panel.png", "Screenshot_2026-01-01.png", "vacation_photo.jpg", "connection_refused_photo.png",
+    }
+
+    # video: keeps only video files.
+    vids = s.search_vector(q, "video: connection refused", limit=10)
+    assert names(vids) == ["demo_clip.mp4"]
+
+    # screenshot: keeps only files matching ocr.is_screenshot (Screenshots folder or Screenshot prefix),
+    # dropping vacation_photo.jpg (higher cosine 0.78), connection_refused_photo.png (exact lexical match
+    # in both name and chunk text, exercising gs_query_filter in SQL), and error_notes.md (cosine 0.82).
+    shots = s.search_vector(q, "screenshot: connection refused", limit=10)
+    assert set(names(shots)) == {"err_panel.png", "Screenshot_2026-01-01.png"}
+
+    # Explicit kinds argument intersects with prefix filter; disjoint intersection returns [].
+    assert s.search_vector(q, "image: connection refused", limit=10, kinds=[ft.VIDEO]) == []
+    assert set(names(s.search_vector(q, "image: connection refused", limit=10, kinds=[ft.IMAGE, ft.TEXT]))) == {
+        "err_panel.png", "Screenshot_2026-01-01.png", "vacation_photo.jpg", "connection_refused_photo.png",
+    }
+
+
+def test_prefix_filter_sql_predicate_excludes_lexical_non_screenshot(realistic) -> None:
+    cfg, store, q, root = realistic
+    put_vectors(store, [
+        (str(root / "Pictures/Screenshots/err_panel.png"), 30, with_cos(q, 0.72, 2)),
+        (str(root / "Pictures/holiday/beach.png"), 30, with_cos(q, 0.40, 3)),
+    ])
+    add_text(store, "err_panel.png", "sunset beach")
+    add_text(store, "beach.png", "sunset beach")
+
+    s = Searcher(store, cfg, FakeEmbedder())
+    imgs = s.search_vector(q, "image: sunset beach", limit=10)
+    assert {"err_panel.png", "beach.png"} <= set(names(imgs))
+
+    shots = s.search_vector(q, "screenshot: sunset beach", limit=10)
+    assert names(shots) == ["err_panel.png"]
+    assert "beach.png" not in names(shots)
+

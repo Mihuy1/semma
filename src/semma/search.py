@@ -1,16 +1,18 @@
 """Hybrid search: how far each file's best chunk stands out in meaning for this query (a z-score
 over every stored vector), plus how many of the query's words the file contains.
 
-1. query words: `query_terms` minus stopwords and type words used as kind hints. Unambiguous type
-   words ("screenshot", "photo", "pdf", "video", "kuvakaappaus", "valokuva", ...) are always
-   hints; the others ("image", "paper", "notes", "music", "sound", ...) only where the phrasing
-   says so ("image of a dog", "notes about X", "... in a recording"); elsewhere they are ordinary
-   words and ask for no kind ("image segmentation", "music theory"). Hints give a bonus (step 4),
-   they are not filters. A query made only of type words or stopwords keeps them as words. Words
-   matching too many chunks are dropped from the chunk-text queries and from word coverage
-   (`_selective`); in chunk text only the last word gets a prefix wildcard from TEXT_PREFIX_MIN
-   characters while it is in no chunk as typed, while file names and folders prefix every term
-   from FILE_PREFIX_MIN characters (FILE_LAST_PREFIX_MIN for the last term).
+1. query words: a registered start-of-query `<prefix>:` (`image:`, `video:`, `screenshot:`; see
+   `query_filters.py`) restricts candidates to that type (and path predicate) and is stripped
+   before embedding and word extraction. `query_terms` minus stopwords and type words used as kind
+   hints. Unambiguous type words ("screenshot", "photo", "pdf", "video", "kuvakaappaus",
+   "valokuva", ...) are always hints; the others ("image", "paper", "notes", "music", "sound", ...)
+   only where the phrasing says so ("image of a dog", "notes about X", "... in a recording");
+   elsewhere they are ordinary words and ask for no kind ("image segmentation", "music theory").
+   Hints give a bonus (step 4), they are not filters. A query made only of type words or stopwords
+   keeps them as words. Words matching too many chunks are dropped from the chunk-text queries and
+   from word coverage (`_selective`); in chunk text only the last word gets a prefix wildcard from
+   TEXT_PREFIX_MIN characters while it is in no chunk as typed, while file names and folders prefix
+   every term from FILE_PREFIX_MIN characters (FILE_LAST_PREFIX_MIN for the last term).
 2. lexical candidates (all filtered by kind): an OR query over chunk text (bm25 order, its best
    chunk per file is the file's text match), over file names and over folder names, and a name
    query requiring every word.
@@ -71,6 +73,7 @@ import numpy as np
 from . import filetypes as ft
 from .config import MAX_KNN_K, Config
 from .ocr import is_screenshot
+from .query_filters import QueryFilter, parse_query
 from .store import Store
 from .vectors import chunks_version
 
@@ -375,11 +378,11 @@ class Searcher:
         self._sample: _Sample | None = None  # sqlite-vec fallback
 
     def search(self, query: str, limit: int = 10, kinds: Sequence[str] | None = None) -> list[SearchResult]:
-        query = query.strip()
-        if not query or limit <= 0:
+        parsed = parse_query(query)
+        if not parsed.text or limit <= 0:
             return []
         t0 = time.perf_counter()
-        qvec = self.embedder.embed_query(query)
+        qvec = self.embedder.embed_query(parsed.text)
         t1 = time.perf_counter()
         results = self.search_vector(qvec, query, limit, kinds)
         t2 = time.perf_counter()
@@ -402,6 +405,18 @@ class Searcher:
     # -- pipeline -------------------------------------------------------------
     def _search(self, db: sqlite3.Connection, qvec: np.ndarray, query: str, limit: int,
                 kinds: list[str] | None) -> list[SearchResult]:
+        parsed = parse_query(query)
+        flt = parsed.flt
+        if flt is not None and not parsed.text:
+            return []
+        if flt is not None:
+            if kinds is not None:
+                kinds = sorted(set(kinds) & flt.kinds)
+                if not kinds:
+                    return []
+            else:
+                kinds = sorted(flt.kinds)
+
         # Check/reload the vector cache first so `chunks_version` pins the WAL read snapshot
         # before any FTS query runs (prevents reloading from a stale snapshot on concurrent writes).
         cache = self.store.vectors
@@ -411,9 +426,21 @@ class Searcher:
 
         cfg = self.cfg
         gate = cfg.z_gate
-        kind_in = f"IN ({','.join('?' * len(kinds))})" if kinds else ""
-        kind_args = kinds or []
-        words = query_words(query)
+        conds: list[str] = []
+        filter_args: list[Any] = []
+        if kinds:
+            conds.append(f"f.kind IN ({','.join('?' * len(kinds))})")
+            filter_args.extend(kinds)
+        if flt is not None and flt.path_predicate is not None:
+            conds.append("gs_query_filter(?, f.path)")
+            filter_args.append(flt.name)
+        file_cond = " AND ".join(conds)
+
+        words = query_words(parsed.text)
+        if flt is not None:
+            words.kinds |= flt.kinds
+            if flt.screenshot:
+                words.screenshot = True
         terms = words.terms
         file_patterns = _file_patterns(terms)
         text_patterns = self._selective(db, self._whole_if_indexed(db, _patterns(terms)))
@@ -422,23 +449,23 @@ class Searcher:
         text_best: dict[int, int] = {}  # file_id -> chunk_id of its best text match
         if text_patterns:
             match = " OR ".join(text_patterns)
-            if kinds:
+            if file_cond:
                 sql = (f"SELECT c.id, c.file_id FROM fts_chunks JOIN chunks c ON c.id = fts_chunks.rowid "
-                       f"JOIN files f ON f.id = c.file_id WHERE fts_chunks MATCH ? AND f.kind {kind_in} "
+                       f"JOIN files f ON f.id = c.file_id WHERE fts_chunks MATCH ? AND {file_cond} "
                        f"ORDER BY fts_chunks.rank LIMIT {FTS_LIMIT * 4}")
-                args = [match, *kind_args]
+                args = [match, *filter_args]
             else:
                 sql = (f"SELECT c.id, c.file_id FROM (SELECT rowid, rank FROM fts_chunks WHERE fts_chunks MATCH ? "
                        f"ORDER BY rank LIMIT {FTS_LIMIT * 4}) m JOIN chunks c ON c.id = m.rowid ORDER BY m.rank")
                 args = [match]
             for chunk_id, file_id in self._fts(db, sql, args):
                 text_best.setdefault(file_id, chunk_id)
-        kind_join = f" JOIN files f ON f.id = fts_files.rowid AND f.kind {kind_in}" if kinds else ""
+        filtered_join = f" JOIN files f ON f.id = fts_files.rowid AND {file_cond}" if file_cond else ""
 
         def files_matching(match: str, lim: int) -> list[int]:
             return [r[0] for r in self._fts(
-                db, f"SELECT fts_files.rowid FROM fts_files{kind_join} WHERE fts_files MATCH ? "
-                    f"ORDER BY rank LIMIT {lim}", [*kind_args, match])]
+                db, f"SELECT fts_files.rowid FROM fts_files{filtered_join} WHERE fts_files MATCH ? "
+                    f"ORDER BY rank LIMIT {lim}", [*filter_args, match])]
 
         # file id -> its best text chunk (None: matched by name/folder), in lexical rank order
         lexical: dict[int, int | None] = dict(text_best)
@@ -455,7 +482,7 @@ class Searcher:
         single = len(terms) == 1 and not lookup
         margin = SINGLE_WORD_MARGIN if single else Z_MARGIN
         bonus = TYPE_BONUS if words.kinds else 0.0
-        meaning = self._meaning(db, qvec, kinds, gate, lexical, margin, bonus, cfg.z_floor)
+        meaning = self._meaning(db, qvec, kinds, gate, lexical, margin, bonus, cfg.z_floor, flt)
         best = meaning.best
         pool = set(lexical) | set(best)
         if not pool:
@@ -614,7 +641,8 @@ class Searcher:
         return _WordCoverage(named, coverage, strong, text_hit, name_hit, dir_hit)
 
     def _meaning(self, db: sqlite3.Connection, qvec: np.ndarray, kinds: list[str] | None, gate: float,
-                 lexical: dict[int, int | None], margin: float, bonus: float, floor: float) -> _Meaning:
+                 lexical: dict[int, int | None], margin: float, bonus: float, floor: float,
+                 flt: QueryFilter | None = None) -> _Meaning:
         """Each candidate file's best chunk (z, cosine, chunk id): the `lexical` files (file id ->
         its best text chunk or None, in lexical rank order), and the files with a chunk at
         z >= gate that can still pass the margin and floor (`_vector_min`; at most
@@ -624,11 +652,12 @@ class Searcher:
         if cache is not None:
             with cache.lock:
                 if not cache.too_big:
-                    return self._meaning_cached(db, qvec, kinds, gate, lexical, margin, bonus, floor)
-        return self._meaning_sqlite(db, qvec, kinds, gate, lexical, margin, bonus, floor)
+                    return self._meaning_cached(db, qvec, kinds, gate, lexical, margin, bonus, floor, flt)
+        return self._meaning_sqlite(db, qvec, kinds, gate, lexical, margin, bonus, floor, flt)
 
     def _meaning_cached(self, db: sqlite3.Connection, qvec: np.ndarray, kinds: list[str] | None,
-                        gate: float, lexical: dict[int, int | None], margin: float, bonus: float, floor: float) -> _Meaning:
+                        gate: float, lexical: dict[int, int | None], margin: float, bonus: float, floor: float,
+                        flt: QueryFilter | None = None) -> _Meaning:
         cache = self.store.vectors
         assert cache is not None
         sc = cache.scores(qvec)
@@ -648,6 +677,12 @@ class Searcher:
         if kinds is not None:
             ok &= np.isin(sc.kind, cache.codes(kinds))
         rows = np.flatnonzero(ok)
+        if len(rows) and flt is not None and flt.path_predicate is not None:
+            fids = ",".join(map(str, np.unique(sc.file_ids[rows]).tolist()))
+            pred = flt.path_predicate
+            allowed = [fid for fid, path in db.execute(
+                f"SELECT id, path FROM files WHERE id IN ({fids})") if pred(path)]
+            rows = rows[np.isin(sc.file_ids[rows], allowed)]
         z = (sims[rows] - offset[mods[rows]]) * np.float32(1.0 / scale.std)
         if len(rows):
             z_min = _vector_min(float(z.max()), gate, margin, bonus, floor)
@@ -670,7 +705,8 @@ class Searcher:
         return _Meaning(best, scale)
 
     def _meaning_sqlite(self, db: sqlite3.Connection, qvec: np.ndarray, kinds: list[str] | None,
-                        gate: float, lexical: dict[int, int | None], margin: float, bonus: float, floor: float) -> _Meaning:
+                        gate: float, lexical: dict[int, int | None], margin: float, bonus: float, floor: float,
+                        flt: QueryFilter | None = None) -> _Meaning:
         """Fallback without the vector cache (index above vector_cache_max_chunks): the KNN
         top-k (cfg.knn_k) is scored on a scale estimated from a sample of the index. A lexical
         candidate outside the top-k is scored by one chunk (its best text match, else its first
@@ -680,7 +716,8 @@ class Searcher:
         scale = self._sample_scale(db, qvec)
         q = np.asarray(qvec, dtype=np.float32)
         q = q / (np.linalg.norm(q) or 1.0)
-        k = max(1, min(self.cfg.knn_k, MAX_KNN_K))
+        has_path_filter = flt is not None and flt.path_predicate is not None
+        k = MAX_KNN_K if has_path_filter else max(1, min(self.cfg.knn_k, MAX_KNN_K))
         sql = "SELECT chunk_id, distance FROM vec_chunks WHERE embedding MATCH ? AND k = ?"
         args: list[Any] = [np.ascontiguousarray(q), k]
         if kinds:
@@ -692,6 +729,13 @@ class Searcher:
             ids = list(cos)
             rows = [(cid, fid, scale.z(cos[cid], mod), cos[cid]) for cid, fid, mod in db.execute(
                 f"SELECT id, file_id, modality FROM chunks WHERE id IN ({','.join('?' * len(ids))})", ids)]
+            if has_path_filter and rows:
+                assert flt is not None and flt.path_predicate is not None
+                fids = ",".join(map(str, sorted({fid for _, fid, _, _ in rows})))
+                pred = flt.path_predicate
+                allowed = {fid for fid, path in db.execute(
+                    f"SELECT id, path FROM files WHERE id IN ({fids})") if pred(path)}
+                rows = [r for r in rows if r[1] in allowed]
             z_max = max((zz for _, _, zz, _ in rows if zz >= gate), default=None)
             z_min = _vector_min(z_max, gate, margin, bonus, floor) if z_max is not None else float("inf")
             for cid, fid, zz, c in rows:

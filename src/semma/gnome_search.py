@@ -45,6 +45,7 @@ from .krunner import (
     shorten_home,
     trim_snippet,
 )
+from .query_filters import parse_query
 from .search import SearchResult
 from .thumbnails import IconData, Thumbnailer
 from .viewer import Spot, spot_for, viewer_argv
@@ -264,7 +265,7 @@ class GnomeSearchService(ServiceInterface):
 
     async def _run_search(self, terms: list[str]) -> list[str]:
         q = " ".join(terms).strip()
-        if count_alnum(q) < 3:
+        if count_alnum(parse_query(q).text) < 3:
             return []
 
         if self._on_activity is not None:

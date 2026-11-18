@@ -23,6 +23,7 @@ from dbus_fast.service import ServiceInterface, method
 
 from . import filetypes as ft, mpris
 from .dbus_names import RUNNER_INTERFACE
+from .query_filters import parse_query
 from .search import SearchResult
 from .thumbnails import IconData, Thumbnailer
 from .viewer import Spot, spot_for, viewer_argv
@@ -362,7 +363,7 @@ class KRunnerService(ServiceInterface):
     @method()
     async def Match(self, query: "s") -> "a(sssida{sv})":  # noqa: F821, UP037
         q = query.strip()
-        if count_alnum(q) < 3:
+        if count_alnum(parse_query(q).text) < 3:
             return []
 
         if self._on_activity is not None:

@@ -60,6 +60,7 @@ from . import filetypes as ft
 from .config import Config, ConfigError, canonical, load_config
 from .indexer import Indexer, IndexStats, ModelMismatch
 from .onboarding import onboarding_done
+from .query_filters import parse_query
 from .scanner import Scanner, _is_app_install
 from .search import Searcher, SearchResult
 from .store import Store
@@ -448,7 +449,8 @@ class Daemon:
         t0 = time.perf_counter()
         try:
             q = query.strip()
-            if len(q) < MIN_QUERY_CHARS or self._closed:
+            parsed = parse_query(q)
+            if len(parsed.text) < MIN_QUERY_CHARS or self._closed:
                 return []
             # Setup is still open: don't load the model (that would pin the device). Run setup
             # again keeps the index, so a model that is loaded already still answers.
@@ -498,7 +500,8 @@ class Daemon:
         """On the search thread. None if the query went stale while it waited."""
         if seq != self._query_seq:
             return None
-        qvec = self.embedder.embed_query(query)  # GpuLock: ahead of waiting index batches
+        parsed = parse_query(query)
+        qvec = self.embedder.embed_query(parsed.text)  # GpuLock: ahead of waiting index batches
         if seq != self._query_seq:
             return None
         return self.searcher.search_vector(qvec, query, self.cfg.krunner_max_results)

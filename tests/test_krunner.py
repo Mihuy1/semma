@@ -202,7 +202,7 @@ def test_short_queries_return_empty_without_calling_search() -> None:
 
         svc = KRunnerService(fake_search, on_activity=on_act)
         async with exported_krunner(svc) as (iface, _, _):
-            for q in ("", "  ", "a", "ab", "a!", "  12  ", "--?"):
+            for q in ("", "  ", "a", "ab", "a!", "  12  ", "--?", "image:", "image: a", "screenshot: ab"):
                 res = await iface.call_match(q)
                 assert res == []
             assert called == 0

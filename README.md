@@ -15,7 +15,7 @@ Describe what you remember, rather than the filename. These are illustrative que
 | Audio                        | “recording of birds singing”    | Audio content embedded directly, not a generated transcript                   |
 | Video                        | “someone riding a bicycle”      | Sampled frames and the audio track, when present                              |
 
-File types and size limits are configurable. By default, only the first hour of each audio/video file is indexed; adjust this in **Settings → Media**. Source-code files are not indexed.
+File types and size limits are configurable. Prefix a query with `image:`, `video:`, or `screenshot:` (for example `image: a dog on a beach` or `screenshot: connection refused`) to restrict results to that type. By default, only the first hour of each audio/video file is indexed; adjust this in **Settings → Media**. Source-code files are not indexed.
 
 HEIC/HEIF photos are decoded with ffmpeg, which needs an HEVC decoder; Fedora's `ffmpeg-free` has none (install RPM Fusion's `ffmpeg` or `libavcodec-freeworld`). Multi-tile photos, as phones take them, need FFmpeg 7.1 or newer.
 
@@ -30,8 +30,8 @@ HEIC/HEIF photos are decoded with ffmpeg, which needs an HEVC decoder; Fedora's 
 Download the package for x86-64 Fedora 41+, Ubuntu 24.04+, or Debian 13+ from [Releases](https://github.com/Mihuy1/semma/releases/latest), then install it:
 
 ```sh
-sudo dnf install ./semma-0.5.1-1.x86_64.rpm     # Fedora
-sudo apt install ./semma_0.5.1-1_amd64.deb      # Ubuntu, Debian
+sudo dnf install ./semma-0.5.2-1.x86_64.rpm     # Fedora
+sudo apt install ./semma_0.5.2-1_amd64.deb      # Ubuntu, Debian
 ```
 
 Then open **Semma** from the application menu and go through the setup wizard. Semma does not index anything until you finish the wizard. Review the indexed folders, exclusions, file types, and device settings before starting. The model (865 MB) downloads in the background the first time.

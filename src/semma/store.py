@@ -38,6 +38,7 @@ from typing import Any
 import numpy as np
 import sqlite_vec
 
+from .query_filters import sql_filter_fn
 from .scanner import ScannedFile
 from .vectors import Delta, VectorCache, chunks_version
 
@@ -196,6 +197,7 @@ def connect(path: Path | str, readonly: bool = False, autocommit: bool | None = 
     db.enable_load_extension(False)
     db.create_function("gs_name_terms", 1, name_terms, deterministic=True)
     db.create_function("gs_dir_terms", 1, dir_terms, deterministic=True)
+    db.create_function("gs_query_filter", 2, sql_filter_fn, deterministic=True)
     if str(path) != ":memory:":
         db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=NORMAL")
