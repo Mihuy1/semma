@@ -39,7 +39,6 @@ _STANDARD_ICONS = {
 _COLORFUL_ICONS = frozenset({
     "io.github.Semma",
     "system-search",
-    "folder",
     "dialog-information",
     "dialog-warning",
     "dialog-error",
@@ -114,12 +113,15 @@ def tinted_icon(
     *,
     monochrome: bool | None = None,
     prefer_color: bool = False,
+    selected: bool = False,
 ) -> QIcon:
     """Return a copy of `icon` with proper Normal/Active/Disabled/Selected pixmaps.
 
     Monochrome/symbolic icons are tinted to ButtonText (Normal/Active), Disabled ButtonText
-    (Disabled), and HighlightedText (Selected). Colorful icons keep their Normal colors and
-    get a translucent Disabled pixmap.
+    (Disabled), and HighlightedText (Selected). When `selected` is True, Normal/Active/Disabled
+    use HighlightedText so icons inside widgets that paint with Normal mode (e.g. selected
+    QTabBar tabs) stay legible on Highlight backgrounds. Colorful icons keep their Normal
+    colors and get a translucent Disabled pixmap.
 
     When `prefer_color` is True and `monochrome` is None, if the icon provides any full-color
     size (for example Breeze's `folder`, which is monochrome at 16-24 px and colored at 32 px+),
@@ -130,8 +132,9 @@ def tinted_icon(
         return icon
     pal = palette if palette is not None else _effective_palette()
 
-    normal_color = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.ButtonText)
-    disabled_color = QColor(pal.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText))
+    normal_role = QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.ButtonText
+    normal_color = pal.color(QPalette.ColorGroup.Active, normal_role)
+    disabled_color = QColor(pal.color(QPalette.ColorGroup.Disabled, normal_role))
     if disabled_color.alpha() == 255 and abs(normal_color.lightness() - disabled_color.lightness()) < 40:
         disabled_color.setAlphaF(0.45)
     selected_color = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.HighlightedText)
@@ -225,6 +228,7 @@ def theme_icon(
     widget: QWidget | None = None,
     monochrome: bool | None = None,
     prefer_color: bool = False,
+    selected: bool = False,
 ) -> QIcon:
     """The desktop theme's icon `name` (or the first fallback the theme has), tinted for the active palette."""
     icon, resolved = _resolve_theme_icon(name, *fallbacks, widget=widget)
@@ -232,7 +236,9 @@ def theme_icon(
         return icon
     if monochrome is None and resolved is not None and resolved.endswith("-symbolic"):
         monochrome = True
-    return tinted_icon(icon, _effective_palette(widget), monochrome=monochrome, prefer_color=prefer_color)
+    return tinted_icon(
+        icon, _effective_palette(widget), monochrome=monochrome, prefer_color=prefer_color, selected=selected,
+    )
 
 
 def scaled_font(widget: QWidget, factor: float, bold: bool = False) -> QFont:

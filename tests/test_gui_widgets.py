@@ -464,7 +464,7 @@ def test_all_settings_sections_resolve_icons_in_adwaita(
         if Path("/usr/share/icons/Adwaita/index.theme").is_file():
             QIcon.setThemeName("Adwaita")
             expected = [
-                ("folders", "folder", False),
+                ("folders", "folder-symbolic", True),
                 ("filetypes", "x-office-document-symbolic", True),
                 ("priorities", "view-sort-descending-symbolic", True),
                 ("media", "applications-multimedia-symbolic", True),
@@ -556,8 +556,10 @@ def test_live_theme_switch_refreshes_icons_and_stylesheet(
         wiz.show()
         app.processEvents()
 
+        # Selected tab icon uses HighlightedText (white) even in light mode; unselected tab uses dark ButtonText.
+        assert _icon_avg_channel(w.tabs.tabIcon(0), QIcon.Mode.Normal)[0] > 180
         light_lums = {
-            "tab0": _icon_avg_channel(w.tabs.tabIcon(0), QIcon.Mode.Normal)[0],
+            "tab1": _icon_avg_channel(w.tabs.tabIcon(1), QIcon.Mode.Normal)[0],
             "pause": _icon_avg_channel(w.status_page.pause_button.icon(), QIcon.Mode.Normal)[0],
             "rescan": _icon_avg_channel(w.status_page.rescan_button.icon(), QIcon.Mode.Normal)[0],
             "retry": _icon_avg_channel(w.status_page.retry_button.icon(), QIcon.Mode.Normal)[0],
@@ -570,6 +572,14 @@ def test_live_theme_switch_refreshes_icons_and_stylesheet(
         for name, lum in light_lums.items():
             assert lum < 100, f"{name} light icon should be dark, got lum={lum:.1f}"
 
+        # Switching tabs in light mode swaps which tab icon is white vs dark.
+        w.tabs.setCurrentWidget(w.settings_page)
+        app.processEvents()
+        assert _icon_avg_channel(w.tabs.tabIcon(0), QIcon.Mode.Normal)[0] < 100
+        assert _icon_avg_channel(w.tabs.tabIcon(1), QIcon.Mode.Normal)[0] > 180
+        w.tabs.setCurrentWidget(w.status_page)
+        app.processEvents()
+
         # Live switch to dark palette (which triggers ApplicationPaletteChange -> stylesheet rebuild + PaletteChange)
         app.setPalette(theme.build_gnome_palette(dark=True))
         app.processEvents()
@@ -577,6 +587,7 @@ def test_live_theme_switch_refreshes_icons_and_stylesheet(
         assert "#242424" in app.styleSheet() or "#2d2d2d" in app.styleSheet()
         dark_lums = {
             "tab0": _icon_avg_channel(w.tabs.tabIcon(0), QIcon.Mode.Normal)[0],
+            "tab1": _icon_avg_channel(w.tabs.tabIcon(1), QIcon.Mode.Normal)[0],
             "pause": _icon_avg_channel(w.status_page.pause_button.icon(), QIcon.Mode.Normal)[0],
             "rescan": _icon_avg_channel(w.status_page.rescan_button.icon(), QIcon.Mode.Normal)[0],
             "retry": _icon_avg_channel(w.status_page.retry_button.icon(), QIcon.Mode.Normal)[0],
