@@ -21,8 +21,14 @@ from .context import Changes, Problem, SettingsContext
 class FiletypesSection(SettingsSection):
     key = "filetypes"
     title = "File types"
-    icon = "document-multiple"
-    icon_fallbacks = ("x-office-document-symbolic", "folder-documents-symbolic", "x-office-document", "text-x-generic")
+    icon = "preferences-desktop-filetype-association"
+    icon_fallbacks = (
+        "x-office-document",
+        "document-multiple",
+        "x-office-document-symbolic",
+        "folder-documents-symbolic",
+        "text-x-generic",
+    )
     description = (
         "Choose which kinds of files Semma indexes. "
         "Turning a file type off removes its files from the index."

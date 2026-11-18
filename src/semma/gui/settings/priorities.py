@@ -30,8 +30,14 @@ from .folders import HOME_LABEL
 class PrioritiesSection(SettingsSection):
     key = "priorities"
     title = "Priorities"
-    icon = "view-sort-descending"
-    icon_fallbacks = ("view-sort-descending-symbolic", "starred-symbolic", "starred")
+    icon = "preferences-desktop-default-applications"
+    icon_fallbacks = (
+        "folder-favorites",
+        "view-sort-descending",
+        "view-sort-descending-symbolic",
+        "starred-symbolic",
+        "starred",
+    )
     description = "Folders with a higher score are indexed first and win ties in search results."
 
     def __init__(self, parent: QWidget | None = None) -> None:

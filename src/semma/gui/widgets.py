@@ -113,12 +113,18 @@ def tinted_icon(
     palette: QPalette | None = None,
     *,
     monochrome: bool | None = None,
+    prefer_color: bool = False,
 ) -> QIcon:
     """Return a copy of `icon` with proper Normal/Active/Disabled/Selected pixmaps.
 
     Monochrome/symbolic icons are tinted to ButtonText (Normal/Active), Disabled ButtonText
     (Disabled), and HighlightedText (Selected). Colorful icons keep their Normal colors and
     get a translucent Disabled pixmap.
+
+    When `prefer_color` is True and `monochrome` is None, if the icon provides any full-color
+    size (for example Breeze's `folder`, which is monochrome at 16-24 px and colored at 32 px+),
+    smaller monochrome sizes are rendered by downscaling a full-color size instead of tinting the
+    monochrome glyph.
     """
     if icon.isNull():
         return icon
@@ -130,7 +136,7 @@ def tinted_icon(
         disabled_color.setAlphaF(0.45)
     selected_color = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.HighlightedText)
 
-    out = QIcon()
+    entries: list[tuple[int, float, QPixmap, bool]] = []
     for sz in _ICON_SIZES:
         for dpr in (1.0, 2.0):
             pm = icon.pixmap(QSize(sz, sz), dpr, QIcon.Mode.Normal, QIcon.State.Off)
@@ -139,19 +145,43 @@ def tinted_icon(
             # Decide per pixmap: themes such as Breeze ship monochrome 16-24 px icons but full-color
             # 32 px+ ones under the same name, and tinting those would flatten them into silhouettes.
             is_mono = monochrome if monochrome is not None else _is_monochrome_pixmap(pm)
-            if is_mono:
-                normal_pm = _tint_pixmap(pm, normal_color)
-                disabled_pm = _tint_pixmap(pm, disabled_color)
-                selected_pm = _tint_pixmap(pm, selected_color)
-                out.addPixmap(normal_pm, QIcon.Mode.Normal)
-                out.addPixmap(normal_pm, QIcon.Mode.Active)
-                out.addPixmap(disabled_pm, QIcon.Mode.Disabled)
-                out.addPixmap(selected_pm, QIcon.Mode.Selected)
-            else:
-                out.addPixmap(pm, QIcon.Mode.Normal)
-                out.addPixmap(pm, QIcon.Mode.Active)
-                out.addPixmap(_dim_pixmap(pm), QIcon.Mode.Disabled)
-                out.addPixmap(pm, QIcon.Mode.Selected)
+            entries.append((sz, dpr, pm, is_mono))
+
+    colored_by_px = sorted(
+        (pm for _, _, pm, is_mono in entries if not is_mono),
+        key=lambda p: (p.width(), p.height()),
+    )
+    use_color_upscale = prefer_color and monochrome is None and bool(colored_by_px)
+
+    out = QIcon()
+    for sz, dpr, pm, is_mono in entries:
+        if is_mono and use_color_upscale:
+            target_px = round(sz * dpr)
+            src = next(
+                (c for c in colored_by_px if c.width() >= target_px and c.height() >= target_px),
+                colored_by_px[-1],
+            )
+            pm = src.scaled(
+                target_px,
+                target_px,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            pm.setDevicePixelRatio(dpr)
+            is_mono = False
+        if is_mono:
+            normal_pm = _tint_pixmap(pm, normal_color)
+            disabled_pm = _tint_pixmap(pm, disabled_color)
+            selected_pm = _tint_pixmap(pm, selected_color)
+            out.addPixmap(normal_pm, QIcon.Mode.Normal)
+            out.addPixmap(normal_pm, QIcon.Mode.Active)
+            out.addPixmap(disabled_pm, QIcon.Mode.Disabled)
+            out.addPixmap(selected_pm, QIcon.Mode.Selected)
+        else:
+            out.addPixmap(pm, QIcon.Mode.Normal)
+            out.addPixmap(pm, QIcon.Mode.Active)
+            out.addPixmap(_dim_pixmap(pm), QIcon.Mode.Disabled)
+            out.addPixmap(pm, QIcon.Mode.Selected)
     return out if not out.isNull() else icon
 
 
@@ -194,6 +224,7 @@ def theme_icon(
     *fallbacks: str,
     widget: QWidget | None = None,
     monochrome: bool | None = None,
+    prefer_color: bool = False,
 ) -> QIcon:
     """The desktop theme's icon `name` (or the first fallback the theme has), tinted for the active palette."""
     icon, resolved = _resolve_theme_icon(name, *fallbacks, widget=widget)
@@ -201,7 +232,7 @@ def theme_icon(
         return icon
     if monochrome is None and resolved is not None and resolved.endswith("-symbolic"):
         monochrome = True
-    return tinted_icon(icon, _effective_palette(widget), monochrome=monochrome)
+    return tinted_icon(icon, _effective_palette(widget), monochrome=monochrome, prefer_color=prefer_color)
 
 
 def scaled_font(widget: QWidget, factor: float, bold: bool = False) -> QFont:

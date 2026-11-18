@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
-from PySide6.QtGui import QPalette, QShowEvent
+from PySide6.QtGui import QIcon, QPalette, QShowEvent
 from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFrame,
@@ -74,8 +74,7 @@ class SettingsPage(QWidget):
             scroll.setWidget(holder)
             holder.setAutoFillBackground(False)
             self.stack.addWidget(scroll)
-            QListWidgetItem(theme_icon(cls.icon, *cls.icon_fallbacks, "preferences-other", widget=self),
-                            cls.title, self.nav)
+            QListWidgetItem(self._section_icon(cls), cls.title, self.nav)
         self.nav.setFixedWidth(max(self.nav.sizeHintForColumn(0) + 32, 175))
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav.setCurrentRow(0)
@@ -120,11 +119,14 @@ class SettingsPage(QWidget):
         lay.addLayout(actions)
         self.reload()
 
+    def _section_icon(self, cls: type[SettingsSection]) -> QIcon:
+        return theme_icon(cls.icon, *cls.icon_fallbacks, "preferences-other", widget=self, prefer_color=True)
+
     def _apply_icons(self) -> None:
         for i, cls in enumerate(self._section_classes):
             item = self.nav.item(i)
             if item is not None:
-                item.setIcon(theme_icon(cls.icon, *cls.icon_fallbacks, "preferences-other", widget=self))
+                item.setIcon(self._section_icon(cls))
         self.revert_button.setIcon(theme_icon("edit-undo", "document-revert", widget=self))
         self.apply_button.setIcon(
             theme_icon("dialog-ok-apply", "object-select-symbolic", "document-save", widget=self)

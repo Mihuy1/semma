@@ -455,13 +455,28 @@ def test_all_settings_sections_resolve_icons_in_adwaita(
 ) -> None:
     from PySide6.QtGui import QIcon
 
-    from semma.gui import theme
+    from semma.gui import theme, widgets
+    from semma.gui.settings.sections import SECTIONS
 
     theme.ensure_icon_theme_paths()
     old_theme = QIcon.themeName()
     try:
         if Path("/usr/share/icons/Adwaita/index.theme").is_file():
             QIcon.setThemeName("Adwaita")
+            expected = [
+                ("folders", "folder", False),
+                ("filetypes", "x-office-document-symbolic", True),
+                ("priorities", "view-sort-descending-symbolic", True),
+                ("media", "applications-multimedia-symbolic", True),
+                ("screenshots", "camera-photo-symbolic", True),
+                ("performance", "preferences-system-symbolic", True),
+            ]
+            for cls, (key, exp_name, exp_mono) in zip(SECTIONS, expected, strict=True):
+                assert cls.key == key
+                _, resolved = widgets._resolve_theme_icon(cls.icon, *cls.icon_fallbacks, "preferences-other")
+                assert resolved == exp_name
+                ti = widgets.theme_icon(cls.icon, *cls.icon_fallbacks, "preferences-other", prefer_color=True)
+                assert widgets._is_monochrome_pixmap(ti.pixmap(22, 22)) is exp_mono
         page = make_settings(home, FakeClient(status()))
         assert page.nav.count() == 6
         for i in range(page.nav.count()):
@@ -764,4 +779,85 @@ def test_tinting_keeps_full_color_sizes_of_mixed_icons(app: QtWidgets.QApplicati
         assert widgets._is_monochrome_pixmap(icon.pixmap(QSize(16, 16)))
         assert not widgets._is_monochrome_pixmap(icon.pixmap(QSize(48, 48)))
     finally:
+        QIcon.setThemeName(old_theme)
+
+
+def test_settings_nav_uses_colored_icons_on_breeze_like_theme(
+    app: QtWidgets.QApplication, tmp_path: Path, home: Path,
+) -> None:
+    """Every Settings sidebar tab icon must be full-color in a Breeze-structured theme."""
+    from PySide6.QtCore import QSize, Qt
+    from PySide6.QtGui import QColor, QIcon, QImage, QPainter
+
+    from semma.gui import widgets
+
+    def write_square_png(path: Path, size: int, color: QColor) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        img = QImage(size, size, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(img)
+        painter.fillRect(2, 2, size - 4, size - 4, color)
+        painter.end()
+        assert img.save(str(path), "PNG")
+
+    theme_root = tmp_path / "icons"
+    theme_dir = theme_root / "breeze-sim"
+    theme_dir.mkdir(parents=True)
+    (theme_dir / "index.theme").write_text(
+        "[Icon Theme]\n"
+        "Name=breeze-sim\n"
+        "Directories=actions/22,places/16,places/22,places/32,preferences/22,preferences/32,categories/22,apps/48\n\n"
+        "[actions/22]\nSize=22\nContext=Actions\nType=Fixed\n\n"
+        "[places/16]\nSize=16\nContext=Places\nType=Fixed\n\n"
+        "[places/22]\nSize=22\nContext=Places\nType=Fixed\n\n"
+        "[places/32]\nSize=32\nContext=Places\nType=Fixed\n\n"
+        "[preferences/22]\nSize=22\nContext=Applications\nType=Fixed\n\n"
+        "[preferences/32]\nSize=32\nContext=Applications\nType=Scalable\nMinSize=32\nMaxSize=256\n\n"
+        "[categories/22]\nSize=22\nContext=Categories\nType=Fixed\n\n"
+        "[apps/48]\nSize=48\nContext=Applications\nType=Scalable\nMinSize=48\nMaxSize=256\n"
+    )
+
+    mono = QColor("#232629")
+    blue = QColor("#3daee9")
+    gold = QColor("#faae2a")
+    green = QColor("#63984b")
+    teal = QColor("#4ce0c6")
+
+    # Mirror Breeze's mixed-size `folder` (monochrome at <=22 px, blue at 32 px+)
+    write_square_png(theme_dir / "places/16/folder.png", 16, mono)
+    write_square_png(theme_dir / "places/22/folder.png", 22, mono)
+    write_square_png(theme_dir / "places/32/folder.png", 32, blue)
+    # Mirror Breeze's monochrome action fallbacks vs colored preferences/categories/apps icons
+    write_square_png(theme_dir / "actions/22/document-multiple.png", 22, mono)
+    write_square_png(theme_dir / "actions/22/view-sort-descending.png", 22, mono)
+    write_square_png(theme_dir / "actions/22/speedometer.png", 22, mono)
+    write_square_png(theme_dir / "preferences/22/preferences-desktop-filetype-association.png", 22, blue)
+    write_square_png(theme_dir / "preferences/22/preferences-desktop-default-applications.png", 22, gold)
+    write_square_png(theme_dir / "categories/22/applications-multimedia.png", 22, blue)
+    write_square_png(theme_dir / "apps/48/accessories-screenshot-tool.png", 48, teal)
+    write_square_png(theme_dir / "preferences/32/preferences-system-performance.png", 32, green)
+
+    old_paths = QIcon.themeSearchPaths()
+    old_theme = QIcon.themeName()
+    try:
+        QIcon.setThemeSearchPaths([str(theme_root)])
+        QIcon.setThemeName("breeze-sim")
+
+        # Default theme_icon("folder") still preserves monochrome small sizes; prefer_color upscales/downscales color.
+        default_folder = widgets.theme_icon("folder")
+        assert widgets._is_monochrome_pixmap(default_folder.pixmap(QSize(16, 16)))
+        assert not widgets._is_monochrome_pixmap(default_folder.pixmap(QSize(32, 32)))
+
+        color_folder = widgets.theme_icon("folder", prefer_color=True)
+        assert not widgets._is_monochrome_pixmap(color_folder.pixmap(QSize(22, 22)))
+
+        page = make_settings(home, FakeClient(status()))
+        assert page.nav.count() == 6
+        for i in range(page.nav.count()):
+            item = page.nav.item(i)
+            pm = item.icon().pixmap(page.nav.iconSize())
+            assert not pm.isNull(), f"null icon for {item.text()}"
+            assert not widgets._is_monochrome_pixmap(pm), f"monochrome icon for {item.text()}"
+    finally:
+        QIcon.setThemeSearchPaths(old_paths)
         QIcon.setThemeName(old_theme)
