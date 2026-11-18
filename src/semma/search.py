@@ -19,7 +19,7 @@ over every stored vector), plus how many of the query's words the file contains.
 3. meaning: the query's cosine with EVERY stored vector (one matrix-vector product over the
    in-memory VectorCache), minus the mean cosine of that vector's modality for this query (text,
    image, audio and video vectors sit at different levels: image cosines run ~0.05 below text
-   ones; a modality with < MODALITY_MIN vectors uses the overall mean), divided by the standard
+   ones; a modality in < MODALITY_MIN files uses the overall mean), divided by the standard
    deviation of those centred values over all vectors (floored at STD_FLOOR) after subtracting
    their mean. That is a z-score: how many standard deviations a chunk stands out from the whole
    index for this query. The scale always comes from all vectors; `kinds` only restricts which
@@ -93,7 +93,7 @@ TEXT_MAX_DF_RATIO = 0.05
 _TERM = re.compile(r"[^\W_]+")  # letters/digits; drops every FTS5 operator, quote and hyphen
 
 # -- scoring (z units: standard deviations of this query's cosines over the whole index) ------
-MODALITY_MIN = 20  # fewer vectors of a modality: centre them on the overall mean instead
+MODALITY_MIN = 20  # modality in fewer distinct files: centre it on the overall mean instead
 STD_FLOOR = 0.02  # a tiny or uniform index must not blow small cosine gaps up into huge z
 MAX_MEANING_ROWS = 4096  # most chunks above the gate looked at (best z first)
 # Coverage of every query word adds 2 (DigUp's weight): enough to lift a file that has the
@@ -121,7 +121,7 @@ SINGLE_WORD_MARGIN = 1.5
 TYPE_BONUS = 1.0  # the file's kind is what a type word asks for ("screenshot of ...", "pdf")
 SCREENSHOT_BONUS = 0.5  # ... and "screenshot" asks for images that are screenshots in particular
 SCALE_SAMPLE = 2048  # sqlite-vec fallback: vectors sampled to estimate the scale
-MODALITY_SAMPLE_MIN = 64  # ... at least this many of each modality with MODALITY_MIN chunks
+MODALITY_SAMPLE_MIN = 64  # ... at least this many of each modality in MODALITY_MIN files
 SQLITE_LEXICAL_VECTORS = 50  # ... lexical files outside the KNN top-k scored by one chunk each
 SCALE_SAMPLE_MAX_AGE = 300.0  # seconds a sample is reused after the index changed
 
@@ -279,7 +279,7 @@ class Scale:
     """This query's meaning scale: z = (cos - mean[modality] - center) / std."""
 
     means: dict[str, float]  # per modality
-    overall: float  # for modalities with fewer than MODALITY_MIN vectors (or unseen)
+    overall: float  # for modalities in fewer than MODALITY_MIN files (or unseen)
     center: float
     std: float
 
@@ -294,11 +294,13 @@ class Scale:
 
 
 def meaning_scale(sims: np.ndarray, modality: np.ndarray, names: Sequence[str],
-                  weights: np.ndarray | None = None, counts: Sequence[int] | None = None) -> Scale:
+                  weights: np.ndarray | None = None,
+                  files: Sequence[int] | np.ndarray | None = None) -> Scale:
     """The scale from cosines `sims` of vectors with modality codes `modality` (names[code]).
     A sample passes `weights` (how many index vectors each sampled one stands for) and the
-    index's per-modality `counts` (which decide MODALITY_MIN). Everything comes from per-modality
-    sums of w, w*cos and w*cos^2 (no full-length temporaries besides the squares)."""
+    index's per-modality `files` (distinct files, which decide MODALITY_MIN; defaults to `w0`
+    when omitted). Everything comes from per-modality sums of w, w*cos and w*cos^2 (no
+    full-length temporaries besides the squares)."""
     if not len(sims):
         return Scale({}, 0.0, 0.0, 1.0)
     codes = modality.astype(np.intp, copy=False)
@@ -311,7 +313,7 @@ def meaning_scale(sims: np.ndarray, modality: np.ndarray, names: Sequence[str],
         w0 = np.bincount(codes, weights=weights, minlength=k)
         s1 = np.bincount(codes, weights=weights * sims, minlength=k)
         s2 = np.bincount(codes, weights=weights * sims * sims, minlength=k)
-    have = (np.asarray(counts if counts is not None else w0, dtype=np.float64) >= MODALITY_MIN) & (w0 > 0)
+    have = (np.asarray(files if files is not None else w0, dtype=np.float64) >= MODALITY_MIN) & (w0 > 0)
     total = float(w0.sum())
     overall = float(s1.sum() / total)
     means = np.where(have, s1 / np.maximum(w0, 1e-12), overall)
@@ -348,7 +350,7 @@ class _Sample:
     codes: np.ndarray  # modality code per row (names[code])
     weights: np.ndarray  # chunks of its modality in the index each row stands for
     names: list[str]
-    counts: list[int]  # chunks per modality in the index
+    files: list[int]  # distinct files per modality in the index
     full: bool  # the sample is the whole index (so any growth reloads it at once)
 
 
@@ -663,9 +665,10 @@ class Searcher:
         sc = cache.scores(qvec)
         sims, mods = sc.sims, sc.modality
         if sc.valid is not None:
-            scale = meaning_scale(sims[sc.valid], mods[sc.valid], sc.names)
+            v = sc.valid
+            scale = meaning_scale(sims[v], mods[v], sc.names, files=sc.files)
         else:
-            scale = meaning_scale(sims, mods, sc.names)
+            scale = meaning_scale(sims, mods, sc.names, files=sc.files)
         best: dict[int, tuple[float, float, int]] = {}
         if not len(sims):
             return _Meaning(best, scale)
@@ -759,11 +762,10 @@ class Searcher:
 
     def _sample_scale(self, db: sqlite3.Connection, qvec: np.ndarray) -> Scale:
         """The scale from a sample of about SCALE_SAMPLE vectors, spread evenly in chunk-id order
-        within each modality and weighted by how many chunks each stands for; every modality
-        with MODALITY_MIN chunks in the index gets at least MODALITY_SAMPLE_MIN of them, so a
-        rare modality is still centred on its own mean (reloaded when the index changed and the
-        sample is older than SCALE_SAMPLE_MAX_AGE, or at once while the sample is the whole
-        index)."""
+        within each modality and weighted by how many chunks each stands for; every modality in
+        at least MODALITY_MIN distinct files gets at least MODALITY_SAMPLE_MIN vectors, so a rare
+        modality is still centred on its own mean (reloaded when the index changed and the sample
+        is older than SCALE_SAMPLE_MAX_AGE, or at once while the sample is the whole index)."""
         version = chunks_version(db)
         now = time.monotonic()
         s = self._sample
@@ -773,14 +775,21 @@ class Searcher:
         names = s.names
         q = np.asarray(qvec, dtype=np.float32)
         sims = s.mat @ (q / (np.linalg.norm(q) or 1.0))
-        return meaning_scale(sims, s.codes, names, s.weights, s.counts)
+        return meaning_scale(sims, s.codes, names, s.weights, s.files)
 
     def _load_sample(self, db: sqlite3.Connection, version: int, now: float, dim: int) -> _Sample:
-        per_mod = dict(db.execute("SELECT modality, count(*) FROM chunks GROUP BY modality").fetchall())
+        rows = db.execute(
+            "SELECT modality, count(*), count(DISTINCT file_id) FROM chunks GROUP BY modality"
+        ).fetchall()
+        per_mod = {m: c for m, c, _ in rows}
+        nfiles = {m: f for m, _, f in rows}
         names = sorted(per_mod)
         total = max(sum(per_mod.values()), 1)
-        target = {m: min(n, max(round(SCALE_SAMPLE * n / total), MODALITY_SAMPLE_MIN if n >= MODALITY_MIN else 1))
-                  for m, n in per_mod.items()}
+        target = {
+            m: min(n, max(round(SCALE_SAMPLE * n / total),
+                          MODALITY_SAMPLE_MIN if nfiles[m] >= MODALITY_MIN else 1))
+            for m, n in per_mod.items()
+        }
         # Positions (within each modality, in chunk-id order) spread evenly over all of it.
         wanted = {m: {per_mod[m] * j // target[m] for j in range(target[m])} for m in names}
         seen = dict.fromkeys(names, 0)
@@ -798,7 +807,7 @@ class Searcher:
         codes = np.array([code[m] for _, m in picked], dtype=np.intp)
         got = np.bincount(codes, minlength=len(names)) if len(codes) else np.zeros(len(names), np.int64)
         weights = np.array([per_mod[m] / got[code[m]] for _, m in picked], dtype=np.float64)
-        return _Sample(version, now, mat, codes, weights, names, [per_mod[m] for m in names],
+        return _Sample(version, now, mat, codes, weights, names, [nfiles[m] for m in names],
                        all(target[m] >= n for m, n in per_mod.items()))
 
     def _group_duplicates(self, db: sqlite3.Connection, candidates: list[int], files: dict[int, sqlite3.Row],

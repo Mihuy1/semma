@@ -529,8 +529,8 @@ def test_meaning_scale_matches_a_direct_computation_and_weights_act_as_copies() 
     dup = meaning_scale(np.concatenate([sims, sims[:100]]), np.concatenate([mods, mods[:100]]), ["text", "image"])
     weighted = meaning_scale(sims, mods, ["text", "image"], weights=w)
     assert weighted.std == pytest.approx(dup.std, rel=1e-5) and weighted.means == pytest.approx(dup.means)
-    # `counts` decides MODALITY_MIN: 5 sampled images standing for 50 still get their own mean.
-    few = meaning_scale(sims[:25], np.array([1] * 5 + [0] * 20), ["text", "image"], counts=[20, 50])
+    # `files` decides MODALITY_MIN: 5 sampled images standing for 50 distinct files still get their own mean.
+    few = meaning_scale(sims[:25], np.array([1] * 5 + [0] * 20), ["text", "image"], files=[20, 50])
     assert set(few.means) == {"text", "image"}
 
 
@@ -646,4 +646,180 @@ def test_prefix_filter_sql_predicate_excludes_lexical_non_screenshot(realistic) 
     shots = s.search_vector(q, "screenshot: sunset beach", limit=10)
     assert names(shots) == ["err_panel.png"]
     assert "beach.png" not in names(shots)
+
+
+def test_meaning_scale_rare_long_file_uses_overall_mean(tmp_path: Path) -> None:
+    """One 21-chunk video among many text files has 21 chunks (>= MODALITY_MIN) but only 1 file
+    (< MODALITY_MIN): it must use the overall mean rather than its own high mean."""
+    rng = np.random.default_rng(7)
+    n_text, n_vid = 1000, 21
+    sims = np.concatenate([
+        np.clip(rng.normal(0.56, 0.02, n_text), -0.99, 0.99),
+        np.full(n_vid, 0.72),
+    ]).astype(np.float32)
+    mods = np.array([0] * n_text + [1] * n_vid, dtype=np.int64)
+    cfg = make_cfg(tmp_path)
+    sc = meaning_scale(sims, mods, ["text", "video"], files=[n_text, 1])
+    assert "video" not in sc.means
+    assert sc.z(0.744, "video") > cfg.z_floor + 0.5
+    # With chunk count as files (the old bug), video gets its own high mean and drops below z_floor (and default z_gate 2.0).
+    sc_chunks = meaning_scale(sims, mods, ["text", "video"], files=[n_text, n_vid])
+    assert "video" in sc_chunks.means
+    assert sc_chunks.z(0.744, "video") < 2.0
+
+
+def _put_multi_chunk(store: Store, path: str, kind: str, modality: str, vecs: list[np.ndarray]) -> int:
+    """Insert one indexed file with multiple chunks into SQLite (updates delta for live cache)."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_bytes(b"x")
+    with store.write() as (db, delta):
+        fid = db.execute(
+            "INSERT INTO files (path, kind, size, mtime, in_project, priority, status, last_seen) "
+            "VALUES (?, ?, 1, 1.0, 0, 30, 'indexed', 1)",
+            (path, kind),
+        ).lastrowid
+        assert fid is not None
+        for seq, vec in enumerate(vecs):
+            cid = db.execute("INSERT INTO chunks (file_id, seq, modality) VALUES (?, ?, ?)",
+                             (fid, seq, modality)).lastrowid
+            assert cid is not None
+            v = np.asarray(vec, dtype=np.float32)
+            unit_vec = v / np.linalg.norm(v)
+            db.execute("INSERT INTO vec_chunks VALUES (?, ?, ?, ?)",
+                       (cid, unit_vec, modality, kind))
+            delta.added.append((cid, int(fid), unit_vec, modality, kind))
+        return int(fid)
+
+
+@pytest.mark.parametrize("cache", [False, True], ids=["sqlite-vec", "cache"])
+def test_single_multi_chunk_video_is_found_with_and_without_filter(tmp_path: Path, cache: bool) -> None:
+    """A single 21-chunk video with a realistic tight cosine range (0.70-0.74) among background
+    files must use the overall mean (files=1 < MODALITY_MIN), reach z >= 5.0, and rank #1 across
+    plain, prefix-filtered, and vector-only type-hint queries for both sqlite-vec and the cache."""
+    cfg = make_cfg(tmp_path)
+    cfg.z_gate = 2.0
+    cfg.duplicate_similarity = {}
+    store = Store(cfg.db_path, vector_cache=cache)
+    q = unit(1)
+    put_background(store, tmp_path, q, n=500, mean=0.55, std=0.025)
+    put_background(store, tmp_path, q, n=500, mean=0.59, std=0.025, kind="text", modality="text", seed=5000)
+    vpath = str(tmp_path / "Videos/porsche_clip.mp4")
+    _put_multi_chunk(
+        store,
+        vpath,
+        ft.VIDEO,
+        "video",
+        [with_cos(q, 0.74 if seq == 0 else 0.71, 900 + seq) for seq in range(21)],
+    )
+
+    s = Searcher(store, cfg, FakeEmbedder())
+    for query in ("porsche", "video: porsche", "video about car"):
+        res = s.search_vector(q, query, limit=10)
+        assert names(res)[0] == "porsche_clip.mp4", query
+        assert res[0].z is not None and res[0].z >= 5.0, query
+        assert res[0].z >= cfg.z_floor, query
+    store.close()
+
+
+def test_vector_cache_file_stats_invalidate_on_remove_and_replace(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path)
+    store = Store(cfg.db_path, vector_cache=True)
+    q = unit(1)
+    put_background(store, tmp_path, q, n=30, mean=0.55, kind="text", modality="text", seed=100)
+    vpath = str(tmp_path / "Videos/long.mp4")
+    _put_multi_chunk(
+        store,
+        vpath,
+        ft.VIDEO,
+        "video",
+        [with_cos(q, 0.72, 200 + seq) for seq in range(21)],
+    )
+
+    cache = store.vectors
+    assert cache is not None
+    with cache.lock:
+        cache.ensure_fresh(store.reader())
+        sc1 = cache.scores(q)
+        vid_code = cache._codes["video"]
+        txt_code = cache._codes["text"]
+        assert sc1.files[vid_code] == 1
+        assert sc1.files[txt_code] == 30
+
+    # Replace with a 4-chunk video at the same path (local write patches the cache).
+    with store.write() as (db, delta):
+        old_id = db.execute("SELECT id FROM files WHERE path = ?", (vpath,)).fetchone()[0]
+        db.execute("DELETE FROM files WHERE id = ?", (old_id,))
+        delta.removed_files.add(old_id)
+        new_id = db.execute(
+            "INSERT INTO files (path, kind, size, mtime, in_project, priority, status, last_seen) "
+            "VALUES (?, ?, 1, 2.0, 0, 30, 'indexed', 1)",
+            (vpath, ft.VIDEO),
+        ).lastrowid
+        assert new_id is not None
+        for seq in range(4):
+            cid = db.execute("INSERT INTO chunks (file_id, seq, modality) VALUES (?, ?, ?)",
+                             (new_id, seq, "video")).lastrowid
+            assert cid is not None
+            v = np.asarray(with_cos(q, 0.72, 300 + seq), dtype=np.float32)
+            vec = v / np.linalg.norm(v)
+            db.execute("INSERT INTO vec_chunks VALUES (?, ?, ?, ?)", (cid, vec, "video", ft.VIDEO))
+            delta.added.append((cid, new_id, vec, "video", ft.VIDEO))
+
+    with cache.lock:
+        cache.ensure_fresh(store.reader())
+        sc2 = cache.scores(q)
+        assert cache.loads == 1
+        assert sc2.valid is not None
+        assert sc2.files[vid_code] == 1
+        assert sc2.files[txt_code] == 30
+        assert (sc2.valid & (sc2.modality == vid_code)).sum() == 4
+
+    # Add a second video file (distinct video file count becomes 2).
+    vpath2 = str(tmp_path / "Videos/second.mp4")
+    _put_multi_chunk(
+        store,
+        vpath2,
+        ft.VIDEO,
+        "video",
+        [with_cos(q, 0.72, 400 + seq) for seq in range(3)],
+    )
+
+    with cache.lock:
+        cache.ensure_fresh(store.reader())
+        sc3 = cache.scores(q)
+        assert cache.loads == 1
+        assert sc3.valid is not None
+        assert sc3.files[vid_code] == 2
+        assert sc3.files[txt_code] == 30
+        assert (sc3.valid & (sc3.modality == vid_code)).sum() == 7
+
+    # Remove the first video (distinct video file count drops back to 1).
+    with store.write() as (db, delta):
+        old_id = db.execute("SELECT id FROM files WHERE path = ?", (vpath,)).fetchone()[0]
+        db.execute("DELETE FROM files WHERE id = ?", (old_id,))
+        delta.removed_files.add(old_id)
+
+    with cache.lock:
+        cache.ensure_fresh(store.reader())
+        sc4 = cache.scores(q)
+        assert cache.loads == 1
+        assert sc4.valid is not None
+        assert sc4.files[vid_code] == 1
+        assert (sc4.valid & (sc4.modality == vid_code)).sum() == 3
+
+    # Remove the second video (distinct video file count drops to 0).
+    with store.write() as (db, delta):
+        old_id = db.execute("SELECT id FROM files WHERE path = ?", (vpath2,)).fetchone()[0]
+        db.execute("DELETE FROM files WHERE id = ?", (old_id,))
+        delta.removed_files.add(old_id)
+
+    with cache.lock:
+        cache.ensure_fresh(store.reader())
+        sc5 = cache.scores(q)
+        assert cache.loads == 1
+        assert sc5.valid is not None
+        assert sc5.files[vid_code] == 0
+        assert sc5.files[txt_code] == 30
+        assert (sc5.valid & (sc5.modality == vid_code)).sum() == 0
+    store.close()
 
