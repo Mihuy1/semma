@@ -42,10 +42,9 @@ Normal package installs also pull in recommended media, OCR, and GUI libraries. 
 
 ## Privacy and indexed folders
 
-- **Default scope:** your home folder plus readable data mounts detected under `/mnt`, `/media`, and `/run/media/<user>`. Hidden files/folders, common dependency caches, game libraries, and project build folders are skipped by default. These filters are not a guarantee that sensitive documents will be excluded.
+- **Fully local:** everything runs locally on your machine, and nothing leaves your system. After the initial model download from [Hugging Face](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF) on first use, indexing and search work completely offline.
+- **Default scope:** your home folder plus readable data mounts detected under `/mnt`, `/media`, and `/run/media/<user>`. Hidden files/folders, common dependency caches, game libraries, and project build folders are skipped by default.
 - Change the scope and excluded paths in the setup wizard or **Settings → Folders**. File types and excluded extensions are under **Settings → File types**; the corresponding configuration keys include `[scan]` `roots`, `include_mounts`, `exclude_paths`, and `exclude_extensions`.
-- **No uploads:** file contents and search queries are processed locally. Semma downloads model files from [Hugging Face](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF) on first use; once they are present, indexing and search work offline.
-- **Local storage is still sensitive:** SQLite stores file paths, metadata, text snippets, a full-text index, and embedding vectors. Semma does not encrypt this database. Protect it and its backups as you would the indexed files.
 
 Default locations (respecting `XDG_CONFIG_HOME` and `XDG_DATA_HOME`):
 
