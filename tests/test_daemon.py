@@ -1095,6 +1095,97 @@ def test_ctl_status_output(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert "Indexing run: 5 of 40" in out.getvalue()
 
 
+def test_light_state_keys_pause_and_no_db(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def main() -> None:
+        d = make_daemon(make_cfg(home))
+        d.start()
+        try:
+            await until_idle(d)
+            # light_state() must not touch the store or use the status executor.
+            monkeypatch.setattr(d.store, "reader", lambda: (_ for _ in ()).throw(AssertionError("DB touched")))
+            monkeypatch.setattr(d._status_exec, "submit",
+                                lambda *a, **kw: (_ for _ in ()).throw(AssertionError("executor used")))
+            ls = d.light_state()
+            assert set(ls) == set(daemon_mod.STATE_SIGNATURES)
+            for k, sig in daemon_mod.STATE_SIGNATURES.items():
+                assert daemon_mod.STATUS_SIGNATURES[k] == sig
+            assert ls["state"] == "idle" and ls["paused"] is False and ls["pause_reason"] == ""
+
+            d.pause()
+            await wait_until(lambda: d._phase == "paused", what="paused")
+            ls_paused = d.light_state()
+            assert ls_paused["paused"] is True
+            assert ls_paused["state"] == "paused"
+            assert ls_paused["pause_reason"] == "paused by request"
+
+            d.resume()
+            await wait_until(lambda: not d._user_paused and d._phase == "idle", what="resumed")
+            ls_resumed = d.light_state()
+            assert ls_resumed["paused"] is False
+            assert ls_resumed["state"] == "idle"
+            assert ls_resumed["pause_reason"] == ""
+
+            gate = threading.Event()
+            t = threading.Thread(target=gate.wait, args=(5,), daemon=True)
+            t.start()
+            try:
+                d._download_thread = t
+                assert d.light_state()["state"] == "downloading"
+                d._download_error = "network down"
+                ls_err = d.light_state()
+                assert ls_err["state"] == "idle" and ls_err["download_error"] == "network down"
+            finally:
+                d._download_error = ""
+                d._download_thread = None
+                gate.set()
+                t.join(timeout=2)
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
+def test_daemon_client_state_and_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    from dbus_fast.errors import DBusError
+
+    from semma.gui import client as client_mod
+
+    calls: list[str] = []
+    behaviour: dict[str, Any] = {}
+
+    async def fake_control_call(method: str, *args: Any, **kwargs: Any) -> Any:
+        calls.append(method)
+        outcome = behaviour[method]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(client_mod, "control_call", fake_control_call)
+    c = client_mod.DaemonClient()
+    try:
+        behaviour["State"] = {"state": "idle", "paused": False}
+        assert c.state().result(timeout=2) == {"state": "idle", "paused": False}
+        assert calls == ["State"]
+
+        calls.clear()
+        behaviour["State"] = DaemonNotRunning("not running")
+        assert c.state().result(timeout=2) is None
+        assert calls == ["State"]
+
+        calls.clear()
+        behaviour["State"] = DBusError("org.freedesktop.DBus.Error.UnknownMethod", "no State")
+        behaviour["Status"] = {"state": "idle", "paused": False, "indexed": 5}
+        assert c.state().result(timeout=2) == {"state": "idle", "paused": False, "indexed": 5}
+        assert calls == ["State", "Status"]
+
+        calls.clear()
+        behaviour["State"] = DBusError("org.freedesktop.DBus.Error.Failed", "boom")
+        with pytest.raises(DBusError):
+            c.state().result(timeout=2)
+    finally:
+        c.close()
+
+
 # -- D-Bus (session bus, throwaway names) --------------------------------------------------
 
 @needs_bus
@@ -1120,6 +1211,9 @@ def test_control_interface_over_dbus(home: Path) -> None:
             assert st["pending_by_kind"] == dict.fromkeys(daemon_mod.ft.KINDS, 0)
             assert st["download_file"] == "" and st["run_total"] == 0 and st["scan_dir"] == ""
             assert isinstance(st["run_rate"], float)
+            ls = await control_call("State", bus_name=name)
+            assert set(ls) == set(daemon_mod.STATE_SIGNATURES)
+            assert ls["state"] == "idle" and ls["paused"] is False
             bread = str(home / "Documents" / "bread.txt")
             failed = await control_call("Failed", 10, signature="u", bus_name=name)
             assert len(failed) == 1 and failed[0][0] == bread and "corrupt file" in failed[0][1]
@@ -1129,12 +1223,14 @@ def test_control_interface_over_dbus(home: Path) -> None:
             await control_call("Pause", bus_name=name)
             st = await control_call("Status", bus_name=name)
             assert st["paused"] is True
+            assert (await control_call("State", bus_name=name))["paused"] is True
             await control_call("Resume", bus_name=name)
             ext.contents.clear()
             assert await control_call("RetryFailed", bus_name=name) == 1
             await wait_until(lambda: counts(cfg.db_path).get("indexed") == 3, what="retried file indexed")
             await control_call("Rescan", bus_name=name)
             await until_idle(d)
+            assert (await control_call("State", bus_name=name))["paused"] is False
             # A second daemon cannot take the name.
             d2 = make_daemon(cfg, bus_name=name)
             assert await serve(d2) == 1
@@ -1145,6 +1241,8 @@ def test_control_interface_over_dbus(home: Path) -> None:
         assert await asyncio.to_thread(daemon_failed, bus_name=name) is None
         with pytest.raises(DaemonNotRunning):
             await control_call("Status", bus_name=name)
+        with pytest.raises(DaemonNotRunning):
+            await control_call("State", bus_name=name)
 
     asyncio.run(main())
 
