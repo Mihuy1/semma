@@ -450,6 +450,12 @@ def cmd_gui(args: argparse.Namespace, cfg: Config) -> int:
     return gui_main(args.config)
 
 
+def cmd_tray(args: argparse.Namespace, cfg: Config) -> int:
+    from .gui import tray_main
+
+    return tray_main(args.config)
+
+
 def is_packaged() -> bool:
     """True when running from the rpm/deb package's private interpreter.
 
@@ -636,6 +642,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     gu = sub.add_parser("gui", help="open the Semma window (status and settings)")
     gu.set_defaults(func=cmd_gui)
+
+    tr = sub.add_parser("tray", help="show the Semma icon in the system tray")
+    tr.set_defaults(func=cmd_tray)
 
     if not is_packaged():
         ik = sub.add_parser("install-kde", help="install the KRunner plugin and the systemd user service")
