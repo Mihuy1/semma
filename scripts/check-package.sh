@@ -78,11 +78,14 @@ test ! -e /etc/systemd/user/graphical-session.target.wants/semma.service || { ec
 systemctl --global enable semma.service 2> /dev/null
 for file in /usr/share/dbus-1/services/io.github.Semma.service /usr/lib/systemd/user/semma.service \
     /usr/share/krunner/dbusplugins/semma.desktop /usr/share/applications/io.github.Semma.desktop \
-    /usr/share/gnome-shell/search-providers/io.github.Semma.search-provider.ini; do
+    /usr/share/gnome-shell/search-providers/io.github.Semma.search-provider.ini \
+    /etc/xdg/autostart/io.github.Semma.Tray.desktop; do
   test -f "$file" || { echo "missing $file"; exit 1; }
 done
 grep -qx "Exec=/usr/lib/semma/python/bin/python3.13 -I -m semma gui" /usr/share/applications/io.github.Semma.desktop ||
   { echo "desktop entry does not start semma gui"; exit 1; }
+grep -qx "Exec=/usr/lib/semma/python/bin/python3.13 -I -m semma tray" /etc/xdg/autostart/io.github.Semma.Tray.desktop ||
+  { echo "tray autostart entry does not start semma tray"; exit 1; }
 
 # With the recommended GUI libraries installed, every carried library and plugin (including the
 # X11 and Wayland platform plugins) must resolve, and `semma gui` must open and render cleanly.

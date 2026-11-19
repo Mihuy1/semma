@@ -58,6 +58,23 @@ Default locations (respecting `XDG_CONFIG_HOME` and `XDG_DATA_HOME`):
 
 Semma can also read the text in your screenshots with Tesseract, so you can find a screenshot by the words in it. This is off by default; turn it on in Semma's settings (or with `enabled = true` under `[ocr]` in `~/.config/semma/config.toml`). It reads your system's language and English when their language data is installed. To add a language, install its Tesseract language pack, for example `sudo dnf install tesseract-langpack-deu` (Fedora) or `sudo apt install tesseract-ocr-deu` (Ubuntu, Debian).
 
+## Tray icon
+
+Semma includes a system-tray icon (`StatusNotifierItem`) that displays the current indexing state, lets you pause or resume indexing, and has an **Open Semma** action to open the window.
+
+It starts automatically at login after installing a package (`/etc/xdg/autostart/io.github.Semma.Tray.desktop`) or running `semma install` (`~/.config/autostart/io.github.Semma.Tray.desktop`, respecting `XDG_CONFIG_HOME`). You can also launch it manually with `semma tray` (or `uv run semma tray` from a source checkout).
+
+On GNOME, tray icons require the **AppIndicator and KStatusNotifierItem Support** GNOME Shell extension. It is preinstalled on Ubuntu; on Fedora, install it with:
+
+```sh
+sudo dnf install gnome-shell-extension-appindicator
+```
+
+To disable autostart, turn off **Semma tray icon** in your desktop's Autostart settings, or remove/override the autostart file:
+
+- Source install: delete `~/.config/autostart/io.github.Semma.Tray.desktop`.
+- Package install: copy `/etc/xdg/autostart/io.github.Semma.Tray.desktop` to `~/.config/autostart/` and add `Hidden=true` (or `X-GNOME-Autostart-enabled=false`).
+
 ## Uninstall
 
 ```sh

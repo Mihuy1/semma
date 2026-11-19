@@ -17,6 +17,8 @@ from . import dbus_names
 from .config import xdg_config_home, xdg_data_home
 
 DEFAULT_SYSTEM_DATA_DIR = Path("/usr/local/share")
+TRAY_DESKTOP_ID = "io.github.Semma.Tray.desktop"
+OPTIONAL_STATUS_FILES = frozenset({"tray_autostart"})
 
 
 @dataclass
@@ -77,6 +79,11 @@ def _app_desktop_path(home: Path | None = None) -> Path:
     return xdg_data_home(base_home) / "applications" / dbus_names.GNOME_DESKTOP_ID
 
 
+def _tray_autostart_path(home: Path | None = None) -> Path:
+    base_home = home or Path.home()
+    return xdg_config_home(base_home) / "autostart" / TRAY_DESKTOP_ID
+
+
 def _gnome_target_paths(
     home: Path | None = None,
     system_data_dir: Path | None = None,
@@ -126,6 +133,23 @@ def render_app_desktop_file(python_path: str | None = None) -> str:
 
 
 render_gnome_desktop_file = render_app_desktop_file
+
+
+def render_tray_autostart_file(python_path: str | None = None) -> str:
+    """Render the XDG autostart .desktop entry for the Semma system-tray icon."""
+    quoted_py = _quote_exec_path(_resolve_python(python_path))
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Semma tray icon\n"
+        "Comment=Indexing status and controls for Semma\n"
+        "Icon=system-search\n"
+        f"Exec={quoted_py} -m semma tray\n"
+        "Terminal=false\n"
+        "NoDisplay=true\n"
+        "X-GNOME-Autostart-enabled=true\n"
+        "X-KDE-autostart-phase=2\n"
+    )
 
 
 def render_gnome_search_provider_ini() -> str:
@@ -266,13 +290,15 @@ def _build_status(
     run: Callable[[list[str]], int],
 ) -> dict[str, Any]:
     files = {name: path.is_file() for name, path in path_map.items()}
+    # The tray's autostart entry is optional: removing it is how a user turns the tray off.
+    required = [ok for name, ok in files.items() if name not in OPTIONAL_STATUS_FILES]
     enabled = run(["systemctl", "--user", "is-enabled", dbus_names.SYSTEMD_UNIT]) == 0
     active = run(["systemctl", "--user", "is-active", dbus_names.SYSTEMD_UNIT]) == 0
     return {
         "files": files,
         "paths": path_map,
         **files,
-        "installed": all(files.values()),
+        "installed": all(required),
         "enabled": enabled,
         "active": active,
     }
@@ -285,17 +311,19 @@ def install_kde(
     restart_krunner: bool = True,
     runner: Callable[[list[str]], int] | None = None,
 ) -> list[Path]:
-    """Write KRunner desktop file, application entry, D-Bus activation file, and systemd unit, then reload."""
+    """Write KRunner desktop file, application entry, tray autostart entry, D-Bus activation file, and systemd unit, then reload."""
     run = runner or _default_runner
     py_path = _resolve_python(python)
     desktop_path, dbus_service_path, systemd_unit_path = _target_paths()
     app_desktop_path = _app_desktop_path()
+    tray_autostart_path = _tray_autostart_path()
 
     _atomic_write(desktop_path, render_desktop_file())
     _atomic_write(app_desktop_path, render_app_desktop_file(py_path))
+    _atomic_write(tray_autostart_path, render_tray_autostart_file(py_path))
     _write_shared_service_files(py_path, dbus_service_path, systemd_unit_path)
 
-    written = [desktop_path, app_desktop_path, dbus_service_path, systemd_unit_path]
+    written = [desktop_path, app_desktop_path, tray_autostart_path, dbus_service_path, systemd_unit_path]
 
     _reload_and_enable(run, enable=enable)
     if restart_krunner:
@@ -331,15 +359,18 @@ def uninstall_kde(
     run = runner or _default_runner
     desktop_path, dbus_service_path, systemd_unit_path = _target_paths()
     app_desktop_path = _app_desktop_path()
-    # The application entry and D-Bus/systemd files are shared with the GNOME provider: keep them
-    # while that is still installed.
+    tray_autostart_path = _tray_autostart_path()
+    # The application entry, tray autostart entry, and D-Bus/systemd files are shared with the
+    # GNOME provider: keep them while that is still installed.
     gnome_installed = shared_service_kept_for_kde(system_data_dir=system_data_dir)
 
     if gnome_installed:
         removed = _remove_existing((desktop_path,))
     else:
         run(["systemctl", "--user", "disable", "--now", dbus_names.SYSTEMD_UNIT])
-        removed = _remove_existing((desktop_path, app_desktop_path, dbus_service_path, systemd_unit_path))
+        removed = _remove_existing(
+            (desktop_path, app_desktop_path, tray_autostart_path, dbus_service_path, systemd_unit_path)
+        )
         run(["systemctl", "--user", "daemon-reload"])
     if restart_krunner:
         run(["kquitapp6", "krunner"])
@@ -355,10 +386,12 @@ def status_kde(
     run = runner or _default_runner
     desktop_path, dbus_service_path, systemd_unit_path = _target_paths()
     app_desktop_path = _app_desktop_path()
+    tray_autostart_path = _tray_autostart_path()
     return _build_status(
         {
             "desktop": desktop_path,
             "app_desktop": app_desktop_path,
+            "tray_autostart": tray_autostart_path,
             "dbus_service": dbus_service_path,
             "systemd_unit": systemd_unit_path,
         },
@@ -373,14 +406,16 @@ def install_gnome(
     system_data_dir: Path | None = None,
     runner: Callable[[list[str]], int] | None = None,
 ) -> GnomeInstallResult:
-    """Write GNOME desktop/search-provider files, D-Bus service, and systemd unit, then reload."""
+    """Write GNOME desktop/search-provider files, tray autostart entry, D-Bus service, and systemd unit, then reload."""
     run = runner or _default_runner
     py_path = _resolve_python(python)
     _, dbus_service_path, systemd_unit_path = _target_paths()
     gnome_desktop_path, ini_path, staged_ini_path = _gnome_target_paths(system_data_dir=system_data_dir)
+    tray_autostart_path = _tray_autostart_path()
 
     _atomic_write(gnome_desktop_path, render_app_desktop_file(py_path))
-    written = [gnome_desktop_path]
+    _atomic_write(tray_autostart_path, render_tray_autostart_file(py_path))
+    written = [gnome_desktop_path, tray_autostart_path]
 
     desired_dbus = render_dbus_service_file(py_path)
     desired_unit = render_systemd_unit_file(py_path)
@@ -437,12 +472,17 @@ def uninstall_gnome(
     run = runner or _default_runner
     _, dbus_service_path, systemd_unit_path = _target_paths()
     gnome_desktop_path, ini_path, staged_ini_path = _gnome_target_paths(system_data_dir=system_data_dir)
+    tray_autostart_path = _tray_autostart_path()
     kde_installed = shared_service_kept_for_gnome()
 
     if not kde_installed:
         run(["systemctl", "--user", "disable", "--now", dbus_names.SYSTEMD_UNIT])
 
-    to_remove = (staged_ini_path,) if kde_installed else (gnome_desktop_path, staged_ini_path)
+    to_remove = (
+        (staged_ini_path,)
+        if kde_installed
+        else (gnome_desktop_path, tray_autostart_path, staged_ini_path)
+    )
     removed = _remove_existing(to_remove)
     sudo_command: str | None = None
     try:
@@ -472,9 +512,11 @@ def status_gnome(
     run = runner or _default_runner
     _, dbus_service_path, systemd_unit_path = _target_paths()
     gnome_desktop_path, ini_path, _ = _gnome_target_paths(system_data_dir=system_data_dir)
+    tray_autostart_path = _tray_autostart_path()
     return _build_status(
         {
             "desktop": gnome_desktop_path,
+            "tray_autostart": tray_autostart_path,
             "ini": ini_path,
             "dbus_service": dbus_service_path,
             "systemd_unit": systemd_unit_path,
