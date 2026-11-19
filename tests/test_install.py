@@ -16,6 +16,7 @@ from semma.install import (
     install_gnome,
     install_kde,
     render_gnome_search_provider_ini,
+    render_tray_autostart_file,
     shared_service_kept_for_gnome,
     shared_service_kept_for_kde,
     status_gnome,
@@ -55,10 +56,11 @@ def test_install_kde_writes_files_and_runs_commands_in_order(
 
     expected_desktop = data_home / "krunner" / "dbusplugins" / "semma.desktop"
     expected_app_desktop = data_home / "applications" / dbus_names.GNOME_DESKTOP_ID
+    expected_tray = config_home / "autostart" / "io.github.Semma.Tray.desktop"
     expected_dbus = data_home / "dbus-1" / "services" / f"{dbus_names.BUS_NAME}.service"
     expected_unit = config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT
 
-    assert written == [expected_desktop, expected_app_desktop, expected_dbus, expected_unit]
+    assert written == [expected_desktop, expected_app_desktop, expected_tray, expected_dbus, expected_unit]
     for p in written:
         assert p.is_file()
 
@@ -97,6 +99,23 @@ def test_install_kde_writes_files_and_runs_commands_in_order(
     assert app_entry["StartupNotify"] == "true"
     assert "OnlyShowIn" not in app_entry
     assert "NoDisplay" not in app_entry
+
+    # Check XDG tray autostart entry
+    tray_cp = configparser.ConfigParser(interpolation=None)
+    tray_cp.optionxform = str  # type: ignore[assignment]
+    tray_cp.read(expected_tray, encoding="utf-8")
+    assert "Desktop Entry" in tray_cp
+    tray_entry = tray_cp["Desktop Entry"]
+    assert tray_entry["Type"] == "Application"
+    assert tray_entry["Name"] == "Semma tray icon"
+    assert tray_entry["Comment"] == "Indexing status and controls for Semma"
+    assert tray_entry["Icon"] == "system-search"
+    assert tray_entry["Exec"] == f"{fake_py} -m semma tray"
+    assert tray_entry["Terminal"] == "false"
+    assert tray_entry["NoDisplay"] == "true"
+    assert tray_entry["X-GNOME-Autostart-enabled"] == "true"
+    assert tray_entry["X-KDE-autostart-phase"] == "2"
+    assert "OnlyShowIn" not in tray_entry
 
     # Check D-Bus activation file
     dbus_cp = configparser.ConfigParser(interpolation=None)
@@ -176,16 +195,18 @@ def test_paths_with_spaces_are_quoted_in_unit_and_dbus_service(
         restart_krunner=False,
         runner=lambda cmd: 0,
     )
-    _, app_desktop_path, dbus_path, unit_path = written
+    _, app_desktop_path, tray_path, dbus_path, unit_path = written
     assert unit_path == config_home / "systemd" / "user" / "semma.service"
 
     unit_text = unit_path.read_text(encoding="utf-8")
     dbus_text = dbus_path.read_text(encoding="utf-8")
     app_desktop_text = app_desktop_path.read_text(encoding="utf-8")
+    tray_text = tray_path.read_text(encoding="utf-8")
     expected_exec = f'"{spaced_py}" -m semma daemon'
     assert f"ExecStart={expected_exec}\n" in unit_text
     assert f"Exec={expected_exec}\n" in dbus_text
     assert f'Exec="{spaced_py}" -m semma gui\n' in app_desktop_text
+    assert f'Exec="{spaced_py}" -m semma tray\n' in tray_text
 
 
 def test_status_kde_reports_files_and_service_state(
@@ -198,6 +219,7 @@ def test_status_kde_reports_files_and_service_state(
     assert st_before["files"] == {
         "desktop": False,
         "app_desktop": False,
+        "tray_autostart": False,
         "dbus_service": False,
         "systemd_unit": False,
     }
@@ -210,6 +232,7 @@ def test_status_kde_reports_files_and_service_state(
     assert st_after["files"] == {
         "desktop": True,
         "app_desktop": True,
+        "tray_autostart": True,
         "dbus_service": True,
         "systemd_unit": True,
     }
@@ -268,11 +291,12 @@ def test_install_gnome_writable_system_dir(
     )
 
     expected_desktop = data_home / "applications" / dbus_names.GNOME_DESKTOP_ID
+    expected_tray = config_home / "autostart" / "io.github.Semma.Tray.desktop"
     expected_dbus = data_home / "dbus-1" / "services" / f"{dbus_names.BUS_NAME}.service"
     expected_unit = config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT
     expected_ini = sys_data / "gnome-shell" / "search-providers" / "io.github.Semma.search-provider.ini"
 
-    assert res.written == [expected_desktop, expected_dbus, expected_unit, expected_ini]
+    assert res.written == [expected_desktop, expected_tray, expected_dbus, expected_unit, expected_ini]
     assert res.pending_ini is None
     assert res.sudo_command is None
     assert res.service_files_kept is False
@@ -293,6 +317,7 @@ def test_install_gnome_writable_system_dir(
     assert st["active"] is True
     assert st["files"] == {
         "desktop": True,
+        "tray_autostart": True,
         "ini": True,
         "dbus_service": True,
         "systemd_unit": True,
@@ -344,6 +369,7 @@ def test_uninstall_gnome_keeps_shared_service_when_kde_present(
     res = uninstall_gnome(system_data_dir=sys_data, runner=lambda cmd: commands.append(cmd) or 0)
 
     gnome_desktop = data_home / "applications" / dbus_names.GNOME_DESKTOP_ID
+    tray_autostart = config_home / "autostart" / "io.github.Semma.Tray.desktop"
     gnome_ini = sys_data / "gnome-shell" / "search-providers" / "io.github.Semma.search-provider.ini"
     kde_desktop = data_home / "krunner" / "dbusplugins" / f"{dbus_names.RUNNER_ID}.desktop"
     dbus_path = data_home / "dbus-1" / "services" / f"{dbus_names.BUS_NAME}.service"
@@ -353,16 +379,18 @@ def test_uninstall_gnome_keeps_shared_service_when_kde_present(
     assert res.service_kept is True
     assert res.removed == [gnome_ini]
     assert gnome_desktop.is_file()
+    assert tray_autostart.is_file()
     assert not gnome_ini.exists()
     assert kde_desktop.is_file()
     assert dbus_path.is_file()
     assert unit_path.is_file()
     assert commands == []
 
-    # Uninstalling KDE afterwards removes the shared application entry and service files too.
+    # Uninstalling KDE afterwards removes the shared application entry, tray autostart, and service files too.
     kde_removed = uninstall_kde(system_data_dir=sys_data, runner=lambda cmd: commands.append(cmd) or 0)
-    assert kde_removed == [kde_desktop, gnome_desktop, dbus_path, unit_path]
+    assert kde_removed == [kde_desktop, gnome_desktop, tray_autostart, dbus_path, unit_path]
     assert not gnome_desktop.exists()
+    assert not tray_autostart.exists()
     assert not dbus_path.exists()
     assert not unit_path.exists()
 
@@ -388,11 +416,14 @@ def test_uninstall_gnome_removes_shared_service_when_kde_absent_and_handles_ro_i
         dbus_path = data_home / "dbus-1" / "services" / f"{dbus_names.BUS_NAME}.service"
         unit_path = config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT
         gnome_desktop = data_home / "applications" / dbus_names.GNOME_DESKTOP_ID
+        tray_autostart = config_home / "autostart" / "io.github.Semma.Tray.desktop"
 
         assert not gnome_desktop.exists()
+        assert not tray_autostart.exists()
         assert not dbus_path.exists()
         assert not unit_path.exists()
         assert gnome_desktop in res.removed
+        assert tray_autostart in res.removed
         assert dbus_path in res.removed
         assert unit_path in res.removed
         assert res.sudo_command == f"sudo rm -f {ini_path}"
@@ -502,6 +533,7 @@ def test_uninstall_kde_keeps_shared_service_when_gnome_present(
     assert removed == [kde_desktop]
     assert not kde_desktop.exists()
     assert (data_home / "applications" / dbus_names.GNOME_DESKTOP_ID).is_file()
+    assert (config_home / "autostart" / "io.github.Semma.Tray.desktop").is_file()
     assert (data_home / "dbus-1" / "services" / f"{dbus_names.BUS_NAME}.service").is_file()
     assert (config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT).is_file()
     assert commands == [["kquitapp6", "krunner"]]
@@ -697,11 +729,13 @@ def test_cli_kde_and_gnome_status_report_app_desktop(
     assert cli_main(["kde-status"]) == 0
     out_kde = capsys.readouterr().out
     assert "app_desktop   present  ~/.local/share/applications/io.github.Semma.desktop" in out_kde
+    assert "tray_autostart present  ~/.config/autostart/io.github.Semma.Tray.desktop" in out_kde
 
     install_gnome(python="/usr/bin/python3", system_data_dir=sys_data, runner=lambda cmd: 0)
     assert cli_main(["gnome-status"]) == 0
     out_gnome = capsys.readouterr().out
     assert "desktop       present  ~/.local/share/applications/io.github.Semma.desktop" in out_gnome
+    assert "tray_autostart present  ~/.config/autostart/io.github.Semma.Tray.desktop" in out_gnome
 
 
 def test_cli_install_gnome_kept_service_notice_and_python_flag(
@@ -747,3 +781,48 @@ def test_cli_install_gnome_kept_service_notice_and_python_flag(
     assert new_py in (config_home / "systemd" / "user" / dbus_names.SYSTEMD_UNIT).read_text(
         encoding="utf-8"
     )
+
+
+def test_render_tray_autostart_file_and_xdg_config_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rendered = render_tray_autostart_file("/usr/bin/python3")
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str  # type: ignore[assignment]
+    cp.read_string(rendered)
+    entry = cp["Desktop Entry"]
+    assert entry["Type"] == "Application"
+    assert entry["Name"] == "Semma tray icon"
+    assert entry["Comment"] == "Indexing status and controls for Semma"
+    assert entry["Icon"] == "system-search"
+    assert entry["Exec"] == "/usr/bin/python3 -m semma tray"
+    assert entry["Terminal"] == "false"
+    assert entry["NoDisplay"] == "true"
+    assert entry["X-GNOME-Autostart-enabled"] == "true"
+    assert entry["X-KDE-autostart-phase"] == "2"
+    assert "OnlyShowIn" not in entry
+
+    spaced = render_tray_autostart_file("/opt/my semma/bin/python")
+    assert 'Exec="/opt/my semma/bin/python" -m semma tray\n' in spaced
+
+    custom_cfg = tmp_path / "custom_xdg_cfg"
+    custom_data = tmp_path / "custom_xdg_data"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(custom_cfg))
+    monkeypatch.setenv("XDG_DATA_HOME", str(custom_data))
+
+    res = install_gnome(python="/usr/bin/python3", system_data_dir=tmp_path / "sys", runner=lambda cmd: 0)
+    expected_tray = custom_cfg / "autostart" / "io.github.Semma.Tray.desktop"
+    assert expected_tray in res.written
+    assert expected_tray.is_file()
+
+
+def test_status_installed_without_tray_autostart(tmp_path, monkeypatch):
+    """Deleting the tray autostart entry (how a user turns the tray off) keeps the integration 'installed'."""
+    from semma import install
+
+    paths = {name: tmp_path / name for name in ("desktop", "tray_autostart")}
+    paths["desktop"].write_text("x")
+    st = install._build_status(paths, lambda _cmd: 0)
+    assert st["installed"] is True and st["tray_autostart"] is False

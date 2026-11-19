@@ -127,28 +127,29 @@ install -D -m 644 "$lib/LICENSE.txt" "$stage/usr/share/doc/semma/LICENSE.python"
 install -D -m 644 LICENSE "$stage/usr/share/doc/semma/LICENSE"
 
 # The desktop files, written by the same code as `semma install` writes them for one user.
-"$py" - "$stage/usr" <<'PY'
+"$py" - "$stage" <<'PY'
 import sys
 from pathlib import Path
 
 from semma import dbus_names as names
 from semma import install
 
-usr = Path(sys.argv[1])
+stage = Path(sys.argv[1])
 python = "/usr/lib/semma/python/bin/python3.13"
 files = {
-    f"lib/systemd/user/{names.SYSTEMD_UNIT}": install.render_systemd_unit_file(python),
-    f"share/dbus-1/services/{names.BUS_NAME}.service": install.render_dbus_service_file(python),
-    f"share/krunner/dbusplugins/{names.RUNNER_ID}.desktop": install.render_desktop_file(),
-    f"share/gnome-shell/search-providers/{names.BUS_NAME}.search-provider.ini":
+    f"usr/lib/systemd/user/{names.SYSTEMD_UNIT}": install.render_systemd_unit_file(python),
+    f"usr/share/dbus-1/services/{names.BUS_NAME}.service": install.render_dbus_service_file(python),
+    f"usr/share/krunner/dbusplugins/{names.RUNNER_ID}.desktop": install.render_desktop_file(),
+    f"usr/share/gnome-shell/search-providers/{names.BUS_NAME}.search-provider.ini":
         install.render_gnome_search_provider_ini(),
-    f"share/applications/{names.GNOME_DESKTOP_ID}": install.render_gnome_desktop_file(python),
+    f"usr/share/applications/{names.GNOME_DESKTOP_ID}": install.render_gnome_desktop_file(python),
+    f"etc/xdg/autostart/{install.TRAY_DESKTOP_ID}": install.render_tray_autostart_file(python),
 }
 for name, text in files.items():
     # -I: only the package's own modules, never a file in the folder Semma is started in, the
     # user's own site-packages or PYTHONPATH.
     text = text.replace(f"{python} -m semma", f"{python} -I -m semma")
-    path = usr / name
+    path = stage / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 PY

@@ -17,3 +17,14 @@ def main(config_path: Path | None = None) -> int:
     from .app import run
 
     return run(config_path)
+
+
+def tray_main(config_path: Path | None = None) -> int:
+    try:
+        import PySide6.QtWidgets  # noqa: F401
+    except ImportError as exc:
+        print(f"semma tray needs PySide6 (pip install PySide6-Essentials): {exc}", file=sys.stderr)
+        return 1
+    from .tray import run
+
+    return run(config_path)

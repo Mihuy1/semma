@@ -670,6 +670,25 @@ class Daemon:
             return "loading"
         return self._phase
 
+    def light_state(self) -> dict[str, Any]:
+        """Cheap in-memory snapshot for `Control.State`; no store/DB access or executor."""
+        thread = self._download_thread
+        downloading = thread is not None and thread.is_alive() and not self._download_error
+        paused = self._user_paused or self._phase == "paused"
+        run_done, run_total, run_failed, run_rate = self._run_progress
+        return {
+            "state": self.state(downloading=downloading),
+            "paused": paused,
+            "pause_reason": self._pause_reason if paused else "",
+            "current_file": self._current_file,
+            "run_done": run_done,
+            "run_total": run_total,
+            "run_failed": run_failed,
+            "run_rate": run_rate,
+            "setup_pending": not self._setup_done,
+            "download_error": self._download_error,
+        }
+
     async def status(self) -> dict[str, Any]:
         """Everything `Control.Status` reports; see STATUS_SIGNATURES for the types. The keys are
         always all present (zero or empty when that part is not running)."""
@@ -1296,6 +1315,15 @@ STATUS_SIGNATURES = {
     "scan_dir": "s", "scan_dirs": "x", "scan_files": "x", "scan_matched": "x",
 }
 
+STATE_SIGNATURES = {
+    k: STATUS_SIGNATURES[k]
+    for k in (
+        "state", "paused", "pause_reason", "current_file",
+        "run_done", "run_total", "run_failed", "run_rate",
+        "setup_pending", "download_error",
+    )
+}
+
 
 class Control(ServiceInterface):
     """`io.github.Semma.Control1`: status and indexing control for the CLI."""
@@ -1308,6 +1336,10 @@ class Control(ServiceInterface):
     async def Status(self) -> "a{sv}":  # noqa: F821, N802
         status = await self._daemon.status()
         return {k: Variant(STATUS_SIGNATURES[k], v) for k, v in status.items()}
+
+    @dbus_method()
+    def State(self) -> "a{sv}":  # noqa: F821, N802
+        return {k: Variant(STATE_SIGNATURES[k], v) for k, v in self._daemon.light_state().items()}
 
     @dbus_method()
     def Pause(self):  # noqa: N802

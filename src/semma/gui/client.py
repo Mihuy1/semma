@@ -50,10 +50,10 @@ async def _known(coro: Coroutine[Any, Any, Any], method: str) -> Any:
 class DaemonClient:
     """Calls the daemon's Control interface from a background thread.
 
-    `status()` and `failed()` resolve to None when the daemon is not running; the other calls
-    raise `DaemonNotRunning` through the future. A method an older daemon lacks raises
-    `NotSupported`. Other errors (DBusError, TimeoutError) are raised through the future too,
-    so the window can show them."""
+    `status()`, `state()` and `failed()` resolve to None when the daemon is not running; the
+    other calls raise `DaemonNotRunning` through the future. A method an older daemon lacks
+    raises `NotSupported` (except `state()`, which falls back to `Status`). Other errors
+    (DBusError, TimeoutError) are raised through the future too, so the window can show them."""
 
     def __init__(self, *, bus_address: str | None = None, bus_name: str = dbus_names.BUS_NAME,
                  timeout: float = 10.0) -> None:
@@ -89,6 +89,15 @@ class DaemonClient:
     # -- the calls ------------------------------------------------------------------------
     def status(self) -> Future[dict[str, Any] | None]:
         return self.submit(self._or_none("Status"))
+
+    def state(self) -> Future[dict[str, Any] | None]:
+        """Cheap `State()` for frequent polling; falls back to `Status()` on older daemons."""
+        async def run() -> dict[str, Any] | None:
+            try:
+                return await _known(self._or_none("State"), "State")
+            except NotSupported:
+                return await self._or_none("Status")
+        return self.submit(run())
 
     def failed(self, limit: int = 0) -> Future[list[tuple[str, str]] | None]:
         async def run() -> list[tuple[str, str]] | None:
