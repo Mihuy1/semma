@@ -2,7 +2,8 @@
 # Releases the version in pyproject.toml: tags the current commit v<version> and pushes the branch and
 # the tag. The tag starts the Release workflow on GitHub (.github/workflows/release.yml), which builds
 # the .rpm and the .deb, checks each in a clean container and publishes them as the release, with the
-# commits since the last tag as its notes. Follow it with `gh run watch`.
+# commits since the last tag as its notes. The same workflow can be run from main in the Actions tab
+# instead, which creates the tag when it publishes. Follow either with `gh run watch`.
 # Refuses when the working tree has changes or that version is already released.
 # Needs gh (logged in).
 #   scripts/release.sh

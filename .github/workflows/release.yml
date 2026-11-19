@@ -1,12 +1,15 @@
-# Pushing a tag v<version> (scripts/release.sh does it) builds and checks both packages with the
-# package workflow, then publishes them as the GitHub release of that version. A version with a
-# suffix (0.3.0-beta.1) is a prerelease. If a step fails, fix it and re-run the failed jobs: the tag
-# stays where it is.
+# Pushing a tag v<version> (scripts/release.sh does it) or running this workflow from main in the
+# Actions tab builds and checks both packages with the package workflow, then publishes them as the
+# GitHub release of that version. A version with a suffix (0.3.0-beta.1) is a prerelease. A manual
+# run publishes the version in pyproject.toml on main and creates its tag at the commit it built;
+# raise the version and merge it to main first. If a step fails, fix it and re-run the failed jobs:
+# a tag pushed by hand stays where it is, and a manual run can simply be run again.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,12 +19,27 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - name: The tag names the version in pyproject.toml
+      - name: Resolve and check the version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           project=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
           module=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/semma/__init__.py)
-          [[ $GITHUB_REF_NAME == "v$project" ]] || { echo "tag $GITHUB_REF_NAME, pyproject.toml $project"; exit 1; }
           [[ $module == "$project" ]] || { echo "semma.__version__ is $module, pyproject.toml $project"; exit 1; }
+          if [[ $GITHUB_EVENT_NAME == push ]]; then
+            [[ $GITHUB_REF_NAME == "v$project" ]] || { echo "tag $GITHUB_REF_NAME, pyproject.toml $project"; exit 1; }
+            exit 0
+          fi
+          # A manual run publishes the version bump merged to main, so the checkout must be main.
+          [[ $GITHUB_REF == refs/heads/main ]] || { echo "run this workflow from main, not $GITHUB_REF"; exit 1; }
+          if gh release view "v$project" > /dev/null 2>&1; then
+            echo "v$project is already released: raise the version in pyproject.toml" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$project" > /dev/null; then
+            echo "v$project is already on GitHub but not released: re-run its failed Release workflow instead" >&2
+            exit 1
+          fi
 
   package:
     needs: version
@@ -43,8 +61,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.package.outputs.version }}
+          TAG: v${{ needs.package.outputs.version }}
         run: |
           flags=()
           [[ $VERSION == *-* ]] && flags+=(--prerelease)
-          gh release create "$GITHUB_REF_NAME" dist/* --title "Semma $VERSION" --generate-notes \
-            --verify-tag "${flags[@]}"
+          if [[ $GITHUB_EVENT_NAME == push ]]; then
+            gh release create "$TAG" dist/* --title "Semma $VERSION" --generate-notes \
+              --verify-tag "${flags[@]}"
+          else
+            # Create the tag here, at the commit this run built. A tag pushed with GITHUB_TOKEN
+            # would not start another workflow run.
+            gh release create "$TAG" dist/* --title "Semma $VERSION" --generate-notes \
+              --target "$GITHUB_SHA" "${flags[@]}"
+          fi
