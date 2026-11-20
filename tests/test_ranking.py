@@ -55,7 +55,6 @@ def test_best_meaning_match_beats_word_matches_with_lower_similarity(realistic) 
     assert names(res)[:3] == ["vit.png", "llava.md", "granite.md"]
     assert res[0].matched == ["vector"] and res[0].similarity == pytest.approx(0.76, abs=1e-3)
     assert "text" in res[1].matched
-    # Raw cosine would favour text here; centring each modality on its own mean does not.
     assert res[0].score > res[1].score + 0.5
 
 
@@ -83,8 +82,6 @@ def test_type_word_boosts_the_kind_and_is_not_required_in_the_text(realistic) ->
     s = Searcher(store, cfg, FakeEmbedder())
     plain = s.search_vector(q, "kubernetes cluster", limit=10)
     assert names(plain)[0] == "kubernetes.md"
-    # "screenshot" asks for an image, prefers real screenshots, and is not itself searched as a word:
-    # the kubernetes notes still cover every content word.
     shot = s.search_vector(q, "screenshot of kubernetes cluster", limit=10)
     assert names(shot)[:3] == ["Screenshot_2026.png", "beach.jpg", "kubernetes.md"]
     assert next(r for r in shot if r.path.endswith("kubernetes.md")).score == pytest.approx(
@@ -98,11 +95,9 @@ def test_words_keep_a_file_with_weak_meaning(realistic) -> None:
     put_vectors(store, [(str(root / "Documents/minutes.md"), 40, with_cos(q, 0.58, 2))], kind="text", modality="text")
     add_text(store, "minutes.md", "the quarterly budget review was postponed")
     s = Searcher(store, cfg, FakeEmbedder())
-    # 2 of 3 content words ("quarterly", "budget"; not "approval"): coverage 0.67 >= 0.5.
     res = s.search_vector(q, "quarterly budget approval", limit=10)
     minutes = next(r for r in res if Path(r.path).name == "minutes.md")
     assert minutes.matched == ["text"]
-    # 1 of 3: too few, and its meaning doesn't stand out either.
     assert "minutes.md" not in names(s.search_vector(q, "quarterly forecast approval", limit=10))
 
 
@@ -119,15 +114,12 @@ def test_kinds_filter_candidates_but_not_the_scale(realistic) -> None:
 
 def test_meaning_scale_on_tiny_and_uniform_indexes() -> None:
     names_ = ["text", "image"]
-    # Fewer than MODALITY_MIN vectors per modality: everything is centred on the overall mean.
     sims = np.array([0.5, 0.6, 0.7, 0.4], dtype=np.float32)
     sc = meaning_scale(sims, np.array([0, 0, 1, 1]), names_)
     assert sc.means == {} and sc.overall == pytest.approx(0.55)
     assert sc.z(0.7, "image") == pytest.approx((0.7 - 0.55) / float(np.std(sims - 0.55)), rel=1e-4)
-    # All cosines equal: the std floor keeps z finite and small.
     flat = meaning_scale(np.full(30, 0.6, dtype=np.float32), np.zeros(30, dtype=np.int64), names_)
     assert flat.std == STD_FLOOR and flat.z(0.6, "text") == pytest.approx(0.0, abs=1e-5)
-    # A modality with enough vectors is centred on its own mean.
     sims = np.concatenate([np.full(25, 0.6), np.full(25, 0.5)]).astype(np.float32)
     sc = meaning_scale(sims, np.array([0] * 25 + [1] * 25), names_)
     assert sc.means == pytest.approx({"text": 0.6, "image": 0.5})
@@ -142,7 +134,6 @@ def test_query_words() -> None:
     assert w.terms == ["opinnäytetyöstä"] and w.kinds == {ft.IMAGE} and w.screenshot
     w = query_words("paper about dogs")
     assert w.terms == ["dogs"] and w.kinds == {ft.PDF} and not w.screenshot
-    # Only type words: they are the words to look for too.
     w = query_words("pdf")
     assert w.terms == ["pdf"] and w.kinds == {ft.PDF}
     w = query_words("the video")
@@ -206,7 +197,6 @@ def test_cache_does_not_reload_on_concurrent_write_between_snapshot_and_meaning(
     cache = store.vectors
     assert cache is not None and cache.loads == 1
 
-    # Commit a write after the read snapshot starts (during FTS) and before _meaning runs.
     orig_selective = s._selective
     wrote = False
 
@@ -223,7 +213,7 @@ def test_cache_does_not_reload_on_concurrent_write_between_snapshot_and_meaning(
     monkeypatch.setattr(s, "_selective", selective_with_concurrent_write)
     res = s.search("sourdough bread")
     assert names(res)[0] == "bread.txt"
-    assert cache.loads == 1 and cache.size == 4  # patched in flight, no reload from the older snapshot
+    assert cache.loads == 1 and cache.size == 4
     assert names(s.search("tomato soup basil"))[0] == "soup.md"
     assert cache.loads == 1
     store.close()
@@ -263,7 +253,7 @@ def test_per_word_prefixes_in_names_and_folders(tmp_path: Path) -> None:
     assert names(res)[0] == "thesis_project.md"
     assert "name" in res[0].matched
     other = [r for r in res if Path(r.path).name == "other.md"]
-    assert not other or "text" not in other[0].matched  # chunk text does not prefix non-last "thes"
+    assert not other or "text" not in other[0].matched
     store.close()
 
 
@@ -280,7 +270,6 @@ def test_folder_only_word_counts_half_in_coverage(realistic) -> None:
     by_name = {Path(r.path).name: r for r in res}
     assert by_name["in_text.md"].matched == ["vector", "text"]
     assert by_name["in_folder.md"].matched == ["vector", "folder"]
-    # One word found outside the file name counts with half the word weight (SINGLE_TEXT_FACTOR).
     assert by_name["in_text.md"].score - by_name["in_folder.md"].score == pytest.approx(
         2.0 * 0.5 * (1.0 - 0.5**1.5), abs=1e-4)
 
@@ -295,7 +284,6 @@ def test_sqlite_vec_fallback_sample_handles_gaps_and_reuses(tmp_path: Path, monk
     store = Store(cfg.db_path, vector_cache=False)
     q = unit(1)
     put_background(store, tmp_path, q, n=64, mean=0.55)
-    # Delete every even chunk id so all remaining chunks have odd ids (id % step == 0 would return 0 rows).
     with store.write() as (db, _):
         db.execute("DELETE FROM files WHERE id IN (SELECT file_id FROM chunks WHERE id % 2 = 0)")
     put_vectors(store, [(str(tmp_path / "Pictures/target.jpg"), 30, with_cos(q, 0.82, 2))])
@@ -306,7 +294,6 @@ def test_sqlite_vec_fallback_sample_handles_gaps_and_reuses(tmp_path: Path, monk
     first_sample = s._sample
     assert first_sample is not None and len(first_sample.mat) == 8
 
-    # Index changes within SCALE_SAMPLE_MAX_AGE: the full-size sample must be reused without refetching.
     orig_vectors = s._vectors
     vector_calls = 0
 
@@ -321,7 +308,6 @@ def test_sqlite_vec_fallback_sample_handles_gaps_and_reuses(tmp_path: Path, monk
     assert vector_calls == 0
     assert s._sample is first_sample
 
-    # Once older than SCALE_SAMPLE_MAX_AGE and the index changed, the sample is refreshed.
     monkeypatch.setattr(search_mod, "SCALE_SAMPLE_MAX_AGE", -1.0)
     put_vectors(store, [(str(tmp_path / "Pictures/extra2.jpg"), 10, with_cos(q, 0.54, 4))])
     assert names(s.search_vector(q, "", limit=5))[0] == "target.jpg"
@@ -329,8 +315,6 @@ def test_sqlite_vec_fallback_sample_handles_gaps_and_reuses(tmp_path: Path, monk
     assert s._sample is not first_sample
     store.close()
 
-
-# -- lookups, single words, trimming, ambiguous type words, sqlite-vec fallback --------------------
 
 def cos_at(store: Store, q: np.ndarray, z: float, modality: str) -> float:
     """The cosine that sits at this z for q on the store's current vectors (planting a few more
@@ -377,7 +361,6 @@ def test_single_word_mention_ranks_after_a_photo_that_stands_out(realistic) -> N
     assert names(res)[:2] == ["random_image.jpg", "thesis.md"]
     assert res[0].matched == ["vector"] and "text" in res[1].matched
     by = {Path(r.path).name: r for r in res}
-    # Without the discount the thesis would have won by ~0.6.
     assert by["thesis.md"].score - 2.0 * 0.5 + 2.0 > by["random_image.jpg"].score
 
 
@@ -389,7 +372,7 @@ def test_nothing_stands_out_finds_nothing(realistic) -> None:
     s = Searcher(store, cfg, FakeEmbedder())
     assert s.search_vector(q, "asdfgh qwerty zxcv", limit=10) == []
     cfg.z_floor = 0.0
-    assert s.search_vector(q, "asdfgh qwerty zxcv", limit=10)  # the tail the floor removes
+    assert s.search_vector(q, "asdfgh qwerty zxcv", limit=10)
 
 
 def test_vector_only_tail_is_trimmed_relative_to_the_best_match(realistic) -> None:
@@ -401,14 +384,11 @@ def test_vector_only_tail_is_trimmed_relative_to_the_best_match(realistic) -> No
                 kind="text", modality="text")
     add_text(store, "maintenance.md", "the car needs new tyres")
     s = Searcher(store, cfg, FakeEmbedder())
-    # Several words: vector-only results within Z_MARGIN (3) of the best one.
     many = names(s.search_vector(q, "red sports racing", limit=10))
     assert many[:2] == ["best.jpg", "close.jpg"] and "far.jpg" not in many
-    # One word: within SINGLE_WORD_MARGIN (1.5); files containing the word are always kept.
     one = s.search_vector(q, "car", limit=10)
     assert names(one) == ["best.jpg", "maintenance.md"]
     assert one[1].matched == ["text"]
-    # `limit` still caps the list.
     assert len(s.search_vector(q, "red sports racing", limit=1)) == 1
 
 
@@ -457,8 +437,7 @@ def test_ambiguous_type_word_gives_no_kind_bonus_or_partial_name_bonus(realistic
     res = s.search_vector(q, "image segmentation", limit=10)
     assert names(res)[0] == "segmentation.md"
     shot = next(r for r in res if r.path.endswith("Screenshot_1.png"))
-    assert shot.score == pytest.approx(shot.z + 0.3 * 0.3, abs=1e-3)  # no +1 for being an image
-    # "music theory": "theory" in a name is half the words, not the whole query: no NAME_BONUS.
+    assert shot.score == pytest.approx(shot.z + 0.3 * 0.3, abs=1e-3)
     theory = next(r for r in s.search_vector(q, "music theory", limit=10) if r.path.endswith("string_theory.md"))
     assert theory.score < search_mod.NAME_BONUS
 
@@ -484,7 +463,6 @@ def test_sqlite_vec_fallback_scores_lexical_files_outside_the_knn(tmp_path: Path
         res = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "kubernetes cluster", limit=10)
         results[cache] = res
         notes = next(r for r in res if r.path.endswith("notes.md"))
-        # Outside the KNN top-3 (the sqlite-vec path) it used to count as z = 0 (score ~2).
         assert notes.z == pytest.approx(3.5, abs=0.4)
         assert notes.score > 5.0
         store.close()
@@ -524,12 +502,10 @@ def test_meaning_scale_matches_a_direct_computation_and_weights_act_as_copies() 
     centred = sims - means[mods]
     assert sc.center == pytest.approx(float(centred.mean()), abs=1e-6)
     assert sc.std == pytest.approx(float(centred.std()), rel=1e-4)
-    # A weight of 2 is the same as the vector appearing twice.
     w = np.where(np.arange(500) < 100, 2.0, 1.0)
     dup = meaning_scale(np.concatenate([sims, sims[:100]]), np.concatenate([mods, mods[:100]]), ["text", "image"])
     weighted = meaning_scale(sims, mods, ["text", "image"], weights=w)
     assert weighted.std == pytest.approx(dup.std, rel=1e-5) and weighted.means == pytest.approx(dup.means)
-    # `files` decides MODALITY_MIN: 5 sampled images standing for 50 distinct files still get their own mean.
     few = meaning_scale(sims[:25], np.array([1] * 5 + [0] * 20), ["text", "image"], files=[20, 50])
     assert set(few.means) == {"text", "image"}
 
@@ -562,7 +538,6 @@ def test_parse_query_prefixes_and_extensibility() -> None:
         p_lit = parse_query(literal)
         assert p_lit.flt is None and p_lit.text == literal
 
-    # Registering a new filter in the future works immediately:
     register(QueryFilter("note", frozenset({ft.TEXT, ft.OFFICE})), "notes")
     try:
         assert parse_query("note: budget").flt == FILTERS["note"]
@@ -602,28 +577,21 @@ def test_prefix_filters_restrict_candidates_and_strip_prefix(realistic) -> None:
     emb = FakeEmbedder()
     s = Searcher(store, cfg, emb)
 
-    # Empty query after prefix returns [] without calling embed_query.
     assert s.search("image:") == []
     assert s.search("screenshot:   ") == []
     assert s.search_vector(q, "image:", limit=10) == []
 
-    # image: keeps all images (photos + screenshots), drops text and video even when text has higher z.
     imgs = s.search_vector(q, "image: connection refused", limit=10)
     assert set(names(imgs)) == {
         "err_panel.png", "Screenshot_2026-01-01.png", "vacation_photo.jpg", "connection_refused_photo.png",
     }
 
-    # video: keeps only video files.
     vids = s.search_vector(q, "video: connection refused", limit=10)
     assert names(vids) == ["demo_clip.mp4"]
 
-    # screenshot: keeps only files matching ocr.is_screenshot (Screenshots folder or Screenshot prefix),
-    # dropping vacation_photo.jpg (higher cosine 0.78), connection_refused_photo.png (exact lexical match
-    # in both name and chunk text, exercising gs_query_filter in SQL), and error_notes.md (cosine 0.82).
     shots = s.search_vector(q, "screenshot: connection refused", limit=10)
     assert set(names(shots)) == {"err_panel.png", "Screenshot_2026-01-01.png"}
 
-    # Explicit kinds argument intersects with prefix filter; disjoint intersection returns [].
     assert s.search_vector(q, "image: connection refused", limit=10, kinds=[ft.VIDEO]) == []
     assert set(names(s.search_vector(q, "image: connection refused", limit=10, kinds=[ft.IMAGE, ft.TEXT]))) == {
         "err_panel.png", "Screenshot_2026-01-01.png", "vacation_photo.jpg", "connection_refused_photo.png",
@@ -662,13 +630,10 @@ def test_meaning_scale_rare_long_file_uses_overall_mean(tmp_path: Path) -> None:
     sc = meaning_scale(sims, mods, ["text", "video"], files=[n_text, 1])
     assert "video" not in sc.means
     assert sc.z(0.744, "video") > cfg.z_floor + 0.5
-    # With chunk count as files (the old bug), video gets its own high mean and drops below z_floor (and default z_gate 2.0).
     sc_chunks = meaning_scale(sims, mods, ["text", "video"], files=[n_text, n_vid])
     assert "video" in sc_chunks.means
     assert sc_chunks.z(0.744, "video") < 2.0
 
-    # When image is present in >= MODALITY_MIN files and video is in < MODALITY_MIN files,
-    # video falls back to the image mean (both visual SigLIP) rather than overall.
     n_img = 200
     img_sims = np.concatenate([
         np.clip(rng.normal(0.60, 0.02, n_text), -0.99, 0.99),
@@ -682,7 +647,6 @@ def test_meaning_scale_rare_long_file_uses_overall_mean(tmp_path: Path) -> None:
     assert sc_img.offset("video") == pytest.approx(sc_img.offset("image"))
     assert sc_img.offsets(["text", "image", "video"])[2] == pytest.approx(sc_img.offset("image"))
 
-    # If image itself has < MODALITY_MIN files, video falls back to overall.
     sc_few_img = meaning_scale(img_sims, img_mods, ["text", "image", "video"], files=[n_text, 5, 1])
     assert "image" not in sc_few_img.means
     assert sc_few_img.offset("video") == pytest.approx(sc_few_img.overall + sc_few_img.center)
@@ -765,7 +729,6 @@ def test_vector_cache_file_stats_invalidate_on_remove_and_replace(tmp_path: Path
         assert sc1.files[vid_code] == 1
         assert sc1.files[txt_code] == 30
 
-    # Replace with a 4-chunk video at the same path (local write patches the cache).
     with store.write() as (db, delta):
         old_id = db.execute("SELECT id FROM files WHERE path = ?", (vpath,)).fetchone()[0]
         db.execute("DELETE FROM files WHERE id = ?", (old_id,))
@@ -794,7 +757,6 @@ def test_vector_cache_file_stats_invalidate_on_remove_and_replace(tmp_path: Path
         assert sc2.files[txt_code] == 30
         assert (sc2.valid & (sc2.modality == vid_code)).sum() == 4
 
-    # Add a second video file (distinct video file count becomes 2).
     vpath2 = str(tmp_path / "Videos/second.mp4")
     _put_multi_chunk(
         store,
@@ -813,7 +775,6 @@ def test_vector_cache_file_stats_invalidate_on_remove_and_replace(tmp_path: Path
         assert sc3.files[txt_code] == 30
         assert (sc3.valid & (sc3.modality == vid_code)).sum() == 7
 
-    # Remove the first video (distinct video file count drops back to 1).
     with store.write() as (db, delta):
         old_id = db.execute("SELECT id FROM files WHERE path = ?", (vpath,)).fetchone()[0]
         db.execute("DELETE FROM files WHERE id = ?", (old_id,))
@@ -827,7 +788,6 @@ def test_vector_cache_file_stats_invalidate_on_remove_and_replace(tmp_path: Path
         assert sc4.files[vid_code] == 1
         assert (sc4.valid & (sc4.modality == vid_code)).sum() == 3
 
-    # Remove the second video (distinct video file count drops to 0).
     with store.write() as (db, delta):
         old_id = db.execute("SELECT id FROM files WHERE path = ?", (vpath2,)).fetchone()[0]
         db.execute("DELETE FROM files WHERE id = ?", (old_id,))

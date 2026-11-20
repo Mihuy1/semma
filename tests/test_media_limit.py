@@ -81,12 +81,12 @@ def test_longer_limit_reindexes_only_files_cut_off(env) -> None:
     cfg, store, ix, extractor = env
     cfg.max_media_seconds = 60 * 60
     assert ix.reconcile_media() == 2
-    assert pending(store) == {"long.mp3", "film.mp4"}  # the 10-minute file had nothing more
-    assert segments(store)["long.mp3"] == 30  # old segments stay searchable until replaced
+    assert pending(store) == {"long.mp3", "film.mp4"}
+    assert segments(store)["long.mp3"] == 30
     ix.run()
     assert sorted(extractor.calls) == ["film.mp4", "long.mp3"]
     assert segments(store) == {"long.mp3": 50, "short.mp3": 10, "film.mp4": 45}
-    assert ix.reconcile_media() == 0 and pending(store) == set()  # recorded: no second time
+    assert ix.reconcile_media() == 0 and pending(store) == set()
 
 
 def test_shorter_limit_trims_without_reembedding(env) -> None:
@@ -99,7 +99,6 @@ def test_shorter_limit_trims_without_reembedding(env) -> None:
     assert store.db.execute("SELECT max(position) FROM chunks").fetchone()[0] == 19 * 60
     n_chunks = store.db.execute("SELECT count(*) FROM chunks").fetchone()[0]
     assert store.db.execute("SELECT count(*) FROM vec_chunks").fetchone()[0] == n_chunks
-    # The in-memory vector cache was patched, not left with the deleted rows.
     alive = cache.alive[: cache.n]
     assert int(alive.sum()) == n_chunks
     live_ids = set(cache.chunk_ids[: cache.n][alive].tolist())

@@ -17,12 +17,8 @@ if TYPE_CHECKING:
 __all__ = ["Chunk", "ExtractionError", "EXTRACTORS", "EXTRACTOR_VERSION", "chunk_text", "clean_str",
            "extract", "make_snippet", "release_thread"]
 
-# Bump when extraction output changes in a way that could fix previously failed files.
 EXTRACTOR_VERSION = 2
 
-# A plain-text file whose whole content has fewer letters/digits than this is not embedded:
-# a stub like "@AGENTS.md" embeds as a generic vector that matches almost every short query.
-# Such files stay findable by name. Short chunks inside longer documents (slides) are kept.
 MIN_TEXT_ALNUM = 10
 
 
@@ -116,7 +112,7 @@ def release_thread() -> None:
     """Free what extraction keeps loaded for the calling thread (the OCR engine, 25-50 MB).
     The indexer calls it when a run's extraction thread is done."""
     ocr = sys.modules.get(f"{__package__.rpartition('.')[0]}.ocr")
-    if ocr is not None:  # never loaded: nothing to free
+    if ocr is not None:
         ocr.release_thread()
 
 
@@ -141,7 +137,7 @@ def extract(path: Path, kind: str, cfg: Config) -> Iterator[Chunk]:
         raise
     except MemoryError as e:
         raise ExtractionError("out of memory while extracting") from e
-    except Exception as e:  # corrupt files make parsers fail in many creative ways
+    except Exception as e:
         msg = getattr(e, "strerror", None) or str(e) or type(e).__name__
         raise ExtractionError(f"{type(e).__name__}: {msg}"[:300]) from e
     finally:

@@ -35,8 +35,8 @@ class FakeEmbedder:
     dim = DIM
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, int]] = []  # (modality, batch size)
-        self.fail_on: set[str] = set()  # contents that raise, to test per-item isolation
+        self.calls: list[tuple[str, int]] = []
+        self.fail_on: set[str] = set()
 
     def embed_query(self, query: str) -> np.ndarray:
         return bag_of_words(query)
@@ -47,7 +47,6 @@ class FakeEmbedder:
         for c in contents:
             if isinstance(c, str) and c in self.fail_on:
                 raise RuntimeError(f"cannot embed {c!r}")
-            # Titles are ignored so identical chunk text in two files gives identical vectors.
             out.append(bag_of_words(c if isinstance(c, str) else repr(c)))
         return np.stack(out)
 

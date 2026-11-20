@@ -1,24 +1,4 @@
 #!/usr/bin/env bash
-# Launch a nested GNOME Shell (mutter-devkit) window inside KDE Plasma with
-# Semma wired into GNOME Overview search.
-#
-# Why a private D-Bus session (dbus-run-session)?
-#   Running GNOME Shell directly on the host Plasma session bus causes it to
-#   compete with KDE for well-known names such as org.freedesktop.Notifications,
-#   org.kde.StatusNotifierWatcher, and xdg-desktop-portal backends. Starting a
-#   private session bus isolates the nested shell completely from Plasma, while
-#   scripts/gnome_bridge.py bridges only org.gnome.Shell.SearchProvider2
-#   (/io/github/Semma/SearchProvider on io.github.Semma) back to the real host session bus.
-#
-# Usage:
-#   ./scripts/gnome_devkit.sh [extra gnome-shell args...]
-#
-# Prerequisites:
-#   - semma daemon running on your session bus (with /io/github/Semma/SearchProvider exported)
-#   - gnome-shell and mutter-devkit installed (sudo dnf install mutter-devkit)
-#
-# Open the Overview in the nested window and type to search with Semma.
-# Close the devkit window (or press Ctrl+C) to stop both the shell and bridge.
 
 set -euo pipefail
 

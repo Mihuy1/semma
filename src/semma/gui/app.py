@@ -22,7 +22,7 @@ from .status_page import StatusPage
 from .theme import apply_desktop_theme, prepare_platform_env
 from .widgets import theme_icon
 
-APP_ID = dbus_names.GNOME_DESKTOP_ID.removesuffix(".desktop")  # io.github.Semma
+APP_ID = dbus_names.GNOME_DESKTOP_ID.removesuffix(".desktop")
 DEFAULT_SIZE = (800, 640)
 
 
@@ -83,7 +83,7 @@ class MainWindow(QMainWindow):
             wizard.bring_forward(token)
             return
         if token:
-            os.environ["XDG_ACTIVATION_TOKEN"] = token  # used by Qt's Wayland activation
+            os.environ["XDG_ACTIVATION_TOKEN"] = token
         self.setWindowState((self.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive)
         self.show()
         self.raise_()
@@ -96,7 +96,7 @@ class MainWindow(QMainWindow):
             self.hide()
             return
         if self._wizard is not None:
-            self._wizard.deleteLater()  # the closed one from an earlier run
+            self._wizard.deleteLater()
         wizard = OnboardingWindow(self.client, self.settings_page.config_path, self.settings_page.home,
                                   rerun=True)
         self._wizard = wizard
@@ -114,7 +114,7 @@ class MainWindow(QMainWindow):
             wizard.close()
 
     def _setup_closed(self) -> None:
-        self.tabs.setCurrentWidget(self.status_page)  # it says that setup is not finished
+        self.tabs.setCurrentWidget(self.status_page)
         if not self.isVisible():
             self.show()
             self.raise_()
@@ -218,7 +218,7 @@ def make_app(argv: list[str] | None = None) -> QApplication:
         prepare_platform_env()
         QApplication.setApplicationName("semma")
         QApplication.setApplicationDisplayName("Semma")
-        QApplication.setDesktopFileName(APP_ID)  # Wayland app_id -> io.github.Semma.desktop
+        QApplication.setDesktopFileName(APP_ID)
         app = QApplication(argv if argv is not None else sys.argv[:1])
         apply_desktop_theme(app)
     assert isinstance(app, QApplication)
@@ -240,11 +240,11 @@ def run(config_path: Path | None = None) -> int:
     relay = Relay()
     current: dict[str, MainWindow | OnboardingWindow | None] = {"window": None}
 
-    def on_activate(token: str) -> None:  # on the client's thread
+    def on_activate(token: str) -> None:
         def raise_current() -> None:
             window = current["window"]
             if window is not None:
-                window.bring_forward(token)  # the wizard or the main window
+                window.bring_forward(token)
         relay.post(raise_current)
 
     from .single import claim
@@ -253,7 +253,7 @@ def run(config_path: Path | None = None) -> int:
         owned = client.submit(claim(on_activate)).result(timeout=5)
     except Exception:
         owned = None
-    if owned is False:  # another window came forward
+    if owned is False:
         client.close()
         return 0
 

@@ -16,8 +16,6 @@ from PIL import Image, ImageDraw, ImageFont
 
 from semma import ocr
 
-# ---------------------------------------------------------------------------------- languages
-
 
 @pytest.mark.parametrize(("env", "code"), [
     ({"LANG": "fi_FI.UTF-8"}, "fin"),
@@ -35,7 +33,7 @@ from semma import ocr
     ({"LANG": "xx_YY"}, None),
     ({"LANG": "en_US.UTF-8", "LC_MESSAGES": "sv_SE.UTF-8"}, "swe"),
     ({"LANG": "en_US.UTF-8", "LC_MESSAGES": "sv_SE.UTF-8", "LC_ALL": "fi_FI.UTF-8"}, "fin"),
-    ({"LANG": "fi_FI.UTF-8", "LC_ALL": ""}, "fin"),  # empty means unset
+    ({"LANG": "fi_FI.UTF-8", "LC_ALL": ""}, "fin"),
 ])
 def test_locale_language(env: dict[str, str], code: str | None) -> None:
     assert ocr.locale_language(env) == code
@@ -47,7 +45,6 @@ def test_language_names() -> None:
     assert ocr.language_name("xyz") == "xyz"
     assert len(ocr.LANGUAGE_NAMES) > 110
     assert all(ocr.LANGUAGE_CODE.fullmatch(c) for c in ocr.LANGUAGE_NAMES)
-    # Every locale mapping points at a language Tesseract has.
     assert set(ocr.ISO639_1.values()) <= set(ocr.LANGUAGE_NAMES)
 
 
@@ -59,7 +56,7 @@ def test_default_languages(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ocr.default_languages(["eng"]) == ["eng"]
     assert ocr.default_languages([]) == []
     monkeypatch.setenv("LANG", "en_GB.UTF-8")
-    assert ocr.default_languages(["eng", "fin"]) == ["eng"]  # no duplicate
+    assert ocr.default_languages(["eng", "fin"]) == ["eng"]
     monkeypatch.setenv("LANG", "C")
     assert ocr.default_languages(["eng", "fin"]) == ["eng"]
 
@@ -82,9 +79,8 @@ def cfg(enabled: bool = True, languages: tuple[str, ...] | None = None) -> Simpl
 
 def test_effective_languages(installed: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
     assert ocr.effective_languages(cfg(enabled=False)) == []
-    assert ocr.effective_languages(cfg()) == ["fin", "eng"]  # automatic
-    assert ocr.effective_languages(cfg(languages=("swe", "eng"))) == ["swe", "eng"]  # order kept
-    # Not installed: left out (not replaced by the default); duplicates once; at most three.
+    assert ocr.effective_languages(cfg()) == ["fin", "eng"]
+    assert ocr.effective_languages(cfg(languages=("swe", "eng"))) == ["swe", "eng"]
     assert ocr.effective_languages(cfg(languages=("jpn", "fra"))) == ["fra"]
     assert ocr.effective_languages(cfg(languages=("deu", "deu", "eng"))) == ["deu", "eng"]
     assert ocr.effective_languages(cfg(languages=("deu", "eng", "fin", "fra"))) == ["deu", "eng", "fin"]
@@ -102,7 +98,6 @@ def test_installed_languages_lists_language_data_only(tmp_path: Path, monkeypatc
     monkeypatch.setattr(ocr, "library_available", lambda: True)
     assert ocr.tessdata_dir() == tmp_path
     assert ocr.installed_languages() == ["chi_sim", "eng", "fin"]
-    # The Tesseract 3 meaning of TESSDATA_PREFIX (the directory above tessdata) works too.
     parent = tmp_path / "prefix"
     (parent / "tessdata").mkdir(parents=True)
     (parent / "tessdata" / "swe.traineddata").write_bytes(b"x")
@@ -116,7 +111,7 @@ def test_installed_languages_lists_language_data_only(tmp_path: Path, monkeypatc
 
 
 def test_install_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ocr.os.path, "exists", lambda p: False)  # not an ostree system
+    monkeypatch.setattr(ocr.os.path, "exists", lambda p: False)
     fedora = {"ID": "fedora", "VERSION_ID": "45"}
     assert ocr.install_hint(None, fedora) == "sudo dnf install tesseract-libs tesseract-langpack-eng"
     assert ocr.install_hint("chi_sim", fedora) == "sudo dnf install tesseract-langpack-chi_sim"
@@ -133,25 +128,19 @@ def test_install_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ocr.install_hint("fin", fedora) == "rpm-ostree install tesseract-langpack-fin"
 
 
-# ---------------------------------------------------------------------------------- screenshots
-
-
 @pytest.mark.parametrize(("path", "expected"), [
     ("/home/u/Pictures/Screenshots/Screenshot From 2026-09-25 14-20-31.png", True),
-    ("/home/u/Pictures/Screenshots/2026/holiday.jpg", True),  # in the folder, any name, any depth
-    ("/home/u/Kuvat/Näyttökuva 2026-01-01.png", True),  # decomposed umlauts
-    ("/home/u/Images/Capture d’écran du 2026-01-01.png", True),  # typographic apostrophe
-    ("/home/u/Images/Capture_d'écran_2026.png", True),  # underscore normalization
+    ("/home/u/Pictures/Screenshots/2026/holiday.jpg", True),
+    ("/home/u/Kuvat/Näyttökuva 2026-01-01.png", True),
+    ("/home/u/Images/Capture d’écran du 2026-01-01.png", True),
+    ("/home/u/Images/Capture_d'écran_2026.png", True),
     ("/home/u/SCREENSHOTS/a.png", True),
     ("/home/u/Pictures/holiday.jpg", False),
-    ("/home/u/Pictures/Screenshots/notes.txt", False),  # images only
-    ("/home/u/Documents/my screenshot.png", False),  # the word must start the name
+    ("/home/u/Pictures/Screenshots/notes.txt", False),
+    ("/home/u/Documents/my screenshot.png", False),
 ])
 def test_is_screenshot(path: str, expected: bool) -> None:
     assert ocr.is_screenshot(Path(path)) is expected
-
-
-# ---------------------------------------------------------------------------------- filtering
 
 
 def words(text: str, conf: float = 95.0) -> list[tuple[str, float, bool]]:
@@ -169,7 +158,6 @@ def test_filter_keeps_confident_words_and_lines() -> None:
 
 
 def test_filter_drops_junk() -> None:
-    # Real triples from the Firefox about:processes screenshot (word, confidence).
     line = [("o¢eee", 25), ("Firefox", 57), ("a", 35), ("even", 61), ("@", 81), ("HD", 59), ("=", 26),
             ("@", 64), (":", 7)]
     rows = [(w, float(c), i == len(line) - 1) for i, (w, c) in enumerate(line)]
@@ -179,20 +167,20 @@ def test_filter_drops_junk() -> None:
 
 
 def test_filter_drops_too_little_text() -> None:
-    assert ocr.filter_words(words("MiniLM-mallin")) == ""  # one word under a chart
-    assert ocr.filter_words(words("OK Go 1 2 3 4 5 6 7 8 9 10 11")) == ""  # no three real words
-    assert ocr.filter_words(words("Save the file")) == ""  # 11 letters
+    assert ocr.filter_words(words("MiniLM-mallin")) == ""
+    assert ocr.filter_words(words("OK Go 1 2 3 4 5 6 7 8 9 10 11")) == ""
+    assert ocr.filter_words(words("Save the file")) == ""
     assert ocr.filter_words(words("ORS Leth pokes eee les alte", conf=30)) == ""
     assert ocr.filter_words([]) == ""
     assert ocr.filter_words(words("Save the changes before closing")) == "Save the changes before closing"
 
 
 def test_prepare_image_caps_pixels_and_makes_grey() -> None:
-    big = Image.new("RGB", (7680, 2160), "white")  # two 4K screens side by side
+    big = Image.new("RGB", (7680, 2160), "white")
     out = ocr.prepare_image(big)
     assert out.mode == "L" and out.width * out.height <= ocr.MAX_OCR_PIXELS
     assert abs(out.width / out.height - 7680 / 2160) < 0.01
-    small = Image.new("RGBA", (800, 600), (0, 0, 0, 0))  # transparent: composited on white
+    small = Image.new("RGBA", (800, 600), (0, 0, 0, 0))
     out = ocr.prepare_image(small)
     assert out.mode == "L" and out.size == (800, 600) and out.getpixel((0, 0)) == 255
     assert ocr.prepare_image(Image.new("P", (40, 40))).mode == "L"
@@ -213,8 +201,6 @@ def test_no_library_means_no_text(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ocr.recognize(Image.new("RGB", (200, 100), "white"), []) == ""
     assert ocr.release_thread() is False
 
-
-# ---------------------------------------------------------------------------------- the real library
 
 needs_tesseract = pytest.mark.skipif(not (ocr.library_available() and "eng" in ocr.installed_languages()),
                                      reason="needs libtesseract 5 with English data")
@@ -237,7 +223,7 @@ def test_recognize_reads_rendered_text() -> None:
     finally:
         assert ocr.release_thread() is True
     assert text.splitlines() == ["Select Interpreter", "The quick brown fox jumps over the lazy dog"]
-    assert ocr.release_thread() is False  # freed already
+    assert ocr.release_thread() is False
 
 
 @needs_tesseract
@@ -260,7 +246,7 @@ def test_engine_per_thread_and_reinit_for_new_languages() -> None:
     try:
         assert ocr.recognize(img, ["eng"]) == "Hello world from the screenshot test"
         first = ocr._local.engine
-        ocr.recognize(img, ["eng", "eng"])  # another list: a new engine replaces the old one
+        ocr.recognize(img, ["eng", "eng"])
         assert ocr._local.engine is not first and first.handle is None
     finally:
         ocr.release_thread()
@@ -273,6 +259,6 @@ def test_missing_language_is_skipped_quietly() -> None:
     img = text_image(["Hello world from the screenshot test"])
     try:
         assert ocr.recognize(img, ["zzz"]) == ""
-        assert ocr.recognize(img, ["zzz"]) == ""  # remembered, not retried
+        assert ocr.recognize(img, ["zzz"]) == ""
     finally:
         ocr.release_thread()

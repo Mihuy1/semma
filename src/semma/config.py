@@ -12,30 +12,22 @@ from typing import Any
 
 from . import filetypes as ft
 
-# Directory names that are never descended into, wherever they appear (compared case-insensitively).
 DEFAULT_EXCLUDE_DIR_NAMES: tuple[str, ...] = (
-    # dependency / tooling caches
     "node_modules", "__pycache__", "site-packages", "npm-cache", "bower_components",
-    # game libraries
     "SteamLibrary", "steamapps", "XboxGames", "Epic Games", "GOG Games",
-    # extracted AppImages
     "squashfs-root",
 )
 
-# Operating-system folders pruned only directly below a scan root (e.g. an NTFS data drive),
-# so that a user's own "~/Documents/Windows" notes folder is still indexed.
 DEFAULT_ROOT_SYSTEM_DIR_NAMES: tuple[str, ...] = (
     "$RECYCLE.BIN", "System Volume Information", "Config.Msi", "WUDownloadCache",
     "msdownld.tmp", "Program Files", "Program Files (x86)", "ProgramData", "Windows",
     "WindowsApps", "WpSystem", "found.000", "lost+found", "Recovery", "PerfLogs",
 )
 
-# Directory names skipped only inside a software project (outside one they may be real folders).
 DEFAULT_PROJECT_BUILD_DIR_NAMES: tuple[str, ...] = (
     "build", "dist", "target", "out", "vendor", "env", "venv", "coverage", "bin", "obj",
 )
 
-# A directory containing any of these is the root of a software project.
 DEFAULT_PROJECT_MARKERS: tuple[str, ...] = (
     ".git", ".hg", ".svn", "pyproject.toml", "setup.py", "package.json", "Cargo.toml",
     "go.mod", "CMakeLists.txt", "meson.build", "pom.xml", "build.gradle", "build.gradle.kts",
@@ -46,40 +38,24 @@ DEFAULT_TYPE_WEIGHTS: dict[str, float] = {
     ft.PDF: 30, ft.OFFICE: 30, ft.TEXT: 25, ft.IMAGE: 20, ft.AUDIO: 15, ft.VIDEO: 10,
 }
 
-# Files below this size get the tiny-file penalty (icons, empty notes, stubs).
 DEFAULT_TINY_BYTES: dict[str, int] = {
     ft.TEXT: 200, ft.PDF: 2_000, ft.OFFICE: 2_000, ft.IMAGE: 20_000,
     ft.AUDIO: 50_000, ft.VIDEO: 200_000,
 }
 
-# Files above this size are not indexed at all.
 DEFAULT_MAX_BYTES: dict[str, int] = {
     ft.TEXT: 20 * 2**20, ft.PDF: 500 * 2**20, ft.OFFICE: 200 * 2**20,
     ft.IMAGE: 200 * 2**20, ft.AUDIO: 4 * 2**30, ft.VIDEO: 5 * 2**30,
 }
 
-# (max age in days, bonus points); the first matching row wins.
 DEFAULT_RECENCY: tuple[tuple[float, float], ...] = ((30, 15), (365, 10), (3 * 365, 5))
 
 DEFAULT_MODEL = "google/embeddinggemma-2"
 
-# Chunks per model call, per modality (a CUDA OOM halves the batch and retries). Measured on an
-# RTX 5070 Ti with ~2,000-character text chunks: text 8 -> 112 chunks/s at 2.7 GiB peak, but
-# 32 -> 71/s at 6.7 GiB (padding and attention memory grow faster than the GPU gains);
-# images run ~21/s at any batch size (preprocessing-bound), so 8 keeps memory low.
-# Video is 1: a 32-frame chunk takes ~0.7 s, and a query never waits for more than one batch.
 DEFAULT_BATCH_SIZES: dict[str, int] = {"text": 8, "image": 8, "audio": 8, "video": 1}
 
-# sqlite-vec refuses KNN queries with k above 4096.
 MAX_KNN_K = 4096
 
-# Near-duplicate collapsing in search results: two files whose best chunks for the query have at
-# least this cosine similarity are shown as one result. Calibrated on the real index
-# (1,190 files): copies of one COCO photo in different folders (re-encoded/resized) score
-# 0.88-1.00 (median 0.98, p5 0.955) while the closest pair of *different* COCO photos scores
-# 0.95, so images use 0.96. Text chunks are much more compressed: unchanged sections of two
-# thesis versions score >= 0.998, the same thesis as .odt vs .md (different chunk boundaries)
-# 0.97-0.98, and a separate notes file about the thesis up to 0.987, so text uses 0.99.
 DEFAULT_DUPLICATE_SIMILARITY: dict[str, float] = {"text": 0.99, "image": 0.96, "audio": 0.98, "video": 0.97}
 
 
@@ -156,7 +132,7 @@ class Config:
     roots: list[Path]
     include_mounts: bool = True
     skip_hidden: bool = True
-    skip_app_installs: bool = True  # prune installed Windows apps/games (see scanner._is_app_install)
+    skip_app_installs: bool = True
     kinds: frozenset[str] = frozenset(ft.KINDS)
     exclude_extensions: frozenset[str] = frozenset()
     exclude_dir_names: frozenset[str] = frozenset(DEFAULT_EXCLUDE_DIR_NAMES)
@@ -179,70 +155,39 @@ class Config:
     huge_video_penalty: float = -10
     max_bytes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_MAX_BYTES))
 
-    # Media: only the first N seconds of an audio or video file are indexed.
     max_media_seconds: float = 60 * 60
     media_segment_seconds: float = 60
 
-    # Embedding model and indexing.
     model_name: str = DEFAULT_MODEL
-    device: str | None = None  # None: GPU (Vulkan / CUDA) when available, else CPU
-    query_device: str = "auto"  # "auto" (same as indexing), "cpu", "vulkan", "gpu" or "cuda"
+    device: str | None = None
+    query_device: str = "auto"
     llama_lib_dir: Path | None = None
     model_dir: Path | None = None
     batch_sizes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_BATCH_SIZES))
-    prefetch_chunks: int = 8  # extracted chunks buffered ahead of the GPU (bounds memory)
+    prefetch_chunks: int = 8
 
-    # Search. A chunk's meaning score is a z-score: how many standard deviations its cosine
-    # similarity to the query stands out from every stored vector's (after centring each
-    # modality on its own mean, since image cosines run lower than text ones). EmbeddingGemma
-    # cosines are compressed (unrelated pairs score ~0.45-0.70), so a fixed cosine threshold
-    # does not work across queries; z does. A file whose best chunk reaches `z_gate` is a
-    # meaning match; below it a file needs half the query's words (or its name) to be shown.
-    # 2.0 keeps roughly the top 2-3% of chunks for a query (DigUp's value).
     z_gate: float = 2.0
-    # A file without the query's words is shown only if the query's best meaning match reaches
-    # `z_floor` (the kind bonus of a type word counts: "photo of ..."); else nothing stands out
-    # and the query finds only files containing its words, or nothing. Nonsense queries top out
-    # around median z ~3.0, max ~3.5, while visual/video matches start around 4.1-4.4 ("car"
-    # 4.1, "car review" 4.2, "firefox" 4.35, "nature" 4.4), so 4.0 separates real matches from
-    # noise. Noise tops grow slowly with the index (the maximum of more draws): a much larger
-    # index may want a higher floor. 0 disables.
     z_floor: float = 4.0
-    knn_k: int = 200  # only used without the vector cache (sqlite-vec KNN)
-    # Score bonus in z units for priority 100 (scaled linearly; 0 disables). Only meant to break
-    # near-ties in favour of files in the user's own folders.
+    knn_k: int = 200
     location_prior: float = 0.3
     duplicate_similarity: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_DUPLICATE_SIMILARITY))
-    # A long-running process keeps all vectors in RAM (768 floats = 3 KiB per chunk) up to this
-    # many chunks; beyond it, searches use sqlite-vec directly.
     vector_cache_max_chunks: int = 1_000_000
 
-    # Daemon (semmad). The query model is unloaded (VRAM freed) after this long with no
-    # queries; the next query reloads it (~1.5 s). The full index model is unloaded sooner once
-    # indexing finishes.
     model_idle_unload_minutes: float = 15
     index_model_unload_seconds: float = 60
-    rescan_hours: float = 24  # full rescan interval (inotify triggers partial rescans in between)
+    rescan_hours: float = 24
     watch_debounce_seconds: float = 5
-    # Indexing pauses while processes other than ours use more than this % of the GPU's SMs
-    # (sampled every gpu_check_seconds while indexing; every 60 s while paused).
     pause_when_gpu_busy: bool = True
     gpu_busy_threshold: float = 30
     gpu_check_seconds: float = 30
     krunner_max_results: int = 10
-    query_debounce_ms: float = 100  # search-as-you-type: only the last keystroke is searched
+    query_debounce_ms: float = 100
 
-    # OCR of screenshots (semma.ocr): off by default. Languages: Tesseract codes, the first is
-    # the primary one; None picks the locale's language and English.
     ocr_enabled: bool = False
     ocr_languages: tuple[str, ...] | None = None
 
-    # None: the key is absent. The daemon then indexes only when this user already has an
-    # index (see onboarding.onboarding_done). False pauses indexing until setup finishes.
     onboarding_complete: bool | None = None
 
-    # Where `load_config` read this from (the file, which need not exist, and the home it
-    # expanded ~ against), so the daemon can read the same file again. Not settings.
     source_path: Path | None = field(default=None, compare=False, repr=False)
     source_home: Path | None = field(default=None, compare=False, repr=False)
 
@@ -370,7 +315,6 @@ KNOWN_KEYS: dict[str, frozenset[str]] = {
                          "krunner_max_results", "query_debounce_ms", "query_device"}),
 }
 
-# Settings of earlier versions that are accepted with a warning and ignored.
 REMOVED_KEYS: dict[str, frozenset[str]] = {
     "search": frozenset({"min_similarity", "similarity_margin", "min_similarity_short", "similarity_margin_short",
                          "rrf_k"}),
@@ -550,7 +494,6 @@ def apply_overrides(cfg: Config, data: dict[str, Any]) -> None:
         cfg.max_bytes.update(_parse_max_file_mb(scan["max_file_mb"]))
 
     if "locations" in prio:
-        # Merge: a configured path replaces the default weight for that path, others are kept.
         for p, pts in prio["locations"].items():
             cfg.locations[_expand(p, home)] = float(pts)
     if "type_weights" in prio:

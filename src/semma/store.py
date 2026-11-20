@@ -63,15 +63,10 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
 EMBEDDING_DIM = 768
 BUSY_TIMEOUT_S = 10.0
 
-# The FTS tokenizer folds case and strips diacritics ("opinnäytetyö" matches "opinnaytetyo").
-# Queries add a prefix wildcard to the last term (see search.py), which covers type-as-you-go
-# and Finnish inflection ("opinnäytetyö" finds "opinnäytetyöni"); trigram would also match
-# mid-word substrings, but triples the index size for chunk text and makes BM25 noisy.
 FTS_TOKENIZE = "unicode61 remove_diacritics 2"
 
 
 def vec_table_sql(dim: int) -> str:
-    # `kind` lets `search --kind` filter inside the KNN instead of after it.
     return (f"CREATE VIRTUAL TABLE vec_chunks USING vec0(chunk_id INTEGER PRIMARY KEY, "
             f"embedding float[{dim}] distance_metric=cosine, modality TEXT, kind TEXT)")
 
@@ -134,11 +129,8 @@ CREATE INDEX files_status_kind ON files (status, kind);
 
 MIGRATIONS: list[str] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4]
 
-# Word boundaries inside file names that unicode61 does not see: camelCase and letter/digit.
 _CAMEL = re.compile(r"(?<=[a-zà-ÿ])(?=[A-ZÀ-Þ])|(?<=[^\W\d_])(?=\d)|(?<=\d)(?=[^\W\d_])")
 
-# Leading path parts that say nothing about a file: the home directory (its user name matches
-# every file) and mount points of data drives.
 _ROOT_PREFIX = re.compile(r"^(?:/var)?/home/[^/]+|^/root(?=/|$)|^/run/media/[^/]+/[^/]+"
                           r"|^/media/[^/]+/[^/]+|^/mnt/[^/]+")
 DIR_TERMS_LEVELS = 3
@@ -213,7 +205,7 @@ class ChunkRecord:
     locator: str
     snippet: str
     position: float | None
-    text: str | None  # full text for the FTS (text chunks only)
+    text: str | None
     vector: np.ndarray
 
 
@@ -230,11 +222,9 @@ class Store:
         self._local = threading.local()
         self._conns: list[sqlite3.Connection] = []
         self._conns_lock = threading.Lock()
-        # Serialises this process's write transactions so the vector cache sees them in commit
-        # order. (Other processes are serialised by SQLite's own write lock.)
         self._write_lock = threading.RLock()
         self._shared: sqlite3.Connection | None = None
-        if self._memory:  # tests only: one database, so one connection for every thread
+        if self._memory:
             self._shared = connect(path)
             self._conns.append(self._shared)
         self._migrate()
@@ -242,7 +232,6 @@ class Store:
         if vector_cache:
             self.enable_vector_cache(cache_max_chunks)
 
-    # -- connections --------------------------------------------------------------
     def connect(self, readonly: bool = False) -> sqlite3.Connection:
         """A new connection owned by the caller."""
         return connect(self.path, readonly=readonly)
@@ -307,7 +296,6 @@ class Store:
         try:
             if db.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS):
                 return
-            # Re-read the version under the write lock: another process may be migrating too.
             db.execute("BEGIN IMMEDIATE")
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version > len(MIGRATIONS):
@@ -368,7 +356,6 @@ class Store:
             cache.ensure_fresh(self.reader())
         return cache
 
-    # -- meta -----------------------------------------------------------------
     def get_meta(self, key: str, default: str | None = None) -> str | None:
         row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row[0] if row else default
@@ -377,7 +364,6 @@ class Store:
         with self.write() as (db, _):
             db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
 
-    # -- scanning -------------------------------------------------------------
     def begin_scan(self) -> int:
         with self.write() as (db, _):
             row = db.execute("SELECT value FROM meta WHERE key = 'scan_generation'").fetchone()
@@ -465,7 +451,7 @@ class Store:
         for ext in sorted(set(exclude_extensions)):
             ext = ext.lstrip(".").lower()
             if not ext or "." in ext or "/" in ext:
-                continue  # the scanner compares only what follows the last dot: never matches
+                continue
             clauses.append(r"lower(path) LIKE ? ESCAPE '\'")
             args.append("%." + ext.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_"))
         if max_bytes:
@@ -480,7 +466,6 @@ class Store:
             delta.removed_files.update(doomed)
         return len(doomed)
 
-    # -- queue ----------------------------------------------------------------
     def counts(self) -> dict[tuple[str, str], int]:
         rows = self.db.execute("SELECT kind, status, count(*) FROM files GROUP BY kind, status")
         return {(r[0], r[1]): r[2] for r in rows}
@@ -550,8 +535,7 @@ class Store:
             files = [r[0] for r in db.execute(f"SELECT DISTINCT file_id FROM chunks WHERE {where}", args)]
             if not files:
                 return 0
-            deleted = db.execute(f"DELETE FROM chunks WHERE {where}", args).rowcount  # triggers clear vec/fts
-            # The vector cache drops whole files: re-add the chunks these files keep.
+            deleted = db.execute(f"DELETE FROM chunks WHERE {where}", args).rowcount
             delta.removed_files.update(files)
             fmarks = ",".join("?" * len(files))
             for chunk_id, file_id, emb, modality, kind in db.execute(
@@ -562,7 +546,6 @@ class Store:
                 delta.added.append((chunk_id, file_id, np.frombuffer(emb, dtype=np.float32).copy(), modality, kind))
             return deleted
 
-    # -- index ----------------------------------------------------------------
     def embedding_dim(self) -> int:
         return int(self.get_meta("embedding_dim", str(EMBEDDING_DIM)) or EMBEDDING_DIM)
 
@@ -586,7 +569,6 @@ class Store:
         """Delete all chunks, vectors and chunk text and mark every file pending again.
         File rows (the scan queue) and the file-name FTS are kept."""
         with self.write() as (db, delta):
-            # Bulk-clear the virtual tables first so the per-row chunk trigger finds nothing.
             db.execute("DELETE FROM vec_chunks")
             db.execute("INSERT INTO fts_chunks (fts_chunks) VALUES ('delete-all')")
             db.execute("DELETE FROM chunks")
@@ -613,7 +595,7 @@ class Store:
             row = db.execute("SELECT size, mtime FROM files WHERE id = ?", (file_id,)).fetchone()
             if row is None or row[0] != size or row[1] != mtime:
                 return False
-            db.execute("DELETE FROM chunks WHERE file_id = ?", (file_id,))  # triggers clear vec/fts
+            db.execute("DELETE FROM chunks WHERE file_id = ?", (file_id,))
             delta.removed_files.add(file_id)
             for seq, rec in enumerate(records):
                 cur = db.execute(

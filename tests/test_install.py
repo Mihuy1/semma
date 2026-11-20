@@ -64,7 +64,6 @@ def test_install_kde_writes_files_and_runs_commands_in_order(
     for p in written:
         assert p.is_file()
 
-    # Parse .desktop with configparser (case-sensitive keys) and verify every required key
     cp = configparser.ConfigParser(interpolation=None)
     cp.optionxform = str  # type: ignore[assignment]
     cp.read(expected_desktop, encoding="utf-8")
@@ -83,7 +82,6 @@ def test_install_kde_writes_files_and_runs_commands_in_order(
     assert entry["X-Plasma-Runner-Min-Letter-Count"] == "3"
     assert entry["X-Plasma-Request-Actions-Once"] == "true"
 
-    # Check shared application menu entry
     app_cp = configparser.ConfigParser(interpolation=None)
     app_cp.optionxform = str  # type: ignore[assignment]
     app_cp.read(expected_app_desktop, encoding="utf-8")
@@ -100,7 +98,6 @@ def test_install_kde_writes_files_and_runs_commands_in_order(
     assert "OnlyShowIn" not in app_entry
     assert "NoDisplay" not in app_entry
 
-    # Check XDG tray autostart entry
     tray_cp = configparser.ConfigParser(interpolation=None)
     tray_cp.optionxform = str  # type: ignore[assignment]
     tray_cp.read(expected_tray, encoding="utf-8")
@@ -117,7 +114,6 @@ def test_install_kde_writes_files_and_runs_commands_in_order(
     assert tray_entry["X-KDE-autostart-phase"] == "2"
     assert "OnlyShowIn" not in tray_entry
 
-    # Check D-Bus activation file
     dbus_cp = configparser.ConfigParser(interpolation=None)
     dbus_cp.optionxform = str  # type: ignore[assignment]
     dbus_cp.read(expected_dbus, encoding="utf-8")
@@ -126,7 +122,6 @@ def test_install_kde_writes_files_and_runs_commands_in_order(
     assert dbus_sec["Exec"] == f"{fake_py} -m semma daemon"
     assert dbus_sec["SystemdService"] == dbus_names.SYSTEMD_UNIT
 
-    # Check systemd user unit
     unit_cp = configparser.ConfigParser(interpolation=None, strict=False)
     unit_cp.optionxform = str  # type: ignore[assignment]
     unit_cp.read(expected_unit, encoding="utf-8")
@@ -165,7 +160,6 @@ def test_install_idempotency_and_uninstall_removes_everything(
     assert first == second
     for p in first:
         assert p.is_file()
-        # Ensure no leftover temp files in parent directory
         assert list(p.parent.glob(".*.tmp")) == []
 
     commands.clear()
@@ -180,7 +174,6 @@ def test_install_idempotency_and_uninstall_removes_everything(
         ["kquitapp6", "krunner"],
     ]
 
-    # Second uninstall is a safe no-op for missing files
     assert uninstall_kde(runner=fake_runner) == []
 
 
@@ -237,7 +230,6 @@ def test_status_kde_reports_files_and_service_state(
         "systemd_unit": True,
     }
 
-    # Missing application entry marks KDE integration incomplete.
     app_desktop = written[1]
     app_desktop.unlink()
     st_missing_app = status_kde(runner=lambda cmd: 0)
@@ -386,7 +378,6 @@ def test_uninstall_gnome_keeps_shared_service_when_kde_present(
     assert unit_path.is_file()
     assert commands == []
 
-    # Uninstalling KDE afterwards removes the shared application entry, tray autostart, and service files too.
     kde_removed = uninstall_kde(system_data_dir=sys_data, runner=lambda cmd: commands.append(cmd) or 0)
     assert kde_removed == [kde_desktop, gnome_desktop, tray_autostart, dbus_path, unit_path]
     assert not gnome_desktop.exists()
@@ -618,7 +609,6 @@ def test_install_gnome_keeps_different_service_files_unless_python_passed(
     assert unit_path not in res_kept.written
     assert dbus_path.read_text(encoding="utf-8") == old_dbus_text
     assert unit_path.read_text(encoding="utf-8") == old_unit_text
-    # Service files were not rewritten, so try-restart must not run.
     assert commands == [
         ["systemctl", "--user", "daemon-reload"],
         ["systemctl", "--user", "enable", "--now", dbus_names.SYSTEMD_UNIT],

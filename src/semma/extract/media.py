@@ -29,18 +29,14 @@ from typing import IO
 
 from .base import ExtractionError
 
-PROBE_TIMEOUT = 60  # s
-STALL_TIMEOUT = 60.0  # s without any output from ffmpeg
-MIN_BUDGET = 120.0  # s of waiting for ffmpeg always allowed per process...
-BUDGET_PER_SECOND = 4.0  # ...or this many seconds per media second decoded, if more
-EXIT_TIMEOUT = 10.0  # s to wait for ffmpeg to exit after it closed its output
-# A non-zero ffmpeg exit is accepted (corrupt or truncated tail) only if the decoded output
-# covers this fraction of the expected duration; otherwise the file fails instead of being
-# indexed as if it were complete.
+PROBE_TIMEOUT = 60
+STALL_TIMEOUT = 60.0
+MIN_BUDGET = 120.0
+BUDGET_PER_SECOND = 4.0
+EXIT_TIMEOUT = 10.0
 COMPLETE_RATIO = 0.9
 FFMPEG_FLAGS = ["-nostdin", "-hide_banner", "-loglevel", "error"]
 PROTOCOLS = ["-protocol_whitelist", "file,pipe"]
-# Demuxers that read other files/URLs listed inside the file (playlists, concat lists).
 REFERENCE_FORMATS = frozenset({"hls", "applehttp", "concat", "ffconcat", "dash", "imf", "tee"})
 
 
@@ -60,9 +56,9 @@ def tool(name: str) -> str:
 class Probe:
     duration: float | None
     has_audio: bool
-    width: int = 0  # display size of the first real video stream (after rotation/SAR), 0 if none
+    width: int = 0
     height: int = 0
-    video_index: int | None = None  # absolute stream index of that video stream
+    video_index: int | None = None
 
     @property
     def has_video(self) -> bool:
@@ -74,7 +70,7 @@ def _float(value) -> float | None:
         f = float(value)
     except (TypeError, ValueError):
         return None
-    return f if f == f and f > 0 else None  # drop NaN/0/negative
+    return f if f == f and f > 0 else None
 
 
 def _rotation(stream: dict) -> int:
@@ -167,7 +163,7 @@ class FFmpegPipe:
     def __init__(self, args: list[str], bytes_per_second: float | None = None) -> None:
         self.bytes_per_second = bytes_per_second
         self.bytes_read = 0
-        self.waited = 0.0  # seconds spent blocked waiting for output
+        self.waited = 0.0
         self.stderr: IO[bytes] = tempfile.TemporaryFile()
         try:
             self.proc = subprocess.Popen(

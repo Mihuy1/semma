@@ -37,7 +37,7 @@ class Delta:
 
     cleared: bool = False
     removed_files: set[int] = field(default_factory=set)
-    added: list[tuple[int, int, np.ndarray, str, str]] = field(default_factory=list)  # chunk, file, vec, modality, kind
+    added: list[tuple[int, int, np.ndarray, str, str]] = field(default_factory=list)
 
     def __bool__(self) -> bool:
         return self.cleared or bool(self.removed_files) or bool(self.added)
@@ -47,14 +47,14 @@ class Delta:
 class VectorScores:
     """One query scored against every row of the cache (see `VectorCache.scores`)."""
 
-    sims: np.ndarray       # float32 cosine per row
-    chunk_ids: np.ndarray  # int64
-    file_ids: np.ndarray   # int64
-    modality: np.ndarray   # int16 codes (names[code])
-    kind: np.ndarray       # int16 codes
-    valid: np.ndarray | None  # alive rows; None = all
+    sims: np.ndarray
+    chunk_ids: np.ndarray
+    file_ids: np.ndarray
+    modality: np.ndarray
+    kind: np.ndarray
+    valid: np.ndarray | None
     names: list[str]
-    files: np.ndarray      # int64 distinct files per modality code
+    files: np.ndarray
 
 
 def chunks_version(db: sqlite3.Connection) -> int:
@@ -67,19 +67,18 @@ class VectorCache:
         self.dim = dim
         self.max_chunks = max_chunks
         self.lock = threading.Lock()
-        self.version: int | None = None  # counter value the contents reflect; None = must (re)load
-        self.too_big = False  # more chunks than max_chunks: callers fall back to sqlite-vec
+        self.version: int | None = None
+        self.too_big = False
         self.loads = 0
-        self.fast_loads = 0  # loads that used the sqlite-vec storage tables directly
+        self.fast_loads = 0
         self._local_writes = 0
         self._codes: dict[str, int] = {}
         self._names: list[str] = []
         self._reset(0)
 
-    # -- storage ----------------------------------------------------------------
     def _reset(self, capacity: int) -> None:
         capacity = max(capacity, _GROW_MIN)
-        self.n = 0  # rows used (alive or dead)
+        self.n = 0
         self.dead = 0
         self.mat = np.zeros((capacity, self.dim), dtype=np.float32)
         self.chunk_ids = np.zeros(capacity, dtype=np.int64)
@@ -124,7 +123,7 @@ class VectorCache:
         self.alive[s] = True
         for i, cid in enumerate(chunk_ids.tolist()):
             old = self.row_of.get(cid)
-            if old is not None and self.alive[old]:  # chunk ids can be reused after a delete
+            if old is not None and self.alive[old]:
                 self.alive[old] = False
                 self.dead += 1
             self.row_of[cid] = self.n + i
@@ -160,7 +159,6 @@ class VectorCache:
     def size(self) -> int:
         return self.n - self.dead
 
-    # -- loading ----------------------------------------------------------------
     def load(self, db: sqlite3.Connection) -> None:
         """(Re)read every vector in one read transaction (call with `lock` held)."""
         own_txn = not db.in_transaction
@@ -219,7 +217,6 @@ class VectorCache:
                 buf[i * row_bytes:(i + 1) * row_bytes] = blob[start:start + row_bytes]
             vecs = np.frombuffer(bytes(buf), dtype=np.float32).reshape(len(rows), self.dim)
             ids = np.fromiter((r[0] for r in rows), np.int64, len(rows))
-            # Verify a sample against vec0's own answer.
             if len(rows):
                 sample = np.unique(np.linspace(0, len(rows) - 1, num=min(8, len(rows))).astype(int))
                 for i in sample.tolist():
@@ -240,12 +237,11 @@ class VectorCache:
             self.load(db)
             return
         if self._local_writes:
-            return  # a commit of ours may be landing; it patches or invalidates the cache itself
+            return
         if chunks_version(db) != self.version:
             log.info("vector cache: index changed by another process, reloading")
             self.load(db)
 
-    # -- local writes (called by Store.write) ------------------------------------
     def begin_local_write(self) -> None:
         with self.lock:
             self._local_writes += 1
@@ -254,11 +250,11 @@ class VectorCache:
         with self.lock:
             self._local_writes -= 1
             if delta is None or before is None or after is None or before == after:
-                return  # rolled back, or nothing touched the chunks
+                return
             if self.version == after:
-                return  # loaded after our commit: already included
+                return
             if self.version != before:
-                self.version = None  # missed a foreign change in between: reload on next use
+                self.version = None
                 return
             if self.too_big:
                 self.version = after
@@ -290,7 +286,6 @@ class VectorCache:
             self._files = files
         return self._files
 
-    # -- queries (call with `lock` held) -------------------------------------------
     def scores(self, q: np.ndarray) -> VectorScores:
         """Cosine similarity of q with every stored vector, with each row's chunk id, file id,
         modality code and kind code (views into the cache: use them with `lock` held). `valid`

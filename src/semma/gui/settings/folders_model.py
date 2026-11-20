@@ -62,7 +62,7 @@ def _inside(path: Path, parent: Path) -> bool:
     return path == parent or parent in path.parents
 
 
-NOTHING_INDEXED = "nothing_indexed"  # Problem.code: no folder and no external drives
+NOTHING_INDEXED = "nothing_indexed"
 
 
 def problems(values: FoldersValues, ctx: SettingsContext) -> list[Problem]:

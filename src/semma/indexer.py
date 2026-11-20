@@ -47,27 +47,16 @@ ExtractFn = Callable[[Path, str, Config], Iterator["Chunk"]]
 SNIPPET_CHARS = 200
 QUEUE_PAGE = 256
 
-# Bump when chunking, the document prompt format or the FTS layout changes: every file is then
-# re-queued (its old chunks stay searchable until replaced). Stored in meta 'index_format'.
-# 2: schema v3 (fts_chunks recreated with a prefix index), vectors renormalised in float32.
-INDEX_FORMAT_VERSION = 3  # 3: tiny text chunks are no longer embedded
+INDEX_FORMAT_VERSION = 3
 
 FLUSH_AFTER_S = 3.0
 FLUSH_AFTER_FILES = 16
-# Embedding failures of this many different files in a row (with no success in between) mean
-# the model/GPU is broken, not the files: the run stops instead of failing the whole queue.
 MAX_CONSECUTIVE_EMBED_FAILURES = 5
-# Transient storage errors (database locked by another process for longer than the busy
-# timeout): retry with backoff, then leave the file pending rather than recording a failure.
 STORE_RETRIES = 4
 STORE_BACKOFF_S = 0.5
-# Failed files are retried automatically up to this many attempts in total, the n-th retry no
-# sooner than n * RETRY_BACKOFF_S after the last attempt. `index --retry-failed` retries now.
 AUTO_RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_S = 86_400.0
 
-# The media settings the index was built with (meta 'media_max_seconds' / 'media_segment_seconds').
-# An index from before they were recorded was built with the old 30-minute default.
 MEDIA_KINDS = (ft.AUDIO, ft.VIDEO)
 LEGACY_MEDIA_MAX_SECONDS = 30 * 60
 
@@ -104,11 +93,11 @@ class FileRow:
 
 @dataclass
 class IndexStats:
-    total: int = 0  # files queued for this run (pending, after kind filter and limit)
+    total: int = 0
     indexed: int = 0
     failed: int = 0
-    skipped: int = 0  # changed or vanished since the scan; left pending for the next scan
-    deferred: int = 0  # could not be stored (database busy); left pending for the next run
+    skipped: int = 0
+    deferred: int = 0
     chunks: int = 0
     embed_seconds: float = 0.0
     seconds: float = 0.0
@@ -131,7 +120,7 @@ class _Record:
     locator: str
     snippet: str
     position: float | None
-    text: str | None  # full text for the FTS, text chunks only
+    text: str | None
     vector: np.ndarray | None = None
 
 
@@ -141,18 +130,16 @@ class _Job:
     records: list[_Record] = field(default_factory=list)
     unembedded: int = 0
     ended: bool = False
-    dead: bool = False  # failed or abandoned; its remaining chunks are ignored
+    dead: bool = False
 
 
 @dataclass
 class _Buffer:
     items: list[tuple[_Job, _Record, Any]] = field(default_factory=list)
-    started: float = 0.0  # monotonic time of the oldest item
-    files_at_start: int = 0  # files finished (ended/failed/skipped) when the oldest item arrived
+    started: float = 0.0
+    files_at_start: int = 0
 
 
-# Messages from the extraction thread. _TICK: nothing arrived for a while (lets the consumer
-# flush aged buffers while a slow file is being extracted).
 _CHUNK, _END, _SKIP, _FAIL, _DONE, _CRASH, _TICK = "chunk", "end", "skip", "fail", "done", "crash", "tick"
 
 
@@ -190,10 +177,9 @@ class Indexer:
         self.cfg = cfg
         self.embedder = embedder
         self.extract_fn = extract_fn
-        self.prefetch = prefetch  # False: extract and embed on one thread (for comparison/debugging)
-        self.ocr_setup: str | None = None  # the OCR languages last recorded (reconcile_ocr)
+        self.prefetch = prefetch
+        self.ocr_setup: str | None = None
 
-    # -- preparation -------------------------------------------------------------
     def prepare(self, rebuild: bool = False, retry_failed: bool = False) -> int:
         """Check the stored model and index format and re-queue files as needed.
 
@@ -210,7 +196,7 @@ class Indexer:
         if not store.model_matches(model, dim):
             if not rebuild:
                 raise ModelMismatch(store.get_meta("model_id"), model)
-            store.set_model(model, dim)  # drops every vector, marks everything pending
+            store.set_model(model, dim)
         elif store.get_meta("model_id") != model:
             store.set_meta("model_id", model)
         if rebuild:
@@ -248,7 +234,7 @@ class Indexer:
         old_limit_s, old_seg_s = store.get_meta("media_max_seconds"), store.get_meta("media_segment_seconds")
         if old_limit_s is None or old_seg_s is None:
             if not self._has_media_chunks():
-                old_limit_s, old_seg_s = str(limit), str(seg)  # nothing indexed yet: just record
+                old_limit_s, old_seg_s = str(limit), str(seg)
             else:
                 old_limit_s, old_seg_s = old_limit_s or str(LEGACY_MEDIA_MAX_SECONDS), old_seg_s or str(seg)
         old_limit, old_seg = float(old_limit_s), float(old_seg_s)
@@ -305,7 +291,6 @@ class Indexer:
             f"SELECT 1 FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.kind IN ({marks}) LIMIT 1",
             MEDIA_KINDS).fetchone() is not None
 
-    # -- queue ----------------------------------------------------------------
     def _queue_where(self, kinds: Sequence[str] | None) -> tuple[str, list[Any]]:
         where, args = "status = 'pending'", []
         if kinds:
@@ -338,7 +323,6 @@ class Indexer:
             if remaining > 0:
                 remaining -= len(rows)
 
-    # -- extraction (producer) --------------------------------------------------
     def _produce(self, rows: Iterator[FileRow], stop: threading.Event, cancelled: set[int]) -> Iterator[tuple]:
         extract_fn = self.extract_fn
         if extract_fn is None:
@@ -366,25 +350,23 @@ class Indexer:
                     if row.id in cancelled:
                         break
                     yield (_CHUNK, row, chunk)
-            except Exception as exc:  # per-file failure, keep going
+            except Exception as exc:
                 if stop.is_set():
-                    return  # e.g. Ctrl-C killed ffmpeg: not the file's fault, leave it pending
+                    return
                 yield (_FAIL, row, _error_text(exc))
                 continue
             finally:
                 close = getattr(chunks, "close", None)
                 if close:
-                    close()  # lets extractors clean up (e.g. kill ffmpeg) when abandoned
+                    close()
             if stop.is_set():
-                # The extraction may have been cut short by the interrupt (Ctrl-C also reaches
-                # ffmpeg); never commit a possibly truncated file as complete.
                 return
             yield (_END, row)
 
     def _threaded(self, rows: Iterator[FileRow], stop: threading.Event, cancelled: set[int]) -> Iterator[tuple]:
         """Run `_produce` on a worker thread, `prefetch_chunks` messages ahead."""
         q: queue.Queue[tuple] = queue.Queue(maxsize=max(1, self.cfg.prefetch_chunks))
-        abort = threading.Event()  # consumer is gone; producer must not block on a full queue
+        abort = threading.Event()
 
         def put(msg: tuple) -> bool:
             while not abort.is_set():
@@ -400,12 +382,12 @@ class Indexer:
                 for msg in self._produce(rows, stop, cancelled):
                     if not put(msg):
                         return
-            except BaseException as exc:  # e.g. the extract module failing to import
+            except BaseException as exc:
                 put((_CRASH, exc))
                 return
             finally:
-                self.store.release_thread()  # the queue reader's connection (one per run)
-                _release_extraction()  # the OCR engine: loaded per run, not for the daemon's life
+                self.store.release_thread()
+                _release_extraction()
             put((_DONE,))
 
         thread = threading.Thread(target=work, name="semma-extract", daemon=True)
@@ -415,7 +397,7 @@ class Indexer:
                 try:
                     msg = q.get(timeout=0.2)
                 except queue.Empty:
-                    if stop.is_set():  # don't wait for a slow extraction to yield
+                    if stop.is_set():
                         return
                     yield (_TICK,)
                     continue
@@ -428,7 +410,6 @@ class Indexer:
             abort.set()
             thread.join(timeout=30)
 
-    # -- run (consumer) ---------------------------------------------------------
     def run(self, limit: int | None = None, kinds: Sequence[str] | None = None,
             progress: ProgressFn | None = None, stop: threading.Event | None = None) -> IndexStats:
         stop = stop or threading.Event()
@@ -440,8 +421,8 @@ class Indexer:
         jobs: dict[int, _Job] = {}
         buffers: dict[str, _Buffer] = {}
         cancelled: set[int] = set()
-        files_finished = 0  # files whose extraction ended, failed or was skipped
-        consecutive_failures = 0  # files failing at embedding with no success in between
+        files_finished = 0
+        consecutive_failures = 0
 
         def report() -> None:
             stats.seconds = time.monotonic() - started
@@ -475,7 +456,6 @@ class Indexer:
                 vecs = self.embedder.embed_batch(modality, [it[2] for it in items], titles)
                 results: list[np.ndarray | BaseException] = list(vecs)
             except Exception:
-                # Isolate the bad input: retry one by one so only its file fails.
                 results = []
                 for (_, _, content), title in zip(items, titles, strict=True):
                     try:
@@ -485,9 +465,6 @@ class Indexer:
                 failed_files = {job.row.id for (job, _, _), r in zip(items, results, strict=True)
                                 if isinstance(r, BaseException)}
                 if len(failed_files) >= 2 and all(isinstance(r, BaseException) for r in results):
-                    # Inputs of several files all failing points at the model/GPU, not the files:
-                    # stop the run instead of marking the whole queue failed. (All chunks of ONE
-                    # file failing is that file's problem: it fails below and the run goes on.)
                     raise results[-1]  # type: ignore[misc]
             stats.embed_seconds += time.monotonic() - t
             for (job, rec, _), res in zip(items, results, strict=True):
@@ -500,7 +477,6 @@ class Indexer:
                         raise res
                     continue
                 consecutive_failures = 0
-                # Renormalise in float32: the model normalises in bfloat16 (norm error ~1%).
                 v = np.asarray(res, dtype=np.float32)
                 norm = float(np.linalg.norm(v))
                 rec.vector = v / norm if norm > 0 else v
@@ -530,7 +506,7 @@ class Indexer:
                     report()
                     flush_aged()
                     continue
-                if row.id in cancelled:  # failed already; the producer may still be sending its chunks
+                if row.id in cancelled:
                     continue
                 job = jobs.get(row.id)
                 if job is None:
@@ -559,8 +535,6 @@ class Indexer:
                 if stop.is_set():
                     break
                 flush_aged()
-            # Embed what is buffered: on a stop this finishes files that were fully extracted
-            # (a partial batch is quick); files still mid-extraction stay pending.
             for job in jobs.values():
                 if not job.ended:
                     job.dead = True
@@ -577,7 +551,6 @@ class Indexer:
         report()
         return stats
 
-    # -- database writes --------------------------------------------------------
     def _with_retry(self, what: str, fn: Callable[[], Any]) -> tuple[bool, Any]:
         """Run a store write, retrying transient OperationalErrors ("database is locked").
         Returns (ok, result); ok is False if it still failed after the retries."""
@@ -603,7 +576,7 @@ class Indexer:
         try:
             ok, stored = self._with_retry(f"storing {row.path}", lambda: self.store.replace_chunks(
                 row.id, row.size, row.mtime, row.kind, records))
-        except Exception as exc:  # a real problem with this file's data (not a busy database)
+        except Exception as exc:
             if self._mark_failed(row, f"storing: {_error_text(exc)}"):
                 stats.failed += 1
             else:
@@ -612,7 +585,7 @@ class Indexer:
         if not ok:
             stats.deferred += 1
         elif not stored:
-            stats.skipped += 1  # removed or changed by a concurrent scan; it is pending (or gone)
+            stats.skipped += 1
         else:
             stats.indexed += 1
             stats.chunks += len(job.records)

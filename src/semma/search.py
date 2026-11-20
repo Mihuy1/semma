@@ -82,54 +82,34 @@ if TYPE_CHECKING:
 
 FTS_LIMIT = 50
 MAX_QUERY_TERMS = 16
-TEXT_PREFIX_MIN = 3  # chunk text: only the last term gets a wildcard, and only from 3 letters
-FILE_PREFIX_MIN = 3  # fts_files (names/dirs): prefix='2 3' indexes make per-term prefixes cheap
+TEXT_PREFIX_MIN = 3
+FILE_PREFIX_MIN = 3
 FILE_LAST_PREFIX_MIN = 2
-# A chunk-text term matching more chunks than this (or than TEXT_MAX_DF_RATIO of all chunks,
-# whichever is larger) is dropped from the text query: ranking every chunk that contains "the"
-# costs ~60 ms at 100k chunks and says nothing the meaning score does not.
 TEXT_MAX_DF = 5000
 TEXT_MAX_DF_RATIO = 0.05
-_TERM = re.compile(r"[^\W_]+")  # letters/digits; drops every FTS5 operator, quote and hyphen
+_TERM = re.compile(r"[^\W_]+")
 
-# -- scoring (z units: standard deviations of this query's cosines over the whole index) ------
-MODALITY_MIN = 20  # modality in fewer distinct files: centre it on the overall mean instead
-STD_FLOOR = 0.02  # a tiny or uniform index must not blow small cosine gaps up into huge z
-MAX_MEANING_ROWS = 4096  # most chunks above the gate looked at (best z first)
-# Coverage of every query word adds 2 (DigUp's weight): enough to lift a file that has the
-# words and a middling meaning score over one with a slightly better meaning score and none of
-# the words, while one common word (coverage 0.5 -> +0.71) can't beat a clear meaning match.
+MODALITY_MIN = 20
+STD_FLOOR = 0.02
+MAX_MEANING_ROWS = 4096
 W_WORDS = 2.0
-# The file name contains every query word. Typing a file's name must put it first: with the
-# coverage it also gets (+2) it beats any file whose z is less than ~5 above its own, and z > 5
-# over the name file's is rare (the best match of a query usually sits at z 4-7).
 NAME_BONUS = 3.0
-# Lookups (is_lookup: "b0bbce05d5", "0xff32:0x0074"): meaning counts half, words double (DigUp).
 LOOKUP_MEANING_WEIGHT = 0.5
 LOOKUP_WORDS_FACTOR = 2.0
-# One (non-lookup) query word found only in a file's text adds W_WORDS * 0.5: "dog" mentioned in a
-# thesis (z 3.6 + 1) no longer beats the dog photo (z 5.2), while a file named after the word
-# keeps the full weight.
 SINGLE_TEXT_FACTOR = 0.5
-# A file without the query's words (a vector-only match) must come within this many z of the
-# query's best meaning match. Its tail is otherwise ~2-5% of the index for every query (z is
-# relative): on the local eval the tails behind a z 9-11 top sat at z 2-4.5. One word gets a
-# tighter margin (like the old 0.04 cosine margin for short queries): its meaning is vaguer and
-# its tail longer ("firefox": the Firefox screenshot at z 5.2, then console.txt at 3.5).
 Z_MARGIN = 3.0
 SINGLE_WORD_MARGIN = 1.5
-TYPE_BONUS = 1.0  # the file's kind is what a type word asks for ("screenshot of ...", "pdf")
-SCREENSHOT_BONUS = 0.5  # ... and "screenshot" asks for images that are screenshots in particular
-SCALE_SAMPLE = 2048  # sqlite-vec fallback: vectors sampled to estimate the scale
-MODALITY_SAMPLE_MIN = 64  # ... at least this many of each modality in MODALITY_MIN files
-SQLITE_LEXICAL_VECTORS = 50  # ... lexical files outside the KNN top-k scored by one chunk each
-SCALE_SAMPLE_MAX_AGE = 300.0  # seconds a sample is reused after the index changed
+TYPE_BONUS = 1.0
+SCREENSHOT_BONUS = 0.5
+SCALE_SAMPLE = 2048
+MODALITY_SAMPLE_MIN = 64
+SQLITE_LEXICAL_VECTORS = 50
+SCALE_SAMPLE_MAX_AGE = 300.0
 
 STOPWORDS = frozenset({
     "a", "an", "the", "of", "in", "on", "at", "to", "for", "with", "and", "or", "my", "me", "that",
     "this", "these", "those", "from", "about", "where", "what", "which", "who", "when", "is", "was",
     "are", "were", "be", "it", "its", "some", "any", "find", "show", "file", "files",
-    # Finnish
     "ja", "tai", "ei", "se", "ne", "että", "kun", "joka", "jossa", "mikä", "missä", "minun",
     "mun", "tämä", "tuo", "nämä", "jotka", "kanssa", "etsi", "näytä", "tiedosto", "tiedostot",
 })
@@ -144,7 +124,6 @@ TYPE_WORDS: dict[str, tuple[str, ...]] = {
     **dict.fromkeys(("video", "videos", "clip", "clips", "movie", "movies"), (ft.VIDEO,)),
     **dict.fromkeys(("audio", "song", "songs", "music", "podcast", "podcasts", "recording",
                      "recordings", "voice", "sound"), (ft.AUDIO,)),
-    # Finnish (common inflected forms; no stemming here)
     **dict.fromkeys(("kuvakaappaus", "kuvakaappaukset", "kuvakaappauksen", "kuvakaappauksia",
                      "kuvakaappauksessa", "kuva", "kuvat", "kuvan", "kuvia", "kuvassa", "valokuva",
                      "valokuvat", "valokuvan", "valokuvia", "valokuvassa"), (ft.IMAGE,)),
@@ -158,17 +137,13 @@ TYPE_WORDS: dict[str, tuple[str, ...]] = {
 }
 SCREENSHOT_WORDS = frozenset({"screenshot", "screenshots", "kuvakaappaus", "kuvakaappaukset",
                               "kuvakaappauksen", "kuvakaappauksia", "kuvakaappauksessa"})
-# Type words that hardly mean anything else: always a kind hint, never searched as words. The
-# rest ("image segmentation", "music theory", "sound card", "paper towel", "voice notes") are also
-# ordinary words: they stay content words and ask for their kind only where the phrasing says so
-# (HINT_AFTER/HINT_BEFORE). Finnish locatives ("kuvassa", "videolla": in a picture/video) are hints.
 UNAMBIGUOUS_TYPE_WORDS = SCREENSHOT_WORDS | frozenset({
     "photo", "photos", "pdf", "pdfs", "video", "videos",
     "valokuva", "valokuvat", "valokuvan", "valokuvia", "valokuvassa", "kuvassa",
     "videot", "videon", "videoita", "videolla", "videossa",
 })
-HINT_AFTER = frozenset({"of", "about"})  # "image of a dog", "paper about attention"
-HINT_BEFORE = frozenset({"in", "on", "from"})  # "... in a recording", "... from the paper"
+HINT_AFTER = frozenset({"of", "about"})
+HINT_BEFORE = frozenset({"in", "on", "from"})
 ARTICLES = frozenset({"a", "an", "the", "my", "some", "this", "that"})
 
 
@@ -176,17 +151,17 @@ ARTICLES = frozenset({"a", "an", "the", "my", "some", "this", "that"})
 class SearchResult:
     path: str
     kind: str
-    score: float  # z of the best chunk + word coverage + bonuses (see the module docstring)
-    similarity: float | None  # cosine similarity of the best chunk, None for lexical-only hits
+    score: float
+    similarity: float | None
     modality: str | None
     locator: str
     snippet: str
     position: float | None
     mtime: float
-    matched: list[str] = field(default_factory=list)  # signals that found it: vector/name/text/folder
-    duplicates: int = 0  # near-identical files collapsed into this result
+    matched: list[str] = field(default_factory=list)
+    duplicates: int = 0
     duplicate_paths: list[str] = field(default_factory=list)
-    z: float | None = None  # meaning z of the best chunk (None: not scored, lexical-only)
+    z: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -195,14 +170,14 @@ class SearchResult:
 @dataclass
 class SearchTimings:
     embed_ms: float = 0.0
-    search_ms: float = 0.0  # everything after the query embedding
+    search_ms: float = 0.0
 
 
 @dataclass
 class QueryWords:
-    terms: list[str]  # content words matched lexically
-    kinds: set[str]  # kinds asked for by type words
-    screenshot: bool  # a screenshot word was used
+    terms: list[str]
+    kinds: set[str]
+    screenshot: bool
 
 
 def query_terms(text: str) -> list[str]:
@@ -278,8 +253,8 @@ def _file_patterns(terms: list[str]) -> list[str]:
 class Scale:
     """This query's meaning scale: z = (cos - mean[modality] - center) / std."""
 
-    means: dict[str, float]  # per modality
-    overall: float  # for modalities in fewer than MODALITY_MIN files (or unseen; video falls back to image)
+    means: dict[str, float]
+    overall: float
     center: float
     std: float
 
@@ -329,7 +304,6 @@ def meaning_scale(sims: np.ndarray, modality: np.ndarray, names: Sequence[str],
         vi, im = names.index("video"), names.index("image")
         if not have[vi] and have[im]:
             means[vi] = raw_means[im]
-    # Centred values c = cos - means[modality]: sum c = s1 - w0*m, sum c^2 = s2 - 2*m*s1 + w0*m^2.
     center = float((s1 - w0 * means).sum() / total)
     var = float((s2 - 2 * means * s1 + w0 * means * means).sum() / total) - center * center
     std = max(float(np.sqrt(max(var, 0.0))), STD_FLOOR)
@@ -342,13 +316,13 @@ def _exists(path: str) -> bool:
     except (FileNotFoundError, NotADirectoryError):
         return False
     except OSError:
-        return True  # unreadable, unmounted for a moment...: keep it
+        return True
     return True
 
 
 @dataclass
 class _Meaning:
-    best: dict[int, tuple[float, float, int]]  # file_id -> (z, cosine, chunk_id) of its best chunk
+    best: dict[int, tuple[float, float, int]]
     scale: Scale
 
 
@@ -356,14 +330,14 @@ class _Meaning:
 class _Sample:
     """sqlite-vec fallback: a weighted sample of the index's vectors for the meaning scale."""
 
-    version: int  # chunks version it was taken at
-    time: float  # time.monotonic() when taken
-    mat: np.ndarray  # unit vectors (rows)
-    codes: np.ndarray  # modality code per row (names[code])
-    weights: np.ndarray  # chunks of its modality in the index each row stands for
+    version: int
+    time: float
+    mat: np.ndarray
+    codes: np.ndarray
+    weights: np.ndarray
     names: list[str]
-    files: list[int]  # distinct files per modality in the index
-    full: bool  # the sample is the whole index (so any growth reloads it at once)
+    files: list[int]
+    full: bool
 
 
 def _vector_min(z_max: float, gate: float, margin: float, bonus: float, floor: float) -> float:
@@ -375,9 +349,9 @@ def _vector_min(z_max: float, gate: float, margin: float, bonus: float, floor: f
 
 @dataclass
 class _WordCoverage:
-    named: set[int]             # file_id -> every query word matched in the file name
-    coverage: dict[int, float]  # weighted coverage (text/name = 1.0, folder-only = 0.5)
-    strong: dict[int, float]    # fraction of coverage terms matched in text or name
+    named: set[int]
+    coverage: dict[int, float]
+    strong: dict[int, float]
     text_hit: set[int]
     name_hit: set[int]
     dir_hit: set[int]
@@ -389,7 +363,7 @@ class Searcher:
         self.cfg = cfg
         self.embedder = embedder
         self.last_timings = SearchTimings()
-        self._sample: _Sample | None = None  # sqlite-vec fallback
+        self._sample: _Sample | None = None
 
     def search(self, query: str, limit: int = 10, kinds: Sequence[str] | None = None) -> list[SearchResult]:
         parsed = parse_query(query)
@@ -409,14 +383,13 @@ class Searcher:
         db = self.store.reader()
         own_txn = not db.in_transaction
         if own_txn:
-            db.execute("BEGIN")  # one snapshot for every query below (WAL)
+            db.execute("BEGIN")
         try:
             return self._search(db, qvec, query, limit, list(kinds) if kinds else None)
         finally:
             if own_txn:
                 db.rollback()
 
-    # -- pipeline -------------------------------------------------------------
     def _search(self, db: sqlite3.Connection, qvec: np.ndarray, query: str, limit: int,
                 kinds: list[str] | None) -> list[SearchResult]:
         parsed = parse_query(query)
@@ -431,8 +404,6 @@ class Searcher:
             else:
                 kinds = sorted(flt.kinds)
 
-        # Check/reload the vector cache first so `chunks_version` pins the WAL read snapshot
-        # before any FTS query runs (prevents reloading from a stale snapshot on concurrent writes).
         cache = self.store.vectors
         if cache is not None:
             with cache.lock:
@@ -459,8 +430,7 @@ class Searcher:
         file_patterns = _file_patterns(terms)
         text_patterns = self._selective(db, self._whole_if_indexed(db, _patterns(terms)))
 
-        # 2. Lexical candidates: chunk text (OR, bm25 order), names and folders (OR), full name match.
-        text_best: dict[int, int] = {}  # file_id -> chunk_id of its best text match
+        text_best: dict[int, int] = {}
         if text_patterns:
             match = " OR ".join(text_patterns)
             if file_cond:
@@ -481,7 +451,6 @@ class Searcher:
                 db, f"SELECT fts_files.rowid FROM fts_files{filtered_join} WHERE fts_files MATCH ? "
                     f"ORDER BY rank LIMIT {lim}", [*filter_args, match])]
 
-        # file id -> its best text chunk (None: matched by name/folder), in lexical rank order
         lexical: dict[int, int | None] = dict(text_best)
         if file_patterns:
             for f in itertools.chain(
@@ -491,7 +460,6 @@ class Searcher:
                     files_matching(f"{{dirs}} : ({' OR '.join(file_patterns)})", FTS_LIMIT * 2)):
                 lexical.setdefault(f, None)
 
-        # 3. Meaning.
         lookup = is_lookup(terms)
         single = len(terms) == 1 and not lookup
         margin = SINGLE_WORD_MARGIN if single else Z_MARGIN
@@ -505,11 +473,7 @@ class Searcher:
         cov = self._word_coverage(db, pool, file_patterns, text_patterns)
         files = self._files(db, pool)
 
-        # 4. Candidates and score.
         w_meaning, w_words = (LOOKUP_MEANING_WEIGHT, W_WORDS * LOOKUP_WORDS_FACTOR) if lookup else (1.0, W_WORDS)
-        # A file without the words must stand out absolutely (the query's best meaning match
-        # reaches cfg.z_floor) and relatively (within `margin` of that best match). Both count
-        # the kind bonus: "image of a dog" asks for images, whose z run lower.
         def z_kind(f: int) -> float:
             row = files.get(f)
             return best[f][0] + (bonus if row is not None and row["kind"] in words.kinds else 0.0)
@@ -524,12 +488,9 @@ class Searcher:
                 continue
             z = best[f][0] if f in best else None
             coverage = cov.coverage.get(f, 0.0)
-            # Folder words count for the score, but alone they don't make a file a candidate.
             lexical_ok = cov.strong.get(f, 0.0) >= 0.5 or f in cov.named
             if not (lexical_ok or (z is not None and z >= gate and z_kind(f) >= z_min)):
                 continue
-            # One word found only in a file's text is weak evidence ("dog" mentioned once in a
-            # thesis): half the word weight, unless the file is named after it.
             ww = w_words * SINGLE_TEXT_FACTOR if single and f not in cov.name_hit else w_words
             score = w_meaning * max(z or 0.0, 0.0) + ww * coverage ** 1.5
             if f in cov.named:
@@ -553,13 +514,10 @@ class Searcher:
 
         candidates = sorted(scores, key=lambda f: (-scores[f], -(best[f][1] if f in best else -1.0),
                                                    -files[f]["priority"], f))
-        # Enough for `limit` results after duplicates and vanished files are taken out.
         candidates = candidates[:max(limit * 5, 50)]
 
-        # The chunk to show: the best meaning chunk if it stands out, else the best text match.
-        # An image's own chunk has nothing to show: its OCR text with the words comes first.
         hit: dict[int, int] = {}
-        for f in candidates:  # (both orders of preference fall back to whatever exists)
+        for f in candidates:
             if f in text_best and files[f]["kind"] == ft.IMAGE:
                 hit[f] = text_best[f]
             elif f in best and (best[f][0] >= gate or f not in text_best):
@@ -567,13 +525,11 @@ class Searcher:
             elif f in text_best:
                 hit[f] = text_best[f]
 
-        # 5-6. Collapse near-duplicates, drop vanished files.
         groups = self._group_duplicates(db, candidates, files, hit)
         out: list[SearchResult] = []
         picks: list[tuple[int, list[int]]] = []
         rank = {f: i for i, f in enumerate(candidates)}
         for members in groups:
-            # The copy in the most important location; among equals the best-ranked one.
             ordered = sorted(members, key=lambda f: (-files[f]["priority"], rank[f]))
             rep = next((f for f in ordered if _exists(files[f]["path"])), None)
             if rep is None:
@@ -598,15 +554,12 @@ class Searcher:
             ))
         return out
 
-    # -- steps ----------------------------------------------------------------
     def _word_coverage(self, db: sqlite3.Connection, pool: set[int], file_patterns: list[str],
                        text_patterns: list[str]) -> _WordCoverage:
         """Per-word hits over `pool` for coverage, strong matches, and full-name matches."""
         if not file_patterns:
             return _WordCoverage(set(), {}, {}, set(), set(), set())
         text_of = {p.rstrip("*"): p for p in text_patterns}
-        # Words too common to search in chunk text (large indexes only) don't count for coverage,
-        # unless every word was dropped; `named` still requires every word in the file name.
         use_all = not text_of
         cov_count = len(file_patterns) if use_all else sum(
             1 for fp in file_patterns if fp.rstrip("*") in text_of)
@@ -618,12 +571,10 @@ class Searcher:
         text_hit: set[int] = set()
         name_hit: set[int] = set()
         dir_hit: set[int] = set()
-        ids = ",".join(map(str, pool))  # integers from SQLite: safe to inline
+        ids = ",".join(map(str, pool))
 
         for fp in file_patterns:
             tp = text_of.get(fp.rstrip("*"))
-            # (FTS5 with `rowid IN (...)` probes row by row: ~5 ms for 700 ids. Matching the
-            # whole small files table and intersecting is far cheaper.)
             in_name = pool.intersection(r[0] for r in self._fts(
                 db, "SELECT rowid FROM fts_files WHERE fts_files MATCH ?", [f"{{name}} : {fp}"]))
             for f in in_name:
@@ -684,7 +635,6 @@ class Searcher:
         best: dict[int, tuple[float, float, int]] = {}
         if not len(sims):
             return _Meaning(best, scale)
-        # The gate as one cosine threshold per modality: z >= gate <=> cos >= offset + gate * std.
         offset = scale.offsets(sc.names)
         ok = sims >= (offset + np.float32(gate * scale.std))[mods]
         if sc.valid is not None:
@@ -802,7 +752,6 @@ class Searcher:
                           MODALITY_SAMPLE_MIN if nfiles[m] >= MODALITY_MIN else 1))
             for m, n in per_mod.items()
         }
-        # Positions (within each modality, in chunk-id order) spread evenly over all of it.
         wanted = {m: {per_mod[m] * j // target[m] for j in range(target[m])} for m in names}
         seen = dict.fromkeys(names, 0)
         picked: list[tuple[int, str]] = []
@@ -850,11 +799,9 @@ class Searcher:
             return None if v is None else v / (np.linalg.norm(v) or 1.0)
 
         groups: list[list[int]] = []
-        # Group heads per modality, as matrices so each candidate is one matrix-vector product.
-        # A missing vector is a zero row (it never reaches a threshold > 0).
         dim = next((len(v) for v in vectors.values()), 0)
         kind_code = {k: i for i, k in enumerate(sorted({files[f]["kind"] for f in candidates}))}
-        heads: dict[str, tuple[list[int], np.ndarray, np.ndarray, np.ndarray]] = {}  # group, kind, hit, first
+        heads: dict[str, tuple[list[int], np.ndarray, np.ndarray, np.ndarray]] = {}
         for f in candidates:
             fc = first.get(f)
             hc = hit.get(f, fc[0] if fc else None)
@@ -892,7 +839,6 @@ class Searcher:
             groups.append([f])
         return groups
 
-    # -- helpers --------------------------------------------------------------
     def _whole_if_indexed(self, db: sqlite3.Connection, patterns: list[str]) -> list[str]:
         """Chunk text: the last word keeps its prefix wildcard only while it is in no chunk as
         typed (DigUp's rule): "transfo" finds "transformer", but a finished "transformer" does not
@@ -913,7 +859,7 @@ class Searcher:
         top = db.execute("SELECT max(id) FROM chunks").fetchone()[0] or 0
         cap = max(TEXT_MAX_DF, int(top * TEXT_MAX_DF_RATIO))
         if top <= cap:
-            return list(terms)  # small index: nothing can be too common
+            return list(terms)
         keep = []
         for t in terms:
             rows = self._fts(db, "SELECT count(*) FROM (SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH ? "
@@ -957,5 +903,4 @@ class Searcher:
         try:
             return db.execute(sql, args).fetchall()
         except sqlite3.OperationalError:
-            # The query builders only emit quoted terms, so this is a last line of defence.
             return []

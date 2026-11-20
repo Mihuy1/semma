@@ -55,7 +55,7 @@ def test_modifiers(tmp_path: Path) -> None:
     deep = tmp_path / "Documents/a/b/c/d/e/f/g/x.txt"
     s = scorer.score(deep, ft.TEXT, 50_000, NOW - 5 * DAY, True, tmp_path, NOW)
     assert s.parts["project"] == -20
-    assert s.parts["depth"] == -8  # 7 levels below Documents, 3 free, -2 each
+    assert s.parts["depth"] == -8
     assert s.parts["recent"] == 15
     tiny = scorer.score(tmp_path / "Pictures/icon.png", ft.IMAGE, 900, NOW, False, tmp_path, NOW)
     assert tiny.parts["tiny"] == -15
@@ -79,10 +79,10 @@ def test_scanner_exclusions_and_projects(tmp_path: Path) -> None:
     touch(tmp_path / "Documents/proj/src/main.py")
     touch(tmp_path / "Documents/proj/node_modules/lib/readme.md")
     touch(tmp_path / "Documents/proj/build/out.pdf")
-    touch(tmp_path / "Documents/build/manual.pdf")  # "build" outside a project is a real folder
+    touch(tmp_path / "Documents/build/manual.pdf")
     touch(tmp_path / "Downloads/SteamLibrary/game/intro.mp4")
     touch(tmp_path / "Downloads/movie.mp4", size=300_000)
-    touch(tmp_path / "Downloads/setup.exe")  # a lone installer does not make Downloads an app
+    touch(tmp_path / "Downloads/setup.exe")
     touch(tmp_path / "Games/Zomboid/game.exe")
     touch(tmp_path / "Games/Zomboid/fmod.dll")
     touch(tmp_path / "Games/Zomboid/steam_api64.dll")
@@ -169,8 +169,6 @@ def test_user_dirs_are_respected(tmp_path: Path) -> None:
     assert cfg.locations[tmp_path / "Asiakirjat"] == 40
 
 
-# -- regression tests for the review findings ---------------------------------------------------
-
 def scan_paths(cfg: Config, **kw) -> set[str]:
     return {Path(f.path).relative_to(cfg.home).as_posix() for f in Scanner(cfg).scan(now=NOW, **kw)}
 
@@ -220,7 +218,7 @@ def test_empty_root_is_treated_as_unmounted(tmp_path: Path) -> None:
     scanner = Scanner(cfg)
     gen = store.begin_scan()
     store.upsert_scanned(scanner.scan([drive], now=NOW), gen)
-    (drive / "a.md").unlink()  # the "drive" now looks like an empty mount point
+    (drive / "a.md").unlink()
     gen = store.begin_scan()
     store.upsert_scanned(scanner.scan([drive], now=NOW), gen)
     assert store.finish_scan(gen, scanner.stats.roots, scanner.stats.failed_dirs) == 0
@@ -233,12 +231,12 @@ def test_downloads_with_installer_and_dlls_is_not_pruned(tmp_path: Path) -> None
     touch(tmp_path / "Downloads/paper.pdf")
     touch(tmp_path / "Downloads/tool/tool.exe")
     touch(tmp_path / "Downloads/tool/one.dll")
-    touch(tmp_path / "Downloads/tool/notes.md")  # one exe + one dll: not an app install
+    touch(tmp_path / "Downloads/tool/notes.md")
     assert scan_paths(make_cfg(tmp_path)) == {"Downloads/paper.pdf", "Downloads/tool/notes.md"}
 
 
 def test_marker_in_root_or_anchor_is_not_a_project(tmp_path: Path) -> None:
-    touch(tmp_path / ".git/HEAD")  # dotfiles repo in ~
+    touch(tmp_path / ".git/HEAD")
     touch(tmp_path / "Documents/package.json")
     touch(tmp_path / "Documents/build/report.pdf")
     touch(tmp_path / "notes.md")
@@ -299,7 +297,6 @@ def test_scan_kinds_and_exclude_extensions_config(tmp_path: Path, capsys: pytest
     assert cfg.exclude_extensions == frozenset({"gif", "wav", "mp4"})
     assert capsys.readouterr().err == ""
 
-    # Unknown kind names and non-string entries warn and are ignored.
     cfg_bad = make_cfg(tmp_path)
     apply_overrides(cfg_bad, {
         "scan": {
@@ -314,7 +311,6 @@ def test_scan_kinds_and_exclude_extensions_config(tmp_path: Path, capsys: pytest
     assert cfg_bad.kinds == frozenset({"text"})
     assert cfg_bad.exclude_extensions == frozenset({"jpg"})
 
-    # A non-list kinds or exclude_extensions value warns and keeps the default.
     cfg_nonlist = make_cfg(tmp_path)
     apply_overrides(cfg_nonlist, {
         "scan": {
@@ -350,7 +346,6 @@ def test_scanner_skips_disabled_kinds_and_excluded_extensions(tmp_path: Path) ->
         "Documents/paper.pdf",
         "Pictures/photo.jpg",
     }
-    # filetypes.classify itself stays unfiltered for other callers.
     assert ft.classify("anim.GIF") == ft.IMAGE
     assert ft.classify("song.flac") == ft.AUDIO
 
@@ -382,7 +377,6 @@ def test_disallowed_files_disappear_on_next_full_scan(tmp_path: Path) -> None:
     assert store.db.execute("SELECT count(*) FROM files WHERE status = 'indexed'").fetchone()[0] == 5
     assert store.db.execute("SELECT count(*) FROM chunks").fetchone()[0] == 5
 
-    # Disable audio and exclude .gif, then run the next full scan.
     apply_overrides(cfg, {
         "scan": {
             "kinds": ["text", "pdf", "office", "image", "video"],
@@ -425,7 +419,6 @@ def test_scan_max_file_mb_config(tmp_path: Path, capsys: pytest.CaptureFixture[s
     }
     assert capsys.readouterr().err == ""
 
-    # Unknown kind names and non-positive / non-numeric values warn and are ignored.
     cfg_bad = make_cfg(tmp_path)
     apply_overrides(cfg_bad, {
         "scan": {
@@ -445,32 +438,28 @@ def test_scan_max_file_mb_config(tmp_path: Path, capsys: pytest.CaptureFixture[s
         assert bad in err
     assert cfg_bad.max_bytes == {**DEFAULT_MAX_BYTES, "audio": 512 * 2**20}
 
-    # A non-table max_file_mb warns and keeps the default.
     cfg_nondict = make_cfg(tmp_path)
     apply_overrides(cfg_nondict, {"scan": {"max_file_mb": 1024}})
     assert "scan.max_file_mb" in capsys.readouterr().err
     assert cfg_nondict.max_bytes == DEFAULT_MAX_BYTES
 
 
-
 def test_ocr_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     cfg = make_cfg(tmp_path)
-    assert cfg.ocr_enabled is False and cfg.ocr_languages is None  # off, automatic languages
+    assert cfg.ocr_enabled is False and cfg.ocr_languages is None
     assert check_unknown_keys({"ocr": {"enabled": True, "languages": ["eng"]}}) == []
     assert check_unknown_keys({"ocr": {"langs": ["eng"]}}) == ["ocr.langs"]
 
     apply_overrides(cfg, {"ocr": {"enabled": True, "languages": ["fin", "ENG", "fin", "chi_sim"]}})
     assert cfg.ocr_enabled is True
-    assert cfg.ocr_languages == ("fin", "eng", "chi_sim")  # duplicates dropped, order kept
+    assert cfg.ocr_languages == ("fin", "eng", "chi_sim")
     assert capsys.readouterr().err == ""
 
-    # More than three: the first three, with a warning. Bad entries are skipped.
     apply_overrides(cfg, {"ocr": {"languages": ["deu", "fra", 7, "English", "swe", "ita"]}})
     err = capsys.readouterr().err
     assert "7" in err and "'English'" in err and "more than 3" in err
     assert cfg.ocr_languages == ("deu", "fra", "swe")
 
-    # Wrong types warn and keep what was there; an empty list means automatic.
     apply_overrides(cfg, {"ocr": {"enabled": "yes", "languages": "eng"}})
     err = capsys.readouterr().err
     assert "ocr.enabled" in err and "ocr.languages" in err

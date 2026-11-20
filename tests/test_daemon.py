@@ -207,15 +207,13 @@ def make_cfg(home: Path) -> Config:
     cfg.db_path = home / "db" / "index.db"
     cfg.roots = [home / "Documents"]
     cfg.locations = {home / "Documents": 40}
-    # Tiny indexes: with n vectors no z-score can exceed sqrt(n - 1), so the default gate (2.0)
-    # and floor (4.5) are out of reach for 3-5 files.
     cfg.z_gate = 1.0
     cfg.z_floor = 0.0
     cfg.query_debounce_ms = 0
     cfg.gpu_check_seconds = 0.05
-    cfg.model_idle_unload_minutes = 0  # tests that need it set it
-    cfg.index_model_unload_seconds = 0  # tests that need it set it
-    cfg.onboarding_complete = True  # these tests are past first-run setup
+    cfg.model_idle_unload_minutes = 0
+    cfg.index_model_unload_seconds = 0
+    cfg.onboarding_complete = True
     cfg.canonicalize()
     return cfg
 
@@ -231,7 +229,7 @@ def make_daemon(cfg: Config, *, embedder: Any = None, extractor: FakeExtractor |
                 gpu: StubGpu | None = None, watcher: bool = True, **kw: Any) -> Daemon:
     kw.setdefault("runner_factory", None)
     kw.setdefault("gnome_factory", None)
-    kw.setdefault("model_download", None)  # don't fetch the real model
+    kw.setdefault("model_download", None)
     d = Daemon(cfg, embedder=embedder or LifecycleEmbedder(), extract_fn=extractor or FakeExtractor(),
                gpu_monitor=gpu, watcher_factory=StubWatcher if watcher else None, **kw)
     d.gpu_busy_recheck_s = 0.05
@@ -272,8 +270,6 @@ def home(tmp_path: Path) -> Path:
     return tmp_path
 
 
-# -- queries -------------------------------------------------------------------------------
-
 def test_search_after_startup_indexing(home: Path) -> None:
     async def main() -> None:
         d = make_daemon(make_cfg(home))
@@ -282,7 +278,7 @@ def test_search_after_startup_indexing(home: Path) -> None:
             await until_idle(d)
             res = await d.search("rocket launch")
             assert res and Path(res[0].path).name == "rockets.md"
-            assert await d.search("ro") == []  # too short
+            assert await d.search("ro") == []
             assert await d.search("image:") == []
             assert await d.search("image: a") == []
         finally:
@@ -331,9 +327,9 @@ def test_stale_query_is_dropped_during_debounce(home: Path) -> None:
             stale_after = time.monotonic() - t0
             r2 = await second
             assert r1 == []
-            assert stale_after < 0.07  # returned when the newer query arrived, not after the debounce
+            assert stale_after < 0.07
             assert r2 and Path(r2[0].path).name == "rockets.md"
-            assert emb.queries == ["rocket launch"]  # the stale query never reached the model
+            assert emb.queries == ["rocket launch"]
         finally:
             await d.stop()
 
@@ -407,13 +403,11 @@ def test_query_failure_returns_empty_and_daemon_survives(home: Path) -> None:
     asyncio.run(main())
 
 
-# -- idle unload ---------------------------------------------------------------------------
-
 def test_idle_unload_and_reload(home: Path) -> None:
     async def main() -> None:
         cfg = make_cfg(home)
-        cfg.model_idle_unload_minutes = 0.3 / 60  # 0.3 s
-        cfg.index_model_unload_seconds = 0.1  # 0.1 s
+        cfg.model_idle_unload_minutes = 0.3 / 60
+        cfg.index_model_unload_seconds = 0.1
         emb = LifecycleEmbedder()
         d = make_daemon(cfg, embedder=emb)
         d.start()
@@ -429,7 +423,6 @@ def test_idle_unload_and_reload(home: Path) -> None:
             assert st["index_model_loaded"] is False
             res = await d.search("bread oven")
             assert res and Path(res[0].path).name == "bread.txt"
-            # After the full index model was unloaded, the query loaded the text-only query model.
             assert emb.query_model_loaded and not emb.index_model_loaded
             assert emb.query_loads == 1 and emb.index_loads == 1
             st2 = await d.status()
@@ -448,26 +441,22 @@ def test_index_model_unloaded_after_grace_period_and_query_reuses_while_loaded(h
     async def main() -> None:
         cfg = make_cfg(home)
         cfg.index_model_unload_seconds = 0.25
-        cfg.model_idle_unload_minutes = 10  # long: only index grace period fires
+        cfg.model_idle_unload_minutes = 10
         emb = LifecycleEmbedder()
         d = make_daemon(cfg, embedder=emb)
         d.start()
         try:
             await until_idle(d)
-            # Right after indexing finishes, the full model is still loaded (within grace period).
             assert emb.index_model_loaded and not emb.query_model_loaded
-            # A query arriving while the full model is loaded reuses it instead of loading the query model.
             res = await d.search("rocket launch")
             assert res and Path(res[0].path).name == "rockets.md"
             assert emb.query_loads == 0 and emb.index_loads == 1
             assert emb.index_model_loaded and not emb.query_model_loaded
 
-            # After the grace period expires, the full index model is unloaded.
             await wait_until(lambda: not emb.index_model_loaded, 3, "index model grace-period unload")
             assert emb.index_unloads == 1
             assert not emb.loaded
 
-            # Now a query loads only the text-only query model, which stays loaded (10 min idle).
             res2 = await d.search("cats sofa")
             assert res2 and Path(res2[0].path).name == "cats.md"
             assert emb.query_model_loaded and not emb.index_model_loaded
@@ -513,7 +502,7 @@ def test_gpu_busy_unloads_gpu_query_device_only(
     async def main() -> None:
         monkeypatch.setattr(daemon_mod, "GPU_BUSY_UNLOAD_S", 0.05)
         cfg = make_cfg(home)
-        cfg.model_idle_unload_minutes = 10  # long normal idle; only GPU_BUSY_UNLOAD_S fires
+        cfg.model_idle_unload_minutes = 10
         cfg.index_model_unload_seconds = 0
         emb = LifecycleEmbedder()
         emb.query_device = query_device
@@ -575,8 +564,6 @@ def test_config_vulkan_query_device_and_llama_paths(tmp_path: Path, capsys: pyte
     assert capsys.readouterr().err == ""
 
 
-# -- GPU pause -----------------------------------------------------------------------------
-
 def test_config_pause_when_gpu_busy(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     from semma.config import apply_overrides, check_unknown_keys
 
@@ -613,7 +600,6 @@ def test_indexing_continues_when_gpu_busy_and_pause_disabled(home: Path) -> None
             st = await d.status()
             assert st["indexed"] == 3 and not st["paused"] and st["pause_reason"] == ""
             assert gpu.calls == 0
-            # User pause is unaffected by pause_when_gpu_busy=False.
             d.pause()
             await wait_until(lambda: d._phase == "paused", what="user pause")
             st_paused = await d.status()
@@ -637,7 +623,7 @@ def test_indexing_waits_while_gpu_busy_then_resumes(home: Path) -> None:
             assert st["paused"] and "GPU" in st["pause_reason"] and st["pending"] == 3 and st["indexed"] == 0
             calls = gpu.calls
             await asyncio.sleep(0.3)
-            assert gpu.calls > calls  # re-checked while paused
+            assert gpu.calls > calls
             assert (await d.status())["indexed"] == 0
             gpu.is_busy = False
             await until_idle(d)
@@ -688,7 +674,7 @@ def test_user_pause_and_resume(tmp_path: Path) -> None:
             n = st["indexed"]
             await asyncio.sleep(0.2)
             assert (await d.status())["indexed"] == n
-            assert await d.search("gardening note")  # search still works while paused
+            assert await d.search("gardening note")
             d.resume()
             await until_idle(d)
         finally:
@@ -711,7 +697,7 @@ def test_index_model_unloaded_while_indexing_is_paused_with_pending_files(tmp_pa
         try:
             await wait_until(lambda: emb.index_model_loaded, what="index model loaded")
             if why == "gpu_busy":
-                gpu.is_busy = True  # a game started: its VRAM matters more than our pending files
+                gpu.is_busy = True
             else:
                 d.pause()
             await wait_until(lambda: d._phase == "paused", 3, "pause")
@@ -730,8 +716,6 @@ def test_index_model_unloaded_while_indexing_is_paused_with_pending_files(tmp_pa
     asyncio.run(main())
 
 
-# -- watcher -------------------------------------------------------------------------------
-
 def test_watcher_change_rescans_and_indexes_new_file(home: Path) -> None:
     async def main() -> None:
         StubWatcher.instances.clear()
@@ -748,14 +732,13 @@ def test_watcher_change_rescans_and_indexes_new_file(home: Path) -> None:
             await wait_until(lambda: counts(cfg.db_path).get("indexed", 0) == 4, what="new file indexed")
             res = await d.search("volcano lava")
             assert res and Path(res[0].path).name == "volcano.md"
-            assert os.path.join(docs, "geology") in w.dirs and docs in w.dirs  # partial scan kept the rest
-            # A deleted directory is rescanned from its parent and its files disappear.
+            assert os.path.join(docs, "geology") in w.dirs and docs in w.dirs
             (home / "Documents" / "geology" / "volcano.md").unlink()
             (home / "Documents" / "geology").rmdir()
             w.on_change({os.path.join(docs, "geology")})
             await wait_until(lambda: sum(counts(cfg.db_path).values()) == 3, what="deleted file removed")
             await wait_until(lambda: os.path.join(docs, "geology") not in w.dirs, what="watch removed")
-            w.on_change({"*"})  # overflow: full rescan
+            w.on_change({"*"})
             await until_idle(d)
         finally:
             await d.stop()
@@ -774,17 +757,12 @@ def test_partial_scan_roots(tmp_path: Path) -> None:
     docs = tmp_path / "Documents"
     roots = cfg.effective_roots()
     assert partial_scan_roots(cfg, [str(docs / "notes" / "deep")], roots) == [docs / "notes" / "deep"]
-    # nested dirs collapse; a vanished dir becomes its parent
     assert partial_scan_roots(cfg, [str(docs / "notes" / "deep"), str(docs / "notes" / "gone")], roots) == [docs / "notes"]
-    # hidden or outside every root: nothing to scan
     assert partial_scan_roots(cfg, [str(docs / ".hidden"), "/nonexistent/x"], roots) == []
-    # inside a project, or a child the scanner would treat as an OS folder: full scan
     assert partial_scan_roots(cfg, [str(docs / "proj" / "src")], roots) is None
     assert partial_scan_roots(cfg, [str(docs / "old")], roots) is None
     assert partial_scan_roots(cfg, [str(docs)], roots) == [docs]
 
-
-# -- shutdown ------------------------------------------------------------------------------
 
 def test_graceful_stop_mid_indexing_leaves_db_consistent(tmp_path: Path) -> None:
     async def main() -> Config:
@@ -812,7 +790,7 @@ def test_graceful_stop_mid_indexing_leaves_db_consistent(tmp_path: Path) -> None
         chunks = db.execute("SELECT count(*) FROM chunks").fetchone()[0]
         vecs = db.execute("SELECT count(*) FROM vec_chunks").fetchone()[0]
         fts = db.execute("SELECT count(*) FROM fts_chunks_docsize").fetchone()[0]
-        assert chunks == vecs == fts == 3 * st["indexed"]  # every indexed file complete, nothing partial
+        assert chunks == vecs == fts == 3 * st["indexed"]
         partial = db.execute("SELECT count(*) FROM files f WHERE status = 'indexed' AND "
                              "(SELECT count(*) FROM chunks c WHERE c.file_id = f.id) != 3").fetchone()[0]
         assert partial == 0
@@ -862,8 +840,6 @@ def test_indexing_slices_do_not_leak_connections(tmp_path: Path) -> None:
         store.close()
 
 
-# -- status details (what a status window polls every second) ------------------------------
-
 def test_status_counts_per_kind_and_failed_files(home: Path) -> None:
     async def main() -> None:
         (home / "Documents" / "report.pdf").write_text("quarterly figures", encoding="utf-8")
@@ -884,7 +860,6 @@ def test_status_counts_per_kind_and_failed_files(home: Path) -> None:
             assert set(failed) == {str(home / "Documents" / "report.pdf"), str(home / "Documents" / "bread.txt")}
             assert "broken pdf" in failed[str(home / "Documents" / "report.pdf")]
             assert len(await d.failed(1)) == 1
-            # The per-kind counts read only the (status, kind) index, not the table.
             plan = " ".join(r[3] for r in d.store.reader().execute(
                 "EXPLAIN QUERY PLAN SELECT status, kind, count(*) FROM files GROUP BY status, kind"))
             assert "files_status_kind" in plan, plan
@@ -962,7 +937,7 @@ def test_status_run_progress_counts_failures(tmp_path: Path) -> None:
 class SlowScanner(daemon_mod.Scanner):
     def scan(self, roots=None, now=None):
         for f in super().scan(roots, now):
-            time.sleep(0.05)  # the walk is suspended here, inside f's directory
+            time.sleep(0.05)
             yield f
 
 
@@ -970,7 +945,7 @@ def test_status_reports_scan_progress(tmp_path: Path, monkeypatch: pytest.Monkey
     async def main() -> None:
         write_docs(tmp_path, {f"a{i}.md": "alpha" for i in range(5)}, sub="one")
         write_docs(tmp_path, {f"b{i}.md": "beta" for i in range(5)}, sub="two")
-        (tmp_path / "Documents" / "two" / "notes.bin").write_bytes(b"x")  # seen, not indexable
+        (tmp_path / "Documents" / "two" / "notes.bin").write_bytes(b"x")
         monkeypatch.setattr(daemon_mod, "Scanner", SlowScanner)
         d = make_daemon(make_cfg(tmp_path))
         d.start()
@@ -1013,7 +988,7 @@ def test_status_reports_model_download(tmp_path: Path, monkeypatch: pytest.Monke
     async def main() -> None:
         d = make_daemon(make_cfg(tmp_path), embedder=DownloadingEmbedder(models))
         try:
-            st = await d.status()  # an interrupted download is not running
+            st = await d.status()
             assert st["state"] == "idle" and st["download_file"] == ""
             assert (st["download_done"], st["download_total"], st["download_all_total"]) == (0, 0, 0)
             with (models / "t.gguf.lock").open("w") as lock:
@@ -1024,7 +999,6 @@ def test_status_reports_model_download(tmp_path: Path, monkeypatch: pytest.Monke
             assert (st["download_all_done"], st["download_all_total"]) == (250, 4000)
             st = await d.status()
             assert st["state"] == "idle" and st["download_file"] == ""
-            # A probe that fails only hides the download.
             d.embedder.download_progress = lambda: 1 / 0
             assert (await d.status())["download_file"] == ""
         finally:
@@ -1056,7 +1030,6 @@ def test_ctl_status_output(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from semma import cli
 
     plain = {"state": "indexing", "pending": 3, "indexed": 10, "failed": 1, "last_scan_at": 0.0, "uptime": 600.0}
-    # An older daemon: only the plain keys, printed as before.
     assert cli.format_daemon_status(plain, home) == [
         "state         indexing", "pending       3", "indexed       10", "failed        1",
         "last_scan_at  0.0", "uptime        10 min"]
@@ -1077,7 +1050,6 @@ def test_ctl_status_output(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert "Indexing run: 5 of 40 files (12%), 1 failed, 2.3 files/s" in text
     assert lines[-3].split() == ["kind", "pending", "indexed", "failed"]
     assert lines[-2].split() == ["text", "3", "8", "0"] and lines[-1].split() == ["pdf", "0", "2", "1"]
-    # Nothing running: no progress sections.
     idle = {**st, "download_file": "", "run_total": 0, "run_done": 0, "scan_dir": "", "scan_dirs": 0}
     text = "\n".join(cli.format_daemon_status(idle, home))
     assert "Downloading" not in text and "Scanning" not in text and "Indexing run" not in text
@@ -1101,7 +1073,6 @@ def test_light_state_keys_pause_and_no_db(home: Path, monkeypatch: pytest.Monkey
         d.start()
         try:
             await until_idle(d)
-            # light_state() must not touch the store or use the status executor.
             monkeypatch.setattr(d.store, "reader", lambda: (_ for _ in ()).throw(AssertionError("DB touched")))
             monkeypatch.setattr(d._status_exec, "submit",
                                 lambda *a, **kw: (_ for _ in ()).throw(AssertionError("executor used")))
@@ -1186,8 +1157,6 @@ def test_daemon_client_state_and_fallback(monkeypatch: pytest.MonkeyPatch) -> No
         c.close()
 
 
-# -- D-Bus (session bus, throwaway names) --------------------------------------------------
-
 @needs_bus
 def test_control_interface_over_dbus(home: Path) -> None:
     async def main() -> None:
@@ -1231,7 +1200,6 @@ def test_control_interface_over_dbus(home: Path) -> None:
             await control_call("Rescan", bus_name=name)
             await until_idle(d)
             assert (await control_call("State", bus_name=name))["paused"] is False
-            # A second daemon cannot take the name.
             d2 = make_daemon(cfg, bus_name=name)
             assert await serve(d2) == 1
         finally:

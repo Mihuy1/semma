@@ -18,8 +18,6 @@ from typing import Any
 from .. import dbus_names
 from ..daemon import DaemonNotRunning, control_call
 
-# Error names of a call to a method, interface or object the daemon does not have (an older
-# daemon without `ReloadConfig`).
 UNKNOWN_METHOD_ERRORS = frozenset({
     "org.freedesktop.DBus.Error.UnknownMethod",
     "org.freedesktop.DBus.Error.UnknownInterface",
@@ -86,7 +84,6 @@ class DaemonClient:
         except DaemonNotRunning:
             return None
 
-    # -- the calls ------------------------------------------------------------------------
     def status(self) -> Future[dict[str, Any] | None]:
         return self.submit(self._or_none("Status"))
 

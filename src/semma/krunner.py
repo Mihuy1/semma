@@ -110,14 +110,9 @@ def format_subtext(result: SearchResult, home: Path | None = None) -> str:
     return base
 
 
-# A result scoring at least this (z of 4, or z 2 + every query word, or a file-name match) is a
-# strong match and gets KRunner's "Moderate" category relevance; the rest get "Low".
 STRONG_SCORE = 4.0
-# ... but only with lexical evidence (the query's words in its name or text) or a meaning match
-# that stands far out: z is relative, so every query has a z 3-4 tail; Strong/Moderate vector-only
-# tops sit at z 5-11 (a lone "dog" photo 5.2, "firefox" screenshot 5.2).
 MODERATE_Z = 5.0
-RELEVANCE_STEP = 1e-4  # relevances strictly decrease by at least this, so ties never reorder
+RELEVANCE_STEP = 1e-4
 WEAK_SCORE_RATIO = 0.5
 
 
@@ -341,7 +336,6 @@ class KRunnerService(ServiceInterface):
                 pending_results.append(r)
 
         if not pending_results or self._thumbnail_budget <= 0:
-            # Even if budget <= 0, kick off background generation so next call has it cached.
             for r in pending_results:
                 t = asyncio.create_task(self._safe_thumb(r))
                 self._background_tasks.add(t)

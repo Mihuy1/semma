@@ -45,7 +45,6 @@ def test_freedesktop_cache_hit_and_mtime_mismatch(tmp_path: Path) -> None:
     normal_dir = cache_dir / "thumbnails" / "normal"
     normal_dir.mkdir(parents=True)
 
-    # Underlying file does not even need to be decoded if freedesktop cache hits!
     target = tmp_path / "photo with spaces.jpg"
     target.write_bytes(b"not-a-valid-jpeg-so-generation-would-fail")
     mtime = 1730000123.75
@@ -53,7 +52,6 @@ def test_freedesktop_cache_hit_and_mtime_mismatch(tmp_path: Path) -> None:
     digest = freedesktop_md5(target)
     fd_png = normal_dir / f"{digest}.png"
 
-    # 1. Mismatching Thumb::MTime -> ignored, falls through to generation (which returns None).
     img = Image.new("RGBA", (128, 64), (10, 200, 30, 255))
     meta_wrong = PngImagePlugin.PngInfo()
     meta_wrong.add_text("Thumb::MTime", str(int(mtime) - 1))
@@ -62,7 +60,6 @@ def test_freedesktop_cache_hit_and_mtime_mismatch(tmp_path: Path) -> None:
 
     assert make_icon_data(target, ft.IMAGE, mtime, size=64, cache_dir=cache_dir) is None
 
-    # 2. Matching Thumb::MTime -> hits freedesktop cache and returns scaled RGBA icon-data.
     meta_ok = PngImagePlugin.PngInfo()
     meta_ok.add_text("Thumb::MTime", str(int(mtime)))
     meta_ok.add_text("Thumb::URI", target.as_uri())
@@ -72,7 +69,6 @@ def test_freedesktop_cache_hit_and_mtime_mismatch(tmp_path: Path) -> None:
     _check_icon_data(icon, expected_longest=64)
     w, h, _, _, _, _, raw = icon
     assert (w, h) == (64, 32)
-    # First pixel should be green-ish (10, 200, 30, 255)
     assert list(raw[:4]) == [10, 200, 30, 255]
 
 
@@ -80,24 +76,20 @@ def test_own_cache_and_exif_rotated_jpeg_generation(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     jpg_path = tmp_path / "rotated.jpg"
 
-    # Create a 200x100 image (wider than tall) with EXIF Orientation=6 (Rotate 90 CW -> 100x200).
     raw_img = Image.new("RGB", (200, 100), (220, 40, 50))
     exif = raw_img.getexif()
-    exif[0x0112] = 6  # Orientation = 6 (90 CW)
+    exif[0x0112] = 6
     raw_img.save(jpg_path, format="JPEG", exif=exif.tobytes())
     mtime = jpg_path.stat().st_mtime
 
     icon = make_icon_data(jpg_path, ft.IMAGE, mtime, size=64, cache_dir=cache_dir)
     _check_icon_data(icon, expected_longest=64)
     w, h, _, _, _, _, _ = icon
-    # Because of EXIF rotation 6, the resulting thumbnail must be taller than wide (32x64).
     assert (w, h) == (32, 64)
 
-    # Check that our own cache file was written atomically.
     own_file = cache_dir / "semma" / "thumbnails" / f"{own_cache_key(str(jpg_path), mtime, 64)}.png"
     assert own_file.is_file()
 
-    # Delete original image: second call with same path+mtime+size must hit our own cache!
     jpg_path.unlink()
     icon_cached = make_icon_data(jpg_path, ft.IMAGE, mtime, size=64, cache_dir=cache_dir)
     _check_icon_data(icon_cached, expected_longest=64)
@@ -118,7 +110,6 @@ def test_png_generation_and_lru(tmp_path: Path) -> None:
     _check_icon_data(icon, expected_longest=64)
     assert (icon[0], icon[1]) == (64, 32)
 
-    # Now in memory LRU
     assert thumb.get_cached(str(png_path), mtime, 64) == icon
 
 
@@ -151,7 +142,6 @@ def test_video_thumbnail_via_ffmpeg(tmp_path: Path) -> None:
     w, h = icon[0], icon[1]
     assert (w, h) == (64, 48)
 
-    # Verify own cache was populated for video as well
     own_file = cache_dir / "semma" / "thumbnails" / f"{own_cache_key(str(vid_path), mtime, 64)}.png"
     assert own_file.is_file()
 
@@ -175,15 +165,12 @@ def test_slow_thumbnail_continues_in_background_and_caches(tmp_path: Path, monke
     thumb = Thumbnailer(cache_dir=cache_dir)
 
     async def scenario() -> None:
-        # Wait with a tight budget (20 ms): should time out, but generation continues in background.
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(thumb.icon_data(str(img_path), ft.IMAGE, mtime), timeout=0.02)
 
-        # Wait enough for background thread to finish.
         await asyncio.sleep(0.15)
         assert thumb.get_cached(str(img_path), mtime) is not None
 
-        # Second call returns immediately from LRU without invoking make_icon_data again.
         t0 = time.perf_counter()
         icon = await thumb.icon_data(str(img_path), ft.IMAGE, mtime)
         dt = time.perf_counter() - t0

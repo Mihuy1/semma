@@ -37,9 +37,6 @@ def run(path: Path, kind: str, cfg: Config):
     return list(extract(path, kind, cfg))
 
 
-# ---------------------------------------------------------------------------------- text
-
-
 @pytest.mark.parametrize(
     "encoding", ["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "latin-1", "cp1252"]
 )
@@ -110,19 +107,16 @@ def test_markdown_chunking(tmp_path, cfg):
     assert len(chunks) > 5
     for c in chunks:
         assert c.content.strip()
-        assert len(c.content) <= MAX_CHARS + 40  # + a prefixed heading
+        assert len(c.content) <= MAX_CHARS + 40
         assert c.locator.startswith("line ")
         assert c.position == int(c.locator.split()[1].strip("·"))
         assert len(c.snippet) <= 161
-    # headings found, code-fence comment is not a heading
     titles = [t for _, t in find_headings(text, ".md")]
     assert titles[:2] == ["Title", "Section 1"] and "not a heading inside code" not in titles
-    # line numbers are correct
     lines = text.split("\n")
     for c in chunks:
         line = int(c.position)
         assert lines[line - 1].strip() and lines[line - 1].strip()[:15] in c.content
-    # chunks after the first section boundary carry their section in locator/content
     assert any("Section" in c.locator for c in chunks)
 
 
@@ -145,7 +139,7 @@ def test_heading_detection_linear_on_pathological_input(tmp_path, cfg, suffix):
     space_line = {"md": "# x", "org": "* x", "adoc": "= x", "rst": "x", "tex": "\\section{x"}[suffix]
     under = "\n====" if suffix == "rst" else ""
     body = (space_line + " " * 200_000 + "y" + under + "\n") * 5
-    body += (space_line + " " * 290 + "y" + under + "\n") * 2_000  # just under the line limit
+    body += (space_line + " " * 290 + "y" + under + "\n") * 2_000
     body += "```\n# h\n" * 80_000 if suffix == "md" else "* h\n= h\nh\n===\n" * 80_000
     p = tmp_path / f"evil.{suffix}"
     p.write_text(body)
@@ -159,7 +153,7 @@ def test_heading_detection_linear_on_pathological_input(tmp_path, cfg, suffix):
 def test_chunks_per_file_capped(tmp_path, cfg):
     p = tmp_path / "huge.log"
     line = "2026-01-01 12:00:00 INFO service started, handling request number {} for user\n"
-    p.write_text("".join(line.format(i) for i in range(50_000)))  # ~4 MB: ~2,000 chunks uncapped
+    p.write_text("".join(line.format(i) for i in range(50_000)))
     chunks = run(p, "text", cfg)
     assert len(chunks) == MAX_CHUNKS == 1000
     assert chunks[0].locator == "line 1"
@@ -174,8 +168,7 @@ def test_chunker_sizes_and_overlap():
         assert 1000 <= len(a.text) <= MAX_CHARS
         overlap = a.end - b.start
         assert 0.08 * len(a.text) <= overlap <= 0.2 * len(a.text), overlap
-        assert b.text[0].isupper()  # overlap starts at a sentence boundary
-    # all text covered, in order
+        assert b.text[0].isupper()
     assert spans[0].start == 0 and spans[-1].end == len(text)
     assert all(a.start < b.start for a, b in zip(spans, spans[1:]))
 
@@ -195,9 +188,6 @@ def test_snippet():
     long = "word " * 100
     s = make_snippet(long)
     assert len(s) <= 161 and s.endswith("…")
-
-
-# ---------------------------------------------------------------------------------- PDF
 
 
 def _pdf_escape(s: str) -> bytes:
@@ -244,7 +234,6 @@ def test_pdf_text_pages(tmp_path, cfg):
     page2 = [c for c in chunks if c.locator == "p. 2"]
     assert len(page2) >= 2 and all(c.modality == "text" and c.position == 2 for c in page2)
     assert "Rivi 59" in page2[-1].content
-    # the empty third page becomes an image chunk
     page3 = [c for c in chunks if c.locator == "p. 3"]
     assert len(page3) == 1 and page3[0].modality == "image"
     img = page3[0].content
@@ -284,7 +273,7 @@ def test_pdf_bad_page_skipped(tmp_path, cfg, monkeypatch):
     monkeypatch.setattr(pdf_mod, "_page_text", flaky_text)
     monkeypatch.setattr(pdf_mod, "_render", broken_render)
     chunks = run(p, "pdf", cfg)
-    assert [c.locator for c in chunks] == ["p. 1"]  # page 2 text and page 3 render failed
+    assert [c.locator for c in chunks] == ["p. 1"]
     monkeypatch.setattr(pdf_mod, "_page_text", lambda page: (_ for _ in ()).throw(ValueError("bad")))
     with pytest.raises(ExtractionError, match="no page could be read"):
         run(p, "pdf", cfg)
@@ -298,9 +287,6 @@ def test_pdf_broken(tmp_path, cfg):
     p.write_bytes(b"%PDF-1.4\nthis is not really a pdf\n")
     with pytest.raises(ExtractionError):
         run(p, "pdf", cfg)
-
-
-# --------------------------------------------------------------------------------- office
 
 
 def write_zip(path: Path, members: dict[str, str | bytes]) -> None:
@@ -340,13 +326,12 @@ def test_odt(tmp_path, cfg):
     chunks = run(p, "office", cfg)
     assert len(chunks) >= 3
     first = chunks[0].content
-    assert "Sisällys" not in first  # table of contents skipped
+    assert "Sisällys" not in first
     assert first.startswith("Johdanto\n\nA   B\tC\nD span\n tail")
     assert "Alaviite." in first and "1Alaviite" not in first
     assert "Listakohta yksi" in first and "Solu 1 | Solu 2" in first
     assert chunks[0].locator == "§ Johdanto" and chunks[0].position is None
     assert any(c.locator == "§ Luku 2" for c in chunks)
-    # a chunk inside a section that doesn't start with its heading gets it as context
     for c in chunks:
         if c.locator.startswith("§ Luku"):
             assert c.content.startswith(c.locator[2:])
@@ -451,7 +436,7 @@ def test_pptx_presentation_order(tmp_path, cfg):
         "ppt/slides/slide1.xml": slide("Toinen esityksessä"),
         "ppt/slides/slide2.xml": slide("Kolmas esityksessä"),
         "ppt/slides/slide3.xml": slide("Ensimmäinen esityksessä"),
-        "ppt/slides/slide4.xml": slide("Ei esityksessä"),  # orphan part: not in sldIdLst
+        "ppt/slides/slide4.xml": slide("Ei esityksessä"),
     })
     chunks = run(p, "office", cfg)
     assert [(c.locator, c.content) for c in chunks] == [
@@ -553,7 +538,6 @@ def test_office_rejects_dtd_in_any_encoding(tmp_path, cfg, encoding):
     write_zip(p, {"word/document.xml": data})
     with pytest.raises(ExtractionError, match="DTD"):
         run(p, "office", cfg)
-    # a DTD-free UTF-16 part still parses
     ok = f'<?xml version="1.0" encoding="UTF-16"?><d>{FINNISH}</d>'.encode("utf-16")
     assert parse_xml(ok).text == FINNISH
 
@@ -566,9 +550,6 @@ def test_office_zip_bomb_guard(tmp_path, cfg, monkeypatch):
     write_zip(p, {"word/document.xml": f"<w:document {W}><w:body>" + " " * 50_000 + "</w:body></w:document>"})
     with pytest.raises(ExtractionError, match="too large"):
         run(p, "office", cfg)
-
-
-# --------------------------------------------------------------------------------- images
 
 
 def test_png_alpha_composited_on_white(tmp_path, cfg):
@@ -585,7 +566,7 @@ def test_png_alpha_composited_on_white(tmp_path, cfg):
 def test_jpeg_exif_rotation_and_downscale(tmp_path, cfg):
     img = Image.new("RGB", (4000, 2000), "green")
     exif = Image.Exif()
-    exif[0x0112] = 6  # rotate 90° CW on display
+    exif[0x0112] = 6
     p = tmp_path / "r.jpg"
     img.save(p, exif=exif)
     (c,) = run(p, "image", cfg)
@@ -623,7 +604,7 @@ def test_sixteen_bit_and_cmyk(tmp_path, cfg):
 def test_heic_through_ffmpeg(cfg):
     if not shutil.which("ffmpeg"):
         pytest.skip("no ffmpeg")
-    p = Path(__file__).parent / "data" / "photo.heic"  # 128x96 orange, blue top-left quarter
+    p = Path(__file__).parent / "data" / "photo.heic"
     try:
         (c,) = run(p, "image", cfg)
     except ExtractionError as e:  # pragma: no cover - an ffmpeg without an HEVC decoder
@@ -649,7 +630,7 @@ def test_image_pixel_limit_about_100_megapixels(tmp_path, cfg):
     image_mod._init()
     assert Image.MAX_IMAGE_PIXELS * 2 <= 100_000_000
     p = tmp_path / "huge.png"
-    p.write_bytes(_png_header(11_000, 10_000))  # 110 MP, rejected from the header alone
+    p.write_bytes(_png_header(11_000, 10_000))
     with pytest.raises(ExtractionError, match="too large"):
         run(p, "image", cfg)
 

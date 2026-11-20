@@ -38,18 +38,16 @@ def make_env(tmp_path: Path, docs: dict[str, str]):
     return cfg, store
 
 
-# -- 1. one un-embeddable file must not abort the run ---------------------------------------------
-
 def test_poison_file_fails_alone_and_run_continues(tmp_path: Path) -> None:
     docs = {f"good{i}.md": f"good document number {i}" for i in range(5)} | {"bad.md": "x"}
     cfg, store = make_env(tmp_path, docs)
     now = time.time() + 10
-    os.utime(tmp_path / "Documents/bad.md", (now, now))  # newest -> head of the queue
+    os.utime(tmp_path / "Documents/bad.md", (now, now))
     scan(store, cfg)
-    bad_chunks = [f"BAD chunk {i}" for i in range(16)]  # two full batches, all from one file
+    bad_chunks = [f"BAD chunk {i}" for i in range(16)]
     emb = FakeEmbedder()
     emb.fail_on = set(bad_chunks)
-    for _ in range(2):  # the second run must not trip over it either
+    for _ in range(2):
         Indexer(store, cfg, emb, extract_fn=FakeExtractor({"bad.md": bad_chunks})).run()
     st = statuses(store)
     assert st.pop("bad.md") == "failed"
@@ -58,7 +56,7 @@ def test_poison_file_fails_alone_and_run_continues(tmp_path: Path) -> None:
 
 def test_consecutive_failed_files_still_abort(tmp_path: Path) -> None:
     cfg = make_cfg(tmp_path)
-    cfg.batch_sizes["text"] = 1  # every batch holds one file, so only the streak rule can trigger
+    cfg.batch_sizes["text"] = 1
     docs = {f"f{i}.md": f"text {i}" for i in range(10)}
     write_docs(tmp_path, docs)
     store = Store(cfg.db_path)
@@ -72,8 +70,6 @@ def test_consecutive_failed_files_still_abort(tmp_path: Path) -> None:
     assert list(st.values()).count("pending") == 10 - indexer_mod.MAX_CONSECUTIVE_EMBED_FAILURES
 
 
-# -- 2. one connection per thread ---------------------------------------------------------------
-
 def test_other_thread_neither_sees_nor_commits_an_open_transaction(tmp_path: Path) -> None:
     cfg, store = make_env(tmp_path, {"a.md": "alpha beta gamma"})
     run(cfg, store)
@@ -81,7 +77,7 @@ def test_other_thread_neither_sees_nor_commits_an_open_transaction(tmp_path: Pat
 
     def other() -> None:
         seen.append(table_counts_on(store.db))
-        store.set_meta("last_scan_at", "1")  # waits for the open write transaction to end
+        store.set_meta("last_scan_at", "1")
 
     t = threading.Thread(target=other)
     with pytest.raises(RuntimeError), store.write() as (db, _):
@@ -90,8 +86,8 @@ def test_other_thread_neither_sees_nor_commits_an_open_transaction(tmp_path: Pat
         t.join(0.3)
         raise RuntimeError("the commit fails")
     t.join()
-    assert seen == [(1, 1)]  # committed state only
-    assert table_counts(store) == (1, 1, 1)  # rolled back, not committed by the other thread
+    assert seen == [(1, 1)]
+    assert table_counts(store) == (1, 1, 1)
     assert store.get_meta("last_scan_at") == "1"
     store.close()
 
@@ -156,7 +152,7 @@ def test_concurrent_index_search_and_scan(tmp_path: Path, cache: bool) -> None:
     assert not errors, errors
     chunks, vectors, fts = table_counts(store)
     assert chunks == vectors == fts
-    run(cfg, store)  # whatever was skipped meanwhile
+    run(cfg, store)
     scan(store, cfg)
     run(cfg, store)
     assert set(statuses(store).values()) == {"indexed"}
@@ -168,17 +164,13 @@ def test_concurrent_index_search_and_scan(tmp_path: Path, cache: bool) -> None:
     store.close()
 
 
-# -- 3. retries, attempts, index format and model changes -----------------------------------------
-
 def test_failed_files_retry(tmp_path: Path) -> None:
     cfg, store = make_env(tmp_path, {"a.md": "alpha", "b.md": "beta"})
     run(cfg, store, FakeExtractor({"a.md": RuntimeError("ffmpeg not found on PATH")}))
     assert statuses(store)["a.md"] == "failed"
     assert store.failed_files()[0]["attempts"] == 1
-    # A plain re-run leaves it alone (the backoff has not passed)...
     stats, _ = run(cfg, store)
     assert stats.total == 0 and statuses(store)["a.md"] == "failed"
-    # ...--retry-failed queues it now.
     emb = FakeEmbedder()
     ix = Indexer(store, cfg, emb, extract_fn=FakeExtractor())
     assert ix.prepare(retry_failed=True) == 1
@@ -195,7 +187,7 @@ def test_automatic_retry_with_backoff(tmp_path: Path) -> None:
     assert store.requeue_failed_for_retry(3, day, now=time.time() + 1.1 * day) == 1
     store.db.execute("UPDATE files SET status = 'failed', attempts = 3")
     store.db.commit()
-    assert store.requeue_failed_for_retry(3, day, now=time.time() + 100 * day) == 0  # gave up
+    assert store.requeue_failed_for_retry(3, day, now=time.time() + 100 * day) == 0
 
 
 def test_extractor_version_change_retries_failed(tmp_path: Path, monkeypatch) -> None:
@@ -214,7 +206,7 @@ def test_index_format_change_requeues_everything_keeping_old_chunks(tmp_path: Pa
     ix = Indexer(store, cfg, FakeEmbedder(), extract_fn=FakeExtractor())
     assert ix.prepare() == 2
     assert set(statuses(store).values()) == {"pending"}
-    assert table_counts(store) == (2, 2, 2)  # still searchable until replaced
+    assert table_counts(store) == (2, 2, 2)
     assert ix.run().indexed == 2
     assert table_counts(store) == (2, 2, 2)
 
@@ -264,10 +256,8 @@ def test_migration_v2_to_v3(tmp_path: Path) -> None:
     assert store.db.execute("SELECT dirs FROM fts_files").fetchone()[0] == "Documents thesis"
     sql = store.db.execute("SELECT sql FROM sqlite_master WHERE name = 'fts_chunks'").fetchone()[0]
     assert "prefix='3'" in sql
-    # The old index has no format version: the indexer re-queues it (fts_chunks lost its text).
     ix = Indexer(store, make_cfg(tmp_path), FakeEmbedder(), extract_fn=FakeExtractor())
     assert ix.prepare() == 1
-    # Two processes opening an old database at once must not both migrate.
     store.close()
 
 
@@ -294,8 +284,6 @@ def test_concurrent_migration(tmp_path: Path) -> None:
     assert not errors, errors
 
 
-# -- 4. folder words must not flood the results ---------------------------------------------------
-
 def test_dir_terms_drop_home_and_mount_prefixes() -> None:
     assert dir_terms("/home/patrik/Documents/thesis/v3/a.md") == "Documents thesis v3"
     assert dir_terms("/var/home/patrik/a.md") == ""
@@ -308,7 +296,7 @@ def test_folder_word_does_not_flood(tmp_path: Path) -> None:
     docs = {f"note{i:02d}.md": f"entry {i} about gardening tomatoes" for i in range(60)}
     docs["paper.md"] = "the documents describing the merger were signed in march"
     cfg, store = make_env(tmp_path, docs)
-    cfg.z_gate = 2.0  # 61 files: enough for the real gate
+    cfg.z_gate = 2.0
     _, emb = run(cfg, store)
     s = Searcher(store, cfg, emb)
     assert names(s.search("documents", limit=10)) == ["paper.md"]
@@ -321,8 +309,6 @@ def test_folder_match_still_helps_relevant_files(tmp_path: Path) -> None:
     res = Searcher(store, cfg, emb).search("rockets")
     assert names(res) == ["notes.md"] and "folder" in res[0].matched
 
-
-# -- 6. a lone chunk in a rare modality buffer --------------------------------------------------
 
 def test_lone_chunk_is_flushed_after_other_files(tmp_path: Path) -> None:
     docs = {f"n{i:03d}.md": f"note {i}" for i in range(100)}
@@ -355,8 +341,6 @@ def test_aged_buffer_is_flushed_by_time(tmp_path: Path, monkeypatch) -> None:
     assert stats.indexed == 2 and emb.calls == [("text", 1), ("text", 1)]
 
 
-# -- 7. kind filter inside the text query, vanished files -----------------------------------------
-
 def test_kind_filter_applies_before_the_fts_limit(tmp_path: Path) -> None:
     docs = {f"n{i:03d}.md": "budget budget budget budget" for i in range(230)}
     cfg, store = make_env(tmp_path, docs)
@@ -364,7 +348,7 @@ def test_kind_filter_applies_before_the_fts_limit(tmp_path: Path) -> None:
     scan(store, cfg)
     ex = FakeExtractor({"annual.pdf": ["the annual budget was approved by the board " * 3]})
     _, emb = run(cfg, store, ex)
-    cfg.z_gate = 10.0  # words only
+    cfg.z_gate = 10.0
     res = Searcher(store, cfg, emb).search("budget", kinds=["pdf"])
     assert names(res) == ["annual.pdf"]
 
@@ -386,8 +370,6 @@ def env_docs(tmp_path: Path):
     yield cfg, store, tmp_path
     store.close()
 
-
-# -- 8-9. embedder: OOM recovery, query priority, query cache -------------------------------------
 
 class FakeModel:
     def __init__(self, max_batch: int):
@@ -422,7 +404,7 @@ def test_oom_halves_and_remembers_the_batch_size() -> None:
     assert e.batch_limit("text") == 2
     e._model.sizes.clear()
     e.embed_batch("text", ["t"] * 4, ["x"] * 4)
-    assert e._model.sizes == [2, 2]  # no OOM round-trip again
+    assert e._model.sizes == [2, 2]
     assert np.allclose(np.linalg.norm(out, axis=1), 1.0, atol=1e-6)
 
 
@@ -442,7 +424,7 @@ def test_regrows_after_many_clean_batches(monkeypatch) -> None:
 def test_non_oom_errors_are_not_retried() -> None:
     from semma.embedder import _is_oom
 
-    assert not _is_oom(RuntimeError("out of memory"))  # e.g. a host-side allocator message
+    assert not _is_oom(RuntimeError("out of memory"))
     e = fake_embedder()
     e._model.encode = lambda inputs, **kw: (_ for _ in ()).throw(RuntimeError("out of memory"))
     with pytest.raises(RuntimeError):
@@ -455,7 +437,7 @@ def test_query_cache_and_float32_normalisation() -> None:
     a = e.embed_query("dog")
     b = e.embed_query("dog")
     assert a is b and e._model.queries == 1
-    assert abs(float(np.linalg.norm(a)) - 1.0) < 1e-6  # the model's 1.01 norm is fixed
+    assert abs(float(np.linalg.norm(a)) - 1.0) < 1e-6
     assert not a.flags.writeable
 
 
@@ -504,7 +486,6 @@ def test_embedder_query_path_loads_text_only_and_reuses_full_model(tmp_path: Pat
     cfg.device = "vulkan"
     e = Embedder(cfg)
 
-    # 1. Query path loads the text-only worker (mmproj_path=None) on GPU and only requests the "text" GGUF.
     v1 = e.embed_query("hello world")
     assert v1.shape == (DIM,)
     assert e.query_model_loaded and not e.index_model_loaded and e.loaded
@@ -516,7 +497,6 @@ def test_embedder_query_path_loads_text_only_and_reuses_full_model(tmp_path: Pat
     q_worker = workers[-1]
     assert not q_worker.closed
 
-    # 2. Indexing loads the full multimodal worker (mmproj_path is not None) and closes the GPU query worker.
     worker_calls.clear()
     ensured_files.clear()
     b = e.embed_batch("text", ["some text"], ["doc.md"])
@@ -529,7 +509,6 @@ def test_embedder_query_path_loads_text_only_and_reuses_full_model(tmp_path: Pat
     assert worker_calls[0]["mmproj_path"] == tmp_path / "models" / "mmproj.gguf"
     assert worker_calls[0]["use_gpu"] is True
 
-    # 3. While the full worker is loaded, a new query reuses it without spawning a query worker.
     worker_calls.clear()
     ensured_files.clear()
     full_worker = e._model
@@ -540,7 +519,6 @@ def test_embedder_query_path_loads_text_only_and_reuses_full_model(tmp_path: Pat
     assert not e.query_model_loaded and e.index_model_loaded
     assert full_worker.queries == queries_before + 1
 
-    # 4. Unloading the index worker closes it and leaves nothing loaded; next query spawns the text-only worker again.
     assert e.unload_index() is True
     assert full_worker.closed
     assert not e.loaded
@@ -584,7 +562,7 @@ def test_query_device_cpu_selects_float32_cpu_and_invalid_warns(tmp_path: Path, 
     cfg = load_config(conf, home=tmp_path)
     assert cfg.query_device == "cpu"
     assert cfg.index_model_unload_seconds == 45.0
-    cfg.device = "vulkan"  # even when indexing uses GPU, query_device="cpu" uses CPU
+    cfg.device = "vulkan"
 
     e = Embedder(cfg)
     e.embed_query("cpu query")
@@ -645,20 +623,18 @@ def _cpu_query_embedder(monkeypatch) -> Embedder:
 
 
 def test_cpu_query_never_uses_the_index_model_outside_the_gpu_lock(monkeypatch) -> None:
-    # A query waits for the CPU lock while the CPU query model is unloaded, and indexing loads
-    # the full model meanwhile: the query must not encode with the full model next to a batch.
     e = _cpu_query_embedder(monkeypatch)
     e.load_query()
-    e._cpu_query_lock.acquire()  # as unload_query holds it
+    e._cpu_query_lock.acquire()
     q = threading.Thread(target=e.embed_query, args=("hello world",))
     q.start()
     time.sleep(0.05)
-    e._query_model = None  # unload_query's body
+    e._query_model = None
     b = threading.Thread(target=e.embed_batch, args=("text", ["a b c"], ["t"]))
     b.start()
     while e._model is None:
         time.sleep(0.005)
-    time.sleep(0.05)  # the batch is encoding
+    time.sleep(0.05)
     e._cpu_query_lock.release()
     q.join(5)
     b.join(5)
@@ -667,17 +643,15 @@ def test_cpu_query_never_uses_the_index_model_outside_the_gpu_lock(monkeypatch) 
 
 
 def test_cpu_query_model_load_is_shared_after_index_unload(monkeypatch) -> None:
-    # The index model goes away while a query waits for the GPU lock; that query and a
-    # concurrent load_query (the daemon's model thread) must share one CPU query model load.
     e = _cpu_query_embedder(monkeypatch)
     e.embed_batch("text", ["a"], ["t"])
     _ConcurrencyStubWorker.load_seconds = 0.3
-    with e._gpu.batch():  # as unload_index holds it
+    with e._gpu.batch():
         q = threading.Thread(target=e.embed_query, args=("hello world",))
         q.start()
         time.sleep(0.05)
         e._model = None
-    time.sleep(0.05)  # the query is loading the CPU query model
+    time.sleep(0.05)
     loader = threading.Thread(target=e.load_query)
     loader.start()
     q.join(5)
@@ -721,8 +695,6 @@ def test_waiting_query_goes_before_waiting_batches() -> None:
     assert order == ["batch1", "query", "batch2"]
 
 
-# -- 10. transient storage errors ---------------------------------------------------------------
-
 def test_locked_database_is_retried_then_left_pending(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(indexer_mod, "STORE_BACKOFF_S", 0.001)
     cfg, store = make_env(tmp_path, {"a.md": "alpha", "b.md": "beta"})
@@ -753,8 +725,6 @@ def test_unstorable_failure_does_not_kill_the_run(tmp_path: Path, monkeypatch) -
     assert statuses(store)["a.md"] == "pending"
 
 
-# -- 11. stored vectors are unit length in float32 ------------------------------------------------
-
 def test_stored_vectors_are_renormalised(tmp_path: Path) -> None:
     class Sloppy(FakeEmbedder):
         def embed_batch(self, modality, contents, titles):
@@ -765,8 +735,6 @@ def test_stored_vectors_are_renormalised(tmp_path: Path) -> None:
     blob = store.db.execute("SELECT embedding FROM vec_chunks").fetchone()[0]
     assert abs(float(np.linalg.norm(np.frombuffer(blob, dtype=np.float32))) - 1.0) < 1e-6
 
-
-# -- 12. config and CLI validation ---------------------------------------------------------------
 
 def test_config_validation(tmp_path: Path, capsys) -> None:
     conf = tmp_path / "c.toml"
@@ -806,8 +774,6 @@ def test_reset_refuses_while_the_database_is_open(tmp_path: Path, capsys) -> Non
     assert not cfg.db_path.exists()
 
 
-# -- 13. an interrupted extraction is not committed -----------------------------------------------
-
 @pytest.mark.parametrize("prefetch", [True, False])
 def test_stop_during_extraction_leaves_file_pending(tmp_path: Path, prefetch: bool) -> None:
     cfg, store = make_env(tmp_path, {"video.md": "x"})
@@ -815,14 +781,12 @@ def test_stop_during_extraction_leaves_file_pending(tmp_path: Path, prefetch: bo
 
     def truncated(path: Path, kind: str, cfg):
         yield Chunk("text", "first minute")
-        stop.set()  # Ctrl-C: ffmpeg dies and the extractor ends early without an error
+        stop.set()
 
     stats = Indexer(store, cfg, FakeEmbedder(), extract_fn=truncated, prefetch=prefetch).run(stop=stop)
     assert stats.stopped and stats.indexed == 0
     assert statuses(store) == {"video.md": "pending"}
 
-
-# -- 14-16. ranking: duplicates, location prior, short queries ------------------------------------
 
 def put_vectors(store: Store, files: list[tuple[str, int, np.ndarray]], kind: str = "image",
                 modality: str = "image") -> None:
@@ -869,7 +833,7 @@ def test_near_duplicates_collapse_to_the_preferred_copy(tmp_path: Path, cache: b
     store = Store(cfg.db_path, vector_cache=cache)
     q = unit(1)
     photo = with_cos(q, 0.8, 2)
-    copy = photo + 0.05 * unit(3)  # a re-encoded copy: cos ~0.999
+    copy = photo + 0.05 * unit(3)
     put_vectors(store, [
         (str(tmp_path / "data/prepared/dog.jpg"), 10, photo),
         (str(tmp_path / "data/prepared_standalone/dog.jpg"), 10, copy),
@@ -894,15 +858,14 @@ def test_location_prior_only_breaks_near_ties(tmp_path: Path) -> None:
     store = Store(cfg.db_path)
     q = unit(1)
     put_vectors(store, [
-        (str(tmp_path / "proj/data/a.jpg"), 5, with_cos(q, 0.705, 2)),   # marginally better, deep in a project
-        (str(tmp_path / "Pictures/b.jpg"), 100, with_cos(q, 0.700, 3)),  # in the user's own folder (full prior)
-        (str(tmp_path / "proj/data/c.jpg"), 0, with_cos(q, 0.760, 4)),    # clearly better (z > b by >= 1.0)
+        (str(tmp_path / "proj/data/a.jpg"), 5, with_cos(q, 0.705, 2)),
+        (str(tmp_path / "Pictures/b.jpg"), 100, with_cos(q, 0.700, 3)),
+        (str(tmp_path / "proj/data/c.jpg"), 0, with_cos(q, 0.760, 4)),
     ])
     put_background(store, tmp_path, q)
     cfg.z_gate = 2.0
     res = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "", limit=10)
     assert names(res)[:3] == ["c.jpg", "b.jpg", "a.jpg"]
-    # Upper bound: a 0.3 z prior (priority 100 vs 0) must not flip a file whose z is 1.0 higher.
     c_score = next(r.score for r in res if Path(r.path).name == "c.jpg")
     b_score = next(r.score for r in res if Path(r.path).name == "b.jpg")
     assert (c_score - (b_score - cfg.location_prior)) >= 1.0
@@ -910,8 +873,6 @@ def test_location_prior_only_breaks_near_ties(tmp_path: Path) -> None:
     cfg.location_prior = 0.0
     assert names(Searcher(store, cfg, FakeEmbedder()).search_vector(q, "", limit=10))[:3] == ["c.jpg", "a.jpg", "b.jpg"]
 
-
-# -- 17. the in-memory vector cache --------------------------------------------------------------
 
 def test_vector_cache_tracks_local_and_foreign_writes(tmp_path: Path) -> None:
     from test_index import DOCS
@@ -924,9 +885,8 @@ def test_vector_cache_tracks_local_and_foreign_writes(tmp_path: Path) -> None:
     assert names(s.search("sourdough bread"))[0] == "bread.txt"
     cache = store.vectors
     assert cache is not None and cache.loads == 1 and cache.size == 3
-    assert cache.fast_loads == 1  # the sqlite-vec storage layout check passed
+    assert cache.fast_loads == 1
 
-    # Local writes patch the cache without a reload.
     (tmp_path / "Documents/pizza.md").write_text("pizza dough with tomato and cheese")
     scan(store, cfg)
     run(cfg, store)
@@ -936,7 +896,6 @@ def test_vector_cache_tracks_local_and_foreign_writes(tmp_path: Path) -> None:
     assert "cats.md" not in names(s.search("cat sleeps on the sofa"))
     assert cache.loads == 1 and cache.size == 3
 
-    # Another process (here: another Store) changes the index: the cache reloads.
     other = Store(cfg.db_path)
     (tmp_path / "Documents/soup.md").write_text("tomato soup with basil")
     scan(other, cfg)
@@ -944,7 +903,7 @@ def test_vector_cache_tracks_local_and_foreign_writes(tmp_path: Path) -> None:
     assert names(s.search("tomato soup basil"))[0] == "soup.md"
     assert cache.loads == 2 and cache.size == 4
     other.reset_index()
-    assert [r.matched for r in s.search("soup")] == [["name"]]  # lexical only now
+    assert [r.matched for r in s.search("soup")] == [["name"]]
     assert cache.size == 0
     other.close()
     store.close()

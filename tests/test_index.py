@@ -26,8 +26,6 @@ def make_cfg(home: Path) -> Config:
     cfg.include_mounts = False
     cfg.db_path = home / "db" / "index.db"
     cfg.roots = [home / "Documents"]
-    # Tiny indexes: with n vectors no z-score can exceed sqrt(n - 1), so the default gate (2.0)
-    # and floor (4.5) are out of reach for 3-5 files.
     cfg.z_gate = 1.0
     cfg.z_floor = 0.0
     return cfg
@@ -65,7 +63,6 @@ def table_counts(store: Store) -> tuple[int, int, int]:
     db = store.db
     chunks = db.execute("SELECT count(*) FROM chunks").fetchone()[0]
     vectors = db.execute("SELECT count(*) FROM vec_chunks").fetchone()[0]
-    # fts_chunks is contentless and cannot be scanned; its docsize shadow table has a row per document.
     fts = db.execute("SELECT count(*) FROM fts_chunks_docsize").fetchone()[0]
     return chunks, vectors, fts
 
@@ -75,8 +72,6 @@ def run(cfg: Config, store: Store, extractor: FakeExtractor | None = None, prefe
     ix = Indexer(store, cfg, emb, extract_fn=extractor or FakeExtractor(), prefetch=prefetch)
     return ix.run(**kw), emb
 
-
-# -- schema --------------------------------------------------------------------
 
 def test_migration_from_v1_backfills_file_names(tmp_path: Path) -> None:
     path = tmp_path / "old.db"
@@ -100,8 +95,6 @@ def test_every_connection_loads_sqlite_vec(tmp_path: Path) -> None:
     assert db.execute("SELECT vec_version()").fetchone()[0].startswith("v")
 
 
-# -- indexing ------------------------------------------------------------------
-
 @pytest.mark.parametrize("prefetch", [True, False])
 def test_index_and_search(env, prefetch: bool) -> None:
     cfg, store = env
@@ -109,7 +102,6 @@ def test_index_and_search(env, prefetch: bool) -> None:
     assert (stats.indexed, stats.failed, stats.skipped, stats.chunks) == (3, 0, 0, 3)
     assert set(statuses(store).values()) == {"indexed"}
     assert table_counts(store) == (3, 3, 3)
-    # One text chunk per file, batched across files into a single model call.
     assert emb.calls == [("text", 3)]
     assert store.get_meta("model_id") == "fake-bow"
 
@@ -205,7 +197,6 @@ def test_reindex_replaces_chunks_and_vectors(env, tmp_path: Path) -> None:
     assert statuses(store)["cats.md"] == "pending"
     run(cfg, store)
     assert table_counts(store) == (3, 3, 3)
-    # Chunk ids can be reused, so check that every vector belongs to a live chunk.
     orphans = store.db.execute("SELECT count(*) FROM vec_chunks v LEFT JOIN chunks c ON c.id = v.chunk_id "
                                "WHERE c.id IS NULL").fetchone()[0]
     assert orphans == 0
@@ -219,7 +210,7 @@ def test_removed_files_drop_vectors_and_fts(env, tmp_path: Path) -> None:
     run(cfg, store, FakeExtractor({"cats.md": ["one", "two"]}))
     assert table_counts(store) == (4, 4, 4)
     (tmp_path / "Documents/cats.md").unlink()
-    scan(store, cfg)  # finish_scan deletes the row; the cascade + triggers do the rest
+    scan(store, cfg)
     assert table_counts(store) == (2, 2, 2)
     assert store.db.execute("SELECT count(*) FROM fts_files").fetchone()[0] == 2
     emb = FakeEmbedder()
@@ -254,7 +245,7 @@ def test_stop_leaves_database_consistent(tmp_path: Path, prefetch: bool) -> None
     def on_chunk(path: Path, i: int) -> None:
         nonlocal seen
         seen += 1
-        if seen == 23:  # mid-file: doc with 3 chunks, stop on its 2nd chunk
+        if seen == 23:
             stop.set()
 
     extractor = FakeExtractor({f"doc{i:02d}.md": [f"part {j} of {i}" for j in range(3)] for i in range(30)},
@@ -264,14 +255,12 @@ def test_stop_leaves_database_consistent(tmp_path: Path, prefetch: bool) -> None
     st = statuses(store)
     indexed = [n for n, s in st.items() if s == "indexed"]
     assert 0 < len(indexed) < 30 and set(st.values()) <= {"indexed", "pending"}
-    # Every indexed file has all of its chunks, pending ones none.
     per_file = dict(store.db.execute(
         "SELECT f.status, count(c.id) FROM files f LEFT JOIN chunks c ON c.file_id = f.id GROUP BY f.status"))
     assert per_file.get("pending", 0) == 0
     assert per_file["indexed"] == 3 * len(indexed)
     chunks, vectors, fts = table_counts(store)
     assert chunks == vectors == fts == 3 * len(indexed)
-    # A second run picks up exactly the rest.
     stats, _ = run(cfg, store, FakeExtractor({n: ["x", "y", "z"] for n in st}))
     assert stats.indexed == 30 - len(indexed)
     assert set(statuses(store).values()) == {"indexed"}
@@ -282,14 +271,12 @@ def test_crash_in_extract_module_propagates(env) -> None:
     cfg, store = env
 
     def broken(path: Path, kind: str, cfg: Config):
-        raise SystemExit("extractor import failed")  # not an Exception: must not be swallowed per file
+        raise SystemExit("extractor import failed")
 
     with pytest.raises(SystemExit):
         Indexer(store, cfg, FakeEmbedder(), extract_fn=broken).run()
     assert set(statuses(store).values()) == {"pending"}
 
-
-# -- search --------------------------------------------------------------------
 
 @pytest.mark.parametrize("query", [
     '"', '""', "'", "a AND", "OR", "NOT x", "NEAR(a b)", "-", "--x", "foo-bar", "c++", "*", "x*",
@@ -308,8 +295,6 @@ def test_fts_escaping_never_errors(env, query: str) -> None:
 
 
 def test_fts_prefix_rules(tmp_path: Path) -> None:
-    # File names/dirs prefix every term >= 3 chars (>= 2 for last); chunk text prefixes only the
-    # last term >= 3 chars, and only when not already in chunks as typed.
     assert _file_patterns(query_terms('rocket-engine "launch" OR x')) == [
         '"rocket"*', '"engine"*', '"launch"*', '"OR"', '"x"']
     assert _file_patterns(query_terms("thes pr")) == ['"thes"*', '"pr"*']
@@ -327,9 +312,7 @@ def test_fts_prefix_rules(tmp_path: Path) -> None:
     scan(store, cfg)
     _, emb = run(store=store, cfg=cfg)
     s = Searcher(store, cfg, emb)
-    # "transfo" is not indexed whole, so chunk text prefixes it -> matches "transformer" and "transformers".
     assert {"a.md", "b.md"} <= {Path(r.path).name for r in s.search("transfo")}
-    # "transformer" IS indexed whole, so chunk text drops the wildcard -> "b.md" ("transformers") is not text-matched.
     res = s.search("transformer")
     assert Path(res[0].path).name == "a.md" and "text" in res[0].matched
     b_res = [r for r in res if Path(r.path).name == "b.md"]
@@ -347,7 +330,7 @@ def test_finnish_diacritics_both_ways(tmp_path: Path) -> None:
     s = Searcher(store, cfg, emb)
     for q in ("opinnaytetyo", "Opinnäytetyö", "OPINNÄYTE", "opinnäytetyöni"[:10]):
         assert Path(s.search(q)[0].path).name == "Opinnäytetyö_luonnos.md", q
-    assert Path(s.search("leipa")[0].path).name == "kauppalista.txt"  # chunk text, folded
+    assert Path(s.search("leipa")[0].path).name == "kauppalista.txt"
     store.close()
 
 
@@ -366,11 +349,8 @@ def test_camel_case_and_prefix_names(tmp_path: Path) -> None:
 def test_name_and_content_combine(tmp_path: Path) -> None:
     cfg = make_cfg(tmp_path)
     write_docs(tmp_path, {
-        # Matches by content only.
         "notes.md": "orbital rocket launch window calculations",
-        # Matches by name and content: should win.
         "rocket_launch.md": "orbital rocket launch checklist",
-        # Matches by name only.
         "rocket_launch_photo_list.md": "unrelated words entirely",
         "garden.md": "tomatoes and cucumbers in the greenhouse",
     })
@@ -382,7 +362,6 @@ def test_name_and_content_combine(tmp_path: Path) -> None:
     assert names[0] == "rocket_launch.md"
     assert set(results[0].matched) == {"vector", "name", "text"}
     assert "rocket_launch_photo_list.md" in names and "notes.md" in names
-    # The unrelated file is dropped by the similarity floor (it has no lexical match).
     assert "garden.md" not in names
     store.close()
 
@@ -398,14 +377,12 @@ def test_kind_filter(env, tmp_path: Path) -> None:
 def test_z_gate_drops_vector_only_matches(env) -> None:
     cfg, store = env
     _, emb = run(cfg, store)
-    # Only "sofa" occurs in a file (1 of 4 words: too few to count), so only meaning can find it.
     query = "sofa feline kitten whiskers"
     cfg.z_gate = 10.0
     assert Searcher(store, cfg, emb).search(query) == []
     cfg.z_gate = 1.0
     res = Searcher(store, cfg, emb).search(query)
     assert [Path(r.path).name for r in res] == ["cats.md"] and "vector" in res[0].matched
-    # Half the words found in the text keep a file whatever its meaning score.
     cfg.z_gate = 10.0
     res = Searcher(store, cfg, emb).search("warm sofa feline")
     assert [Path(r.path).name for r in res] == ["cats.md"] and res[0].matched == ["text"]
@@ -444,5 +421,5 @@ def test_search_latency_on_synthetic_index(tmp_path: Path) -> None:
     for _ in range(5):
         s.search_vector(q, "common word5", 10)
     ms = (time.perf_counter() - t) / 5 * 1000
-    assert ms < 200, ms  # generous for slow CI; observed numbers are in the report
+    assert ms < 200, ms
     print(f"\nsearch over 20k chunks: {ms:.1f} ms")

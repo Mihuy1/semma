@@ -301,7 +301,7 @@ class Tray(QObject):
 
     def gui_command(self) -> tuple[str, list[str]]:
         """Command and arguments used to launch or raise the Semma window."""
-        args = ["-I", "-m", "semma"] if sys.flags.isolated else ["-m", "semma"]  # the package runs -I
+        args = ["-I", "-m", "semma"] if sys.flags.isolated else ["-m", "semma"]
         if self.config_path is not None:
             args.extend(["--config", str(self.config_path)])
         args.append("gui")

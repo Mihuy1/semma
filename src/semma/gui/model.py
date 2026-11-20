@@ -22,11 +22,8 @@ KIND_NAMES: dict[str, str] = {
     ft.VIDEO: "Video",
 }
 
-# What the daemon reports while it pauses for the user (`Daemon.pause`).
 USER_PAUSE_REASON = "paused by request"
 
-
-# -- formatting -----------------------------------------------------------------------------
 
 def format_count(n: float) -> str:
     """1204 -> "1,204"."""
@@ -80,7 +77,7 @@ def format_ago(when: float, now: float | None = None) -> str:
     for size, unit in ((86400, "day"), (3600, "hour"), (60, "minute")):
         if s >= size:
             return f"{plural(s // size, unit)} ago"
-    return "Just now"  # unreachable
+    return "Just now"
 
 
 def format_duration(seconds: float) -> str:
@@ -120,7 +117,6 @@ def elide_middle(text: str, limit: int) -> str:
 
 SCAN_DIR_LIMIT = 48
 
-# -- the view -------------------------------------------------------------------------------
 
 @dataclass
 class Headline:
@@ -129,8 +125,8 @@ class Headline:
     `progress` is (done, total) for a bar that fills up, None for no bar; `busy` shows a bar
     that moves without a known end (total unknown)."""
     text: str
-    detail: str = ""        # a second line: the file or folder being worked on
-    secondary: str = ""     # speed and time left
+    detail: str = ""
+    secondary: str = ""
     progress: tuple[int, int] | None = None
     busy: bool = False
 

@@ -37,8 +37,6 @@ def ctx_for(home: Path, text: str | None = None) -> SettingsContext:
     return SettingsContext.load(path, home)
 
 
-# -- File types model ----------------------------------------------------------------------
-
 def test_filetypes_load_defaults(home: Path) -> None:
     ctx = ctx_for(home)
     v = ftm.load(ctx)
@@ -92,8 +90,6 @@ def test_filetypes_problems(home: Path) -> None:
     assert any("bak" in p.text for p in hints) and any("exe" in p.text for p in hints)
 
 
-# -- Priorities model ----------------------------------------------------------------------
-
 def test_priorities_load_defaults(home: Path) -> None:
     ctx = ctx_for(home)
     v = pm.load(ctx)
@@ -126,13 +122,11 @@ def test_priorities_load_and_changes_only_diff_from_defaults(home: Path) -> None
         }
     }
 
-    # Reload and remove the user-added folder: config.toml replaces the old dict so ~/Work is gone
     reloaded = pm.load(ctx_for(home))
     assert reloaded.locations["~/Documents"] == 60
     assert reloaded.locations["~/Work"] == 55
     after_remove = reloaded.copy()
     after_remove.locations = pm.remove_location(after_remove.locations, "~/Work", after_remove.defaults)
-    # Default folders cannot be removed
     after_remove.locations = pm.remove_location(after_remove.locations, "~/Documents", after_remove.defaults)
     assert "~/Documents" in after_remove.locations
 
@@ -146,7 +140,6 @@ def test_priorities_load_and_changes_only_diff_from_defaults(home: Path) -> None
     assert "~/Work" not in reloaded2.locations
     assert reloaded2.locations["~/Documents"] == 60
 
-    # Reset to defaults -> None removes the keys from config.toml
     reset = pm.reset_locations(reloaded2)
     reset.other_location = pm.DEFAULT_OTHER_LOCATION
     ch3 = pm.changes(reloaded2, reset)
@@ -167,8 +160,6 @@ def test_priorities_add_duplicate_and_problems(home: Path) -> None:
     probs = pm.problems(bad, ctx)
     assert len(probs) == 1 and probs[0].blocking
 
-
-# -- Media model ---------------------------------------------------------------------------
 
 def test_media_load_changes_and_problems(home: Path) -> None:
     ctx = ctx_for(home)
@@ -213,19 +204,16 @@ def test_media_keeps_other_kind_overrides_in_max_file_mb(home: Path) -> None:
     assert saved == mm.MediaValues(60, 2.0, 5.0)
     assert saved.other_max_file_mb == {"pdf": 1000}
 
-    # Changing only max_minutes leaves scan.max_file_mb untouched in changes()
     only_min = saved.copy()
     only_min.max_minutes = 20
     assert mm.changes(saved, only_min) == {"media": {"max_minutes": 20}}
 
-    # Changing video limit keeps pdf override and existing audio override
     with_video = saved.copy()
     with_video.max_video_gb = 10.0
     assert mm.changes(saved, with_video) == {
         "scan": {"max_file_mb": {"pdf": 1000, "audio": 2048, "video": 10240}},
     }
 
-    # Returning audio and video to their defaults keeps pdf override (not None)
     back_to_defaults = saved.copy()
     back_to_defaults.max_audio_gb = 4.0
     ch = mm.changes(saved, back_to_defaults)
@@ -233,8 +221,6 @@ def test_media_keeps_other_kind_overrides_in_max_file_mb(home: Path) -> None:
     update_config(ctx.config_path, ch)
     assert read_raw(ctx.config_path) == {"scan": {"max_file_mb": {"pdf": 1000}}}
 
-
-# -- Performance model ---------------------------------------------------------------------
 
 def test_performance_load_defaults_and_custom_device(home: Path) -> None:
     ctx = ctx_for(home)
@@ -261,7 +247,6 @@ def test_performance_changes_and_back_to_default(home: Path) -> None:
     ctx = ctx_for(home)
     saved = pfm.load(ctx)
 
-    # Turning pause_when_gpu_busy off without touching threshold writes only pause_when_gpu_busy.
     pause_off = saved.copy()
     pause_off.pause_when_gpu_busy = False
     assert pfm.changes(saved, pause_off) == {"daemon": {"pause_when_gpu_busy": False}}
@@ -313,8 +298,6 @@ def test_performance_problems(home: Path) -> None:
     assert len(probs) == 4 and all(p.blocking for p in probs)
 
 
-# -- Screenshots model ---------------------------------------------------------------------
-
 def _fake_ocr_facts(
     *,
     library_available: bool = True,
@@ -355,7 +338,6 @@ def test_screenshots_changes_automatic_and_back_to_default(home: Path) -> None:
     ctx = ctx_for(home)
     saved = sm.load(ctx, facts)
 
-    # Turning on while keeping the automatic choice writes only enabled = true.
     turn_on = saved.copy()
     turn_on.enabled = True
     ch_on = sm.changes(saved, turn_on, facts)
@@ -363,7 +345,6 @@ def test_screenshots_changes_automatic_and_back_to_default(home: Path) -> None:
     update_config(ctx.config_path, ch_on)
     assert read_raw(ctx.config_path) == {"ocr": {"enabled": True}}
 
-    # Choosing explicit languages writes them in order, deduped and capped at 3.
     reloaded = sm.load(ctx_for(home), facts)
     edited = reloaded.copy()
     edited.languages = ["deu", "fin", "deu", "eng", "spa"]
@@ -372,7 +353,6 @@ def test_screenshots_changes_automatic_and_back_to_default(home: Path) -> None:
     update_config(ctx.config_path, ch_langs)
     assert read_raw(ctx.config_path) == {"ocr": {"enabled": True, "languages": ["deu", "fin", "eng"]}}
 
-    # Returning to the automatic choice writes languages = None (removes the key).
     reloaded2 = sm.load(ctx_for(home), facts)
     back_auto = reloaded2.copy()
     back_auto.languages = ["fin", "eng"]
@@ -381,7 +361,6 @@ def test_screenshots_changes_automatic_and_back_to_default(home: Path) -> None:
     update_config(ctx.config_path, ch_auto)
     assert read_raw(ctx.config_path) == {"ocr": {"enabled": True}}
 
-    # Turning off removes enabled (and empty [ocr]).
     reloaded3 = sm.load(ctx_for(home), facts)
     turn_off = reloaded3.copy()
     turn_off.enabled = False
@@ -395,7 +374,7 @@ def test_screenshots_problems_and_language_choices(home: Path) -> None:
     facts = _fake_ocr_facts(installed_languages=("eng", "fin"), default_languages=("eng",))
     ctx = ctx_for(home, '[ocr]\nenabled = true\nlanguages = ["swe", "eng"]\n')
     saved = sm.load(ctx, facts)
-    assert saved.languages == ["swe", "eng"]  # uninstalled language is kept
+    assert saved.languages == ["swe", "eng"]
 
     choices = sm.language_choices(saved.languages, facts)
     assert choices[0] == ("None", None)
@@ -409,7 +388,6 @@ def test_screenshots_problems_and_language_choices(home: Path) -> None:
     assert "Swedish" in probs[0].text
     assert "tesseract-langpack-swe" in probs[0].text
 
-    # Enabled with no usable language (none selected, or none installed) -> non-blocking problem.
     none_selected = sm.ScreenshotsValues(enabled=True, languages=[])
     p_empty = sm.problems(none_selected, ctx, facts)
     assert len(p_empty) == 1 and not p_empty[0].blocking
@@ -421,13 +399,10 @@ def test_screenshots_problems_and_language_choices(home: Path) -> None:
     assert any("Swedish" in p.text and "tesseract-langpack-swe" in p.text for p in p_missing)
     assert any("no text will be read" in p.text for p in p_missing)
 
-    # Unknown distro (empty install_hint) does not leave a dangling colon.
     no_hint_facts = _fake_ocr_facts(installed_languages=("eng",), default_languages=("eng",), hint_prefix="")
     p_no_hint = sm.problems(only_missing, ctx, no_hint_facts)
     assert p_no_hint[0].text == "The Swedish language pack is not installed."
 
-
-# -- Widgets -------------------------------------------------------------------------------
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtWidgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
@@ -479,18 +454,15 @@ def test_priorities_section_widget(app: QtWidgets.QApplication, home: Path) -> N
     assert not sec.is_modified()
     assert not sec.reset_button.isEnabled()
 
-    # Selecting a default row keeps Remove disabled
     sec.table.selectRow(0)
     assert not sec.remove_button.isEnabled()
 
-    # Adding a custom folder enables Remove and Reset to defaults
     sec.choose_folder = lambda _start: str(home / "Work")
     sec.add_button.click()
     assert sec.is_modified()
     assert sec.remove_button.isEnabled()
     assert sec.reset_button.isEnabled()
 
-    # Duplicate folder shows message
     sec.add_button.click()
     assert "already" in sec.message.text()
 
@@ -511,7 +483,6 @@ def test_priorities_section_widget(app: QtWidgets.QApplication, home: Path) -> N
         }
     }
 
-    # Remove the custom folder and reset defaults
     sec.table.selectRow(sec.table.rowCount() - 1)
     assert sec.remove_button.isEnabled()
     sec.remove_button.click()
@@ -566,7 +537,6 @@ def test_performance_section_widget(app: QtWidgets.QApplication, home: Path) -> 
     assert sec.pause_when_gpu_busy.isChecked()
     assert sec.gpu_busy_threshold.isEnabled()
 
-    # Unchecking pause_when_gpu_busy disables the spin box and writes pause_when_gpu_busy = false
     sec.pause_when_gpu_busy.setChecked(False)
     assert not sec.gpu_busy_threshold.isEnabled()
     assert sec.changes() == {"daemon": {"pause_when_gpu_busy": False}}
@@ -577,7 +547,6 @@ def test_performance_section_widget(app: QtWidgets.QApplication, home: Path) -> 
     }
     assert not sec.gpu_busy_threshold.isEnabled()
 
-    # Re-checking enables the spin box and removes pause_when_gpu_busy; keep custom device while editing daemon fields
     sec.pause_when_gpu_busy.setChecked(True)
     assert sec.gpu_busy_threshold.isEnabled()
     sec.gpu_busy_threshold.setValue(40)
@@ -602,7 +571,6 @@ def test_performance_section_widget(app: QtWidgets.QApplication, home: Path) -> 
         },
     }
 
-    # Change device to Automatic -> removes model.device
     sec.set_device(None)
     assert sec.changes() == {"model": {"device": None}}
     page.apply()
@@ -643,16 +611,13 @@ def test_screenshots_section_widget(
     assert "tesseract-langpack-deu" in sec.more_languages_note.text()
     assert sec.more_languages_note.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
 
-    # Loaded automatic languages: fin, eng, None
     assert [c.currentData() for c in sec.language_combos] == ["fin", "eng", None]
 
-    # Checking enables language rows and writes only enabled = true
     sec.enabled_check.setChecked(True)
     assert all(combo.isEnabled() for combo in sec.language_combos)
     assert all(lbl.isEnabled() for lbl in sec.language_labels)
     assert sec.changes() == {"ocr": {"enabled": True}}
 
-    # Gaps are closed and duplicates are collapsed
     _select_combo_data(sec.language_combos[0], None)
     _select_combo_data(sec.language_combos[1], "deu")
     _select_combo_data(sec.language_combos[2], "deu")
@@ -662,7 +627,6 @@ def test_screenshots_section_widget(
     page.apply()
     assert read_raw(config_path(home)) == {"ocr": {"enabled": True, "languages": ["deu"]}}
 
-    # Returning to automatic choice removes languages; unchecking removes enabled
     _select_combo_data(sec.language_combos[0], "fin")
     _select_combo_data(sec.language_combos[1], "eng")
     _select_combo_data(sec.language_combos[2], None)
@@ -678,7 +642,6 @@ def test_screenshots_section_missing_library_and_uninstalled_language(
 ) -> None:
     from PySide6.QtCore import Qt
 
-    # Missing Tesseract library with nothing configured: checkbox is disabled and unchecked
     missing_lib = _fake_ocr_facts(library_available=False, installed_languages=(), default_languages=())
     monkeypatch.setattr(sm.OcrFacts, "detect", lambda: missing_lib)
     page = SettingsPage(FakeClient(status()), config_path(home), home)
@@ -690,7 +653,6 @@ def test_screenshots_section_missing_library_and_uninstalled_language(
     assert "tesseract-libs" in sec.missing_command.text()
     assert sec.missing_command.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
 
-    # Missing library when saved config has enabled = true: stays checked and enabled so user can turn it off
     config_path(home).write_text('[ocr]\nenabled = true\nlanguages = ["swe"]\n', encoding="utf-8")
     page.reload()
     assert sec.enabled_check.isChecked()
@@ -699,16 +661,15 @@ def test_screenshots_section_missing_library_and_uninstalled_language(
     assert sec.language_combos[0].currentData() == "swe"
     assert "Swedish" in page.problems_label.text()
     assert "no text will be read" in page.problems_label.text()
-    assert page.apply_button.isEnabled() is False  # not modified yet
+    assert page.apply_button.isEnabled() is False
 
     sec.enabled_check.setChecked(False)
-    assert page.apply_button.isEnabled()  # problems are non-blocking
+    assert page.apply_button.isEnabled()
     page.apply()
     assert read_raw(config_path(home)) == {"ocr": {"languages": ["swe"]}}
     assert not sec.enabled_check.isChecked()
     assert not sec.enabled_check.isEnabled()
 
-    # Library available, no language packs installed, empty install_hint (unknown distro)
     no_langs = _fake_ocr_facts(
         library_available=True, installed_languages=(), default_languages=(), hint_prefix="",
     )
@@ -722,7 +683,5 @@ def test_screenshots_section_missing_library_and_uninstalled_language(
     assert sec.more_languages_note.text() == (
         "More languages can be added by installing their Tesseract language pack."
     )
-
-
 
 

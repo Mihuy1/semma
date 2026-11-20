@@ -35,7 +35,7 @@ PROPS_IFACE = "org.freedesktop.DBus.Properties"
 
 SEEK_TIMEOUT_SECONDS = 15.0
 POLL_SECONDS = 0.25
-SETTLE_SECONDS = 0.4  # wait after SetPosition before reading Position back
+SETTLE_SECONDS = 0.4
 TOLERANCE_SECONDS = 3.0
 CALL_TIMEOUT_SECONDS = 1.0
 
@@ -85,7 +85,7 @@ async def _call(bus: MessageBus, destination: str, interface: str, member: str,
                              signature=signature, body=body or [])),
             CALL_TIMEOUT_SECONDS,
         )
-    except Exception as e:  # timeouts, a player vanishing mid-call
+    except Exception as e:
         log.debug("%s %s.%s failed: %s", destination, interface, member, e)
         return None
     if reply is None or reply.message_type != MessageType.METHOD_RETURN:
@@ -111,10 +111,10 @@ async def _try_seek(bus: MessageBus, name: str, metadata: dict[str, Any], target
     length = _unwrap(metadata.get("mpris:length"))
     if isinstance(length, int) and 0 < length < target_us:
         log.debug("%s: track shorter (%d µs) than the target %d µs", name, length, target_us)
-        return True  # nothing sensible to do; stop trying
+        return True
     if isinstance(trackid, str) and trackid:
         await _call(bus, name, PLAYER_IFACE, "SetPosition", "ox", [trackid, target_us])
-    else:  # no track id: relative seek from wherever it is
+    else:
         position = await _get(bus, name, "Position")
         if not isinstance(position, int):
             return False
@@ -127,7 +127,7 @@ async def _try_seek(bus: MessageBus, name: str, metadata: dict[str, Any], target
 async def _candidates(bus: MessageBus, path: str, before: set[str]) -> list[tuple[str, dict[str, Any]]]:
     names = await player_names(bus)
     found = []
-    for name in sorted(names, key=lambda n: n in before):  # newly appeared players first
+    for name in sorted(names, key=lambda n: n in before):
         metadata = await _get(bus, name, "Metadata")
         if not isinstance(metadata, dict):
             continue

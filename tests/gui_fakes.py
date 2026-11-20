@@ -22,7 +22,7 @@ class FakeClient:
         self.running = status is not None
         self.status_value = status
         self.failed_rows: list[tuple[str, str]] = []
-        self.reload_result: list[str] | None = []  # None: an older daemon without ReloadConfig
+        self.reload_result: list[str] | None = []
         self.systemctl_result: tuple[int, str] = (0, "")
         self.status_error: BaseException | None = None
         self.calls: list[str] = []

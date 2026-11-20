@@ -30,7 +30,7 @@ class Relay(QObject):
         """Run `fn` on this object's thread; safe to call from any thread."""
         try:
             self._fire.emit(fn)
-        except RuntimeError:  # deleted meanwhile
+        except RuntimeError:
             pass
 
     def when_done(self, future: Future[Any], on_result: Callable[[Any], None],

@@ -44,7 +44,6 @@ def media(tmp_path_factory) -> dict[str, Path]:
     ffmpeg("-f", "lavfi", "-i", "testsrc=size=320x240:rate=10", "-t", "70", *vcodec, str(files["silent_video"]))
     ffmpeg("-display_rotation:v:0", "90", "-i", str(files["silent_video"]), "-t", "5", "-c", "copy",
            str(files["rotated"]))
-    # 0-60 s tone, 60-120 s digital silence, 120-121 s tone (a 1 s tail: dropped)
     ffmpeg("-f", "lavfi", "-i",
            "aevalsrc='if(lt(t,60)+gte(t,120),0.5*sin(2*PI*440*t),0)':s=22050:d=121",
            "-c:a", "flac", str(files["audio"]))
@@ -96,17 +95,17 @@ def test_video_with_audio(media, cfg):
     v = chunks[0].content
     assert isinstance(v, list) and len(v) == MAX_VIDEO_FRAMES
     assert all(f.mode == "RGB" and f.size == (320, 240) for f in v)
-    assert len(chunks[4].content) in (5, 6)  # 10 s at 32 frames/60 s
+    assert len(chunks[4].content) in (5, 6)
     a = chunks[1].content
     assert a.dtype == np.float32 and a.ndim == 1 and a.shape[0] == 60 * AUDIO_SAMPLE_RATE
-    assert 0.05 < float(np.sqrt(np.mean(a**2))) < 1.0  # lavfi sine: amplitude 1/8
+    assert 0.05 < float(np.sqrt(np.mean(a**2))) < 1.0
     assert chunks[5].content.shape[0] == pytest.approx(10 * AUDIO_SAMPLE_RATE, abs=2000)
 
 
 def test_video_frames_change_over_time(media, cfg):
     first = next(iter(extract(media["av"], "video", cfg)))
     frames = [np.asarray(f, dtype=np.int16) for f in first.content]
-    assert np.abs(frames[0] - frames[-1]).mean() > 1  # testsrc has a moving counter/gradient
+    assert np.abs(frames[0] - frames[-1]).mean() > 1
 
 
 def test_video_without_audio_and_trailing_segment(media, cfg):
@@ -130,7 +129,6 @@ def test_large_video_downscaled(tmp_path, cfg):
 
 def test_audio_segments_silence_and_tail(media, cfg):
     chunks = list(extract(media["audio"], "audio", cfg))
-    # segment 2 (60-120 s) is digital silence, segment 3 (120-121 s) is a 1 s tail
     assert [c.locator for c in chunks] == ["00:00–01:00"]
     assert chunks[0].modality == "audio" and chunks[0].content.shape == (60 * AUDIO_SAMPLE_RATE,)
 
@@ -179,12 +177,9 @@ def test_early_close_kills_ffmpeg(media, cfg, kind):
     running = child_pids() - before
     assert running, "ffmpeg should be running while the generator is suspended"
     gen.close()
-    assert child_pids() - before == set()  # killed and reaped: no zombie left behind
+    assert child_pids() - before == set()
     for pid in running:
         assert not Path(f"/proc/{pid}").exists()
-
-
-# ------------------------------------------------------------------ watchdog / exit status
 
 
 def fake_ffmpeg(tmp_path: Path, monkeypatch, body: str) -> Path:
@@ -219,7 +214,6 @@ def test_ffmpeg_stall_is_killed(media, cfg, tmp_path, monkeypatch):
 def test_ffmpeg_too_slow_is_killed(media, cfg, tmp_path, monkeypatch):
     from semma.extract import media as media_mod
 
-    # trickles output forever: never stalls, but far slower than the decode budget allows
     fake_ffmpeg(tmp_path, monkeypatch, "while True:\n    out.write(b'\\0' * 64); out.flush(); time.sleep(0.02)")
     monkeypatch.setattr(media_mod, "MIN_BUDGET", 1.0)
     before = child_pids()
@@ -235,7 +229,7 @@ def test_ffmpeg_runs_in_own_session(media, cfg):
     gen = extract(media["audio"], "audio", cfg)
     next(gen)
     (pid,) = child_pids() - before
-    assert os.getsid(pid) == pid != os.getsid(0)  # Ctrl-C to our process group does not reach it
+    assert os.getsid(pid) == pid != os.getsid(0)
     gen.close()
 
 
@@ -249,14 +243,14 @@ def test_partial_decode_with_error_exit_fails(media, cfg, tmp_path, monkeypatch)
 
 def test_corrupt_tail_with_error_exit_accepted(media, cfg, tmp_path, monkeypatch):
     """A non-zero exit after >= 90 % of the expected duration (a corrupt tail) is accepted."""
-    n = AUDIO_SAMPLE_RATE * 115  # 115 of 121 s
+    n = AUDIO_SAMPLE_RATE * 115
     fake_ffmpeg(tmp_path, monkeypatch, f"out.write(b'\\x00\\x00\\x00\\x3f' * {n}); sys.exit(1)")
     chunks = list(extract(media["audio"], "audio", cfg))
     assert [c.locator for c in chunks] == ["00:00–01:00", "01:00–01:55"]
 
 
 def test_video_truncated_by_error_exit_fails(media, cfg, tmp_path, monkeypatch):
-    frame = 320 * 240 * 3  # 32 frames = one 60 s segment of a 130 s video
+    frame = 320 * 240 * 3
     fake_ffmpeg(tmp_path, monkeypatch, f"out.write(b'\\x80' * {frame * 32}); sys.exit(1)")
     with pytest.raises(ExtractionError, match="could not decode"):
         list(extract(media["av"], "video", cfg))
@@ -265,7 +259,7 @@ def test_video_truncated_by_error_exit_fails(media, cfg, tmp_path, monkeypatch):
 def test_playlist_refused(cfg, tmp_path):
     seg = tmp_path / "a.ts"
     ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-c:a", "aac", "-f", "mpegts", str(seg))
-    lst = tmp_path / "list.mp4"  # concat demuxer is detected from the content, not the name
+    lst = tmp_path / "list.mp4"
     lst.write_text(f"ffconcat version 1.0\nfile {seg.name}\n")
     with pytest.raises(ExtractionError, match="playlist/concat"):
         list(extract(lst, "audio", cfg))

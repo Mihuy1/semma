@@ -250,8 +250,6 @@ def cmd_search(args: argparse.Namespace, cfg: Config) -> int:
               f"to re-embed everything with it, or set model.name back.", file=sys.stderr)
         return 1
     embedder.load_query()
-    # Score every vector in memory, as the daemon does (loaded up front so the timing below is
-    # the search alone); above vector_cache_max_chunks the search falls back to sqlite-vec.
     store.warm_vector_cache(cfg.vector_cache_max_chunks)
     searcher = Searcher(store, cfg, embedder)
     results = searcher.search(args.query, limit=args.n, kinds=args.kind)
@@ -320,7 +318,6 @@ def _quiet_runner(cmd: list[str]) -> int:
     return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode
 
 
-# Status keys `format_daemon_status` shows in their own sections instead of as key/value lines.
 _STATUS_DETAIL_PREFIXES = ("download_", "run_", "scan_")
 _STATUS_BY_KIND = ("pending_by_kind", "indexed_by_kind", "failed_by_kind")
 
@@ -430,7 +427,7 @@ def cmd_setup(args: argparse.Namespace, cfg: Config) -> int:
             print("(An index already existed, so the service was indexing already.)")
     try:
         needs_restart = daemon_reload_config()
-    except Exception as exc:  # DBusError: the service refused the config file
+    except Exception as exc:
         print(f"The service did not accept the settings: {exc}", file=sys.stderr)
         return 1
     if needs_restart is None:

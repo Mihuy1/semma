@@ -172,11 +172,9 @@ def test_worker_crash_error_retries_multibatch_and_fails_fast_on_single_item() -
     emb._load_model = fake_load_model  # type: ignore[method-assign]
     out = emb.embed_batch("text", ["a", "b", "c", "d"], ["t1", "t2", "t3", "t4"])
     assert out.shape == (4, 768)
-    # First model crashed on batch of 4, second model crashed on batch of 2, third succeeded on 1s.
     assert len(models) == 3
     assert emb.batch_limit("text") == 1
 
-    # Single-item crash fails fast without retry.
     class AlwaysCrashModel:
         _closed = False
 
@@ -219,7 +217,6 @@ def test_llama_cpp_parity_with_reference_bf16() -> None:
     ref = np.load(REFERENCE_NPZ)
     emb = Embedder(device="vulkan")
     try:
-        # 1. Text-only query worker vs bf16 reference.
         emb.load_query()
         assert emb.query_model_loaded and not emb.index_model_loaded
         q_vecs = np.stack([emb.embed_query(q) for q in QUERIES], axis=0)
@@ -227,14 +224,12 @@ def test_llama_cpp_parity_with_reference_bf16() -> None:
             cos = float(q_vecs[idx] @ ref["queries"][idx])
             assert cos >= 0.999, f"query[{idx}] ({q!r}) cosine={cos:.6f}"
 
-        # 2. Full multimodal worker vs bf16 reference.
         d_vecs = emb.embed_batch("text", DOCS_TEXT, DOCS_TITLES)
         assert emb.index_model_loaded and not emb.query_model_loaded
         for idx in range(len(DOCS_TEXT)):
             cos = float(d_vecs[idx] @ ref["docs_text"][idx])
             assert cos >= 0.999, f"docs_text[{idx}] cosine={cos:.6f}"
 
-        # Full model answers queries identically to text-only worker.
         for idx, q in enumerate(QUERIES):
             emb._query_cache.clear()
             v_full = emb.embed_query(q)
@@ -247,17 +242,12 @@ def test_llama_cpp_parity_with_reference_bf16() -> None:
 
         a_vecs = emb.embed_batch("audio", _synthetic_audios(), ["a1", "a2"])
         assert float(a_vecs[0] @ ref["audios"][0]) >= 0.999
-        # Upstream llama.cpp mtmd_audio_preprocessor_gemma4a clamps mel bins at 0.001 rather than
-        # adding 0.001, introducing ~0.002 drift on sparse pure dual-tone sine waves (broadband
-        # audio scores >= 0.9997).
         assert float(a_vecs[1] @ ref["audios"][1]) >= 0.997
 
         v_vec = emb.embed_batch("video", [_synthetic_video(8)], ["vid"])[0]
         assert float(v_vec @ ref["video"]) >= 0.999
 
-        # 3. 32-frame video (>2048 tokens) expands context, then text calls shrink it back to 2048
-        #    with identical (>2048-token and standard) text truncation & embeddings.
-        long_text = "alpha beta gamma delta epsilon zeta eta theta " * 600  # > 2048 tokens
+        long_text = "alpha beta gamma delta epsilon zeta eta theta " * 600
         before_vecs = emb.embed_batch("text", [long_text, DOCS_TEXT[0]], ["long", DOCS_TITLES[0]])
         assert emb._model is not None and emb._model.ctx_size() == DEFAULT_MAX_TOKENS
 
@@ -350,7 +340,6 @@ def test_worker_subprocess_cleanup_on_unload() -> None:
         q_pid = emb._query_model._proc.pid
         assert q_pid is not None and _pid_alive(q_pid)
 
-        # Loading full GPU index worker drops the GPU query worker cleanly.
         emb.load()
         assert not _pid_alive(q_pid)
         assert emb._model is not None and emb._model._proc is not None

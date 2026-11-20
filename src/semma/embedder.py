@@ -48,17 +48,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Guard against runaway chunks before tokenization.
 MAX_TEXT_CHARS = 16_000
 DEFAULT_MAX_TOKENS = 2048
 EXPANDED_VIDEO_CTX = 4608
-MAX_AUDIO_SAMPLES = 480_000  # 30 s at 16 kHz
+MAX_AUDIO_SAMPLES = 480_000
 MAX_VIDEO_FRAMES = 32
 
 QUERY_PREFIX = "task: search result | query: "
-QUERY_CACHE_SIZE = 256  # type-as-you-go sends the same prefixes again (backspace, re-typing)
-# After an OOM the batch size of that modality stays reduced; it is doubled again (up to the
-# configured size) only after this many successful batches in a row.
+QUERY_CACHE_SIZE = 256
 OOM_REGROW_AFTER = 200
 
 GGUF_REVISION = "bfcd298762cc34d0357ece5ebdd31791a3a374d8"
@@ -289,8 +286,6 @@ def ensure_model_file(kind: str, model_dir: Path) -> Path:
             digest = hasher.hexdigest()
             total = part.stat().st_size
             if total < expected_size:
-                # The server closed the connection early (urllib reports that as the end of the
-                # data): the part is kept, and the next call continues after it.
                 raise RuntimeError(f"download of {filename} stopped at {total} of {expected_size} bytes")
             if total != expected_size or digest != expected_sha256:
                 part.unlink(missing_ok=True)
@@ -400,14 +395,13 @@ def _download_resumable(url: str, part: Path, expected_size: int) -> None:
     except urllib.error.HTTPError as exc:
         if exc.code != 416 or not have:
             raise
-        # The part is longer than the server's file (left by another model revision): start again.
         part.unlink()
         return _download_resumable(url, part, expected_size)
     with resp:
         resumed = (have > 0 and resp.status == 206
                    and (resp.headers.get("Content-Range") or "").startswith(f"bytes {have}-"))
         if have and resp.status == 206 and not resumed:
-            part.unlink()  # a range other than the one asked for
+            part.unlink()
             return _download_resumable(url, part, expected_size)
         with part.open("ab" if resumed else "wb") as fh:
             while chunk := resp.read(DOWNLOAD_CHUNK):
@@ -415,10 +409,6 @@ def _download_resumable(url: str, part: Path, expected_size: int) -> None:
             fh.flush()
             os.fsync(fh.fileno())
 
-
-# ---------------------------------------------------------------------------
-# llama.cpp / libmtmd ctypes definitions (verified against build b12347 ABI)
-# ---------------------------------------------------------------------------
 
 LLAMA_POOLING_TYPE_MEAN = 1
 LLAMA_ATTENTION_TYPE_NON_CAUSAL = 1
@@ -572,8 +562,6 @@ def _load_shared_libs(
     need_mtmd: bool,
     need_vulkan: bool = True,
 ) -> tuple[ctypes.CDLL, ctypes.CDLL, ctypes.CDLL | None]:
-    # A build with ggml's backends as modules (GGML_BACKEND_DL, what the packages carry) has no
-    # libggml-cpu.so: ggml picks the CPU variant for this machine itself (see _backends_are_modules).
     names = ["libggml-base.so"]
     if not _backends_are_modules(lib_dir):
         names.append("libggml-cpu.so")
@@ -764,10 +752,6 @@ def _bind_mtmd_api(mtmd: ctypes.CDLL) -> None:
     mtmd.mtmd_batch_get_output_embd.restype = c_float_p
 
 
-# ---------------------------------------------------------------------------
-# Subprocess worker implementation
-# ---------------------------------------------------------------------------
-
 def _looks_like_oom(msg: str) -> bool:
     low = msg.lower()
     return (
@@ -800,8 +784,6 @@ class _LlamaEngine:
         if self.mtmd is not None:
             self.mtmd.mtmd_log_set(self._log_cb, None)
 
-        # Module backends are registered here: Vulkan only for a GPU worker (a missing or broken
-        # libvulkan leaves that backend out), then the best CPU variant for this machine.
         modules = _backends_are_modules(Path(lib_dir))
         vulkan = _vulkan_module(Path(lib_dir))
         if use_gpu and modules and vulkan is not None:
@@ -824,7 +806,7 @@ class _LlamaEngine:
 
         mparams = self.llama.llama_model_default_params()
         mparams.n_gpu_layers = -1 if self.use_gpu else 0
-        mparams.split_mode = 0  # LLAMA_SPLIT_MODE_NONE: keep the entire model on one GPU
+        mparams.split_mode = 0
         mparams.main_gpu = 0
         self.model = self.llama.llama_model_load_from_file(text_model_path.encode("utf-8"), mparams)
         if not self.model:
@@ -939,7 +921,6 @@ class _LlamaEngine:
 
         i = 0
         while i < len(token_seqs):
-            # Pack as many sequences as fit into _ctx_target (n_batch) and n_seq_max.
             group: list[np.ndarray] = []
             tok_sum = 0
             while i < len(token_seqs) and len(group) < self.n_seq_max:
@@ -1038,7 +1019,6 @@ class _LlamaEngine:
             inp_txt = _MtmdInputText(prompt_bytes, len(prompt_bytes), True, True)
             bmp_arr = (ctypes.c_void_p * len(bitmaps))(*bitmaps) if bitmaps else None
             rc = int(self.mtmd.mtmd_tokenize(self.mctx, chunks, ctypes.byref(inp_txt), bmp_arr, len(bitmaps)))
-            # chunks now owns preprocessed image/audio data; free bitmaps immediately.
             for b in bitmaps:
                 self.mtmd.mtmd_bitmap_free(b)
             bitmaps.clear()
@@ -1446,10 +1426,6 @@ def _terminate_process(proc: BaseProcess | None, conn: Connection | None) -> Non
             pass
 
 
-# ---------------------------------------------------------------------------
-# Public Embedder wrapper
-# ---------------------------------------------------------------------------
-
 def _is_gpu_device(device: str | None) -> bool:
     if not device:
         return False
@@ -1528,7 +1504,6 @@ class Embedder:
         self.requested_device = device or (cfg.device if cfg else None)
         self.requested_query_device = query_device or (cfg.query_device if cfg else "auto")
         self.batch_sizes = dict(cfg.batch_sizes if cfg else DEFAULT_BATCH_SIZES)
-        # Current batch size per modality: reduced after an OOM, regrown slowly.
         self._limits: dict[str, int] = {}
         self._ok_batches: dict[str, int] = {}
         self.dim = 768
@@ -1537,15 +1512,15 @@ class Embedder:
         self.load_seconds = 0.0
         self.query_load_seconds = 0.0
         self.index_load_seconds = 0.0
-        self.last_used = 0.0  # time.monotonic() of the last model call, load or unload
+        self.last_used = 0.0
         self.query_last_used = 0.0
         self.index_last_used = 0.0
         self._loading = False
         self._query_loading = False
         self._index_loading = False
         self._loaded_once = False
-        self._model: Any = None  # full multimodal index worker
-        self._query_model: Any = None  # text-only query worker
+        self._model: Any = None
+        self._query_model: Any = None
         self._gpu = GpuLock()
         self._cpu_query_lock = threading.Lock()
         self._load_lock = threading.Lock()
@@ -1592,7 +1567,6 @@ class Embedder:
                 except Exception:
                     pass
 
-    # -- lifecycle --------------------------------------------------------------
     @property
     def index_model_loaded(self) -> bool:
         return _is_handle_alive(self._model)
@@ -1680,8 +1654,6 @@ class Embedder:
         self._loading = True
         self._index_loading = True
         try:
-            # Drop any GPU text-only query worker before loading the full worker so we don't
-            # hold both in VRAM simultaneously.
             self._drop_dead_query_locked()
             if self._query_model is not None and _is_gpu_device(self.query_device):
                 q_handle = self._query_model
@@ -1752,9 +1724,6 @@ class Embedder:
 
     def _load_query_model(self, device: str | None = None) -> None:
         started = time.monotonic()
-        # `device` is normally the label resolved from the setting. Parsing that label again would
-        # turn "auto" (Vulkan if it works, else the processor) into an explicit "vulkan" with no
-        # fallback, and a machine with the Vulkan loader but no usable GPU could not search.
         spec = self._resolve_query_device_spec()
         if device is not None and device != spec[2]:
             spec = _parse_device_spec(device, has_vulkan_lib=self._has_vulkan_lib())
@@ -1824,7 +1793,6 @@ class Embedder:
     def _empty_cache(self, device: str | None = None) -> None:
         return None
 
-    # -- encoding -------------------------------------------------------------
     def embed_query(self, query: str) -> np.ndarray:
         """Query vector (read-only array; repeated queries come from a small LRU cache)."""
         with self._query_cache_lock:
@@ -1832,9 +1800,6 @@ class Embedder:
             if hit is not None:
                 self._query_cache.move_to_end(query)
                 return hit
-        # The full index model is only touched under the GPU lock, a CPU query model only under
-        # the CPU query lock (a GPU query model under the GPU lock). Models can be loaded or
-        # dropped while we wait for a lock, so each attempt re-checks under it and retries.
         vec = None
         while vec is None:
             if not _is_handle_alive(self._query_model) and _is_handle_alive(self._model):

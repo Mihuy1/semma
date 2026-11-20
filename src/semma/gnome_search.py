@@ -55,16 +55,10 @@ log = logging.getLogger(__name__)
 
 FOLDER_MAX_CHARS = 48
 
-# GNOME Shell asks GetResultMetas once per id and caches the result actor until the search is
-# cleared (search.js _ensureResultActors), so a thumbnail that misses this budget never shows.
-# It is much longer than KRunner's budget, which can update a match later.
 GNOME_THUMBNAIL_BUDGET_SECONDS = 0.75
-# GNOME's list view shows this many results per provider; only those get thumbnails prewarmed.
 GNOME_VISIBLE_RESULTS = 5
 
-# sd_booted(3): systemd is PID 1 when this directory exists.
 SYSTEMD_RUNTIME_DIR = "/run/systemd/system"
-# How long to watch a ``systemd-run --scope`` launch for an early failure before trusting it.
 SCOPE_START_TIMEOUT_SECONDS = 1.0
 
 
@@ -285,8 +279,6 @@ class GnomeSearchService(ServiceInterface):
 
         results = trim_weak_results(raw_results or [], self._max_results)
         ids = [self._remember(r) for r in results]
-        # Start thumbnails now so GetResultMetas (which follows right away) finds them cached.
-        # Only for the results GNOME will actually display; the rest get one on demand.
         for r in results[:GNOME_VISIBLE_RESULTS]:
             if r.kind in (ft.IMAGE, ft.VIDEO) and self._thumbnailer.get_cached(r.path, r.mtime) is None:
                 self._spawn_thumb(r)
@@ -316,7 +308,6 @@ class GnomeSearchService(ServiceInterface):
             if cached is not None:
                 ready[r.path] = cached
             else:
-                # The thumbnailer dedupes in-flight work, so this joins any prewarm task.
                 pending[self._spawn_thumb(r)] = r.path
 
         if pending and self._thumbnail_budget > 0:
@@ -334,7 +325,6 @@ class GnomeSearchService(ServiceInterface):
 
     @method()
     async def GetSubsearchResultSet(self, previous_results: "as", terms: "as") -> "as":  # noqa: F821, N802, UP037
-        # Semantic results don't narrow monotonically as the query grows: search again.
         return await self._run_search(list(terms))
 
     def _synthetic_meta(self, path: str) -> dict[str, Variant]:

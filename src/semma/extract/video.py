@@ -52,7 +52,7 @@ def video_frames(path: Path, cfg: Config, info: Probe) -> Iterator[tuple[int, li
     frame_bytes = w * h * 3
     args = [
         "-threads", str(DECODE_THREADS),
-        "-skip_loop_filter", "all",  # skip deblocking: ~20-30 % faster decode, invisible at 512 px
+        "-skip_loop_filter", "all",
         *input_args(path), "-map", f"0:{info.video_index}", "-an", "-sn", "-dn",
         "-t", f"{cfg.max_media_seconds:.3f}",
         "-vf", f"fps={fps.numerator}/{fps.denominator},scale={w}:{h}:flags=bilinear,setsar=1",
@@ -75,14 +75,13 @@ def video_frames(path: Path, cfg: Config, info: Probe) -> Iterator[tuple[int, li
                 yield index, frames
                 index += 1
         rc, err = pipe.finish()
-    # each frame stands for 1/fps seconds; count the last one as complete (sampling granularity)
     check_exit(rc, err, (n_frames + 1) / float(fps) if n_frames else 0.0, expected_seconds(info, cfg), "video")
 
 
 def extract_video(path: Path, cfg: Config) -> Iterator[Chunk]:
     info = probe(path)
     if not info.has_video:
-        if info.has_audio:  # e.g. an .mp4 holding only audio (or audio + cover art)
+        if info.has_audio:
             yield from extract_audio(path, cfg, info)
             return
         raise ExtractionError("no video or audio stream")
@@ -90,7 +89,7 @@ def extract_video(path: Path, cfg: Config) -> Iterator[Chunk]:
     frame_step = seg / MAX_VIDEO_FRAMES
     total = expected_seconds(info, cfg)
     audio = audio_segments(path, cfg, total) if info.has_audio else None
-    audio_next = 0  # index of the next audio segment to pull
+    audio_next = 0
     video_error: ExtractionError | None = None
     video_segments = 0
     yielded = 0
@@ -106,9 +105,9 @@ def extract_video(path: Path, cfg: Config) -> Iterator[Chunk]:
                 return
             except ExtractionError:
                 audio = None
-                if audio_next > 0:  # the track decoded, then failed: a truncated decode
+                if audio_next > 0:
                     raise
-                return  # undecodable audio track: keep the frames
+                return
             i, audio_next = audio_next, audio_next + 1
             if keep_segment(i, samples):
                 yield audio_chunk(start, samples, total)
@@ -132,17 +131,15 @@ def extract_video(path: Path, cfg: Config) -> Iterator[Chunk]:
                 yield Chunk("video", frames, time_range(start, end, total), "", float(start))
                 yielded += 1
             del frames
-            for chunk in audio_upto(index):  # an audio track failing part-way raises here
+            for chunk in audio_upto(index):
                 yield chunk
                 yielded += 1
-        for chunk in audio_upto(10**9):  # audio running longer than the video stream
+        for chunk in audio_upto(10**9):
             yield chunk
             yielded += 1
     finally:
         frames_gen.close()
         if audio is not None:
             audio.close()
-    # A video stream that cannot be decoded at all is tolerated when the audio track worked;
-    # one that failed part-way through (or nothing at all decoded) fails the file.
     if video_error is not None and (video_segments > 0 or yielded == 0):
         raise video_error
