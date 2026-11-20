@@ -51,8 +51,6 @@ def _default_runner(cmd: list[str]) -> int:
 
 def _resolve_python(python: str | None) -> str:
     raw = python or sys.executable
-    # Keep symlink name (e.g. .venv/bin/python) intact so virtualenv activation works,
-    # while resolving relative paths and ~ to an absolute path.
     return os.path.abspath(os.path.expanduser(raw))
 
 
@@ -180,7 +178,7 @@ def render_systemd_unit_file(python_path: str) -> str:
         "Description=Semma semantic file search daemon\n"
         "After=graphical-session.target\n"
         "PartOf=graphical-session.target\n"
-        "ConditionUser=!@system\n"  # not for a login screen's own account
+        "ConditionUser=!@system\n"
         "\n"
         "[Service]\n"
         "Type=dbus\n"
@@ -290,7 +288,6 @@ def _build_status(
     run: Callable[[list[str]], int],
 ) -> dict[str, Any]:
     files = {name: path.is_file() for name, path in path_map.items()}
-    # The tray's autostart entry is optional: removing it is how a user turns the tray off.
     required = [ok for name, ok in files.items() if name not in OPTIONAL_STATUS_FILES]
     enabled = run(["systemctl", "--user", "is-enabled", dbus_names.SYSTEMD_UNIT]) == 0
     active = run(["systemctl", "--user", "is-active", dbus_names.SYSTEMD_UNIT]) == 0
@@ -360,8 +357,6 @@ def uninstall_kde(
     desktop_path, dbus_service_path, systemd_unit_path = _target_paths()
     app_desktop_path = _app_desktop_path()
     tray_autostart_path = _tray_autostart_path()
-    # The application entry, tray autostart entry, and D-Bus/systemd files are shared with the
-    # GNOME provider: keep them while that is still installed.
     gnome_installed = shared_service_kept_for_kde(system_data_dir=system_data_dir)
 
     if gnome_installed:

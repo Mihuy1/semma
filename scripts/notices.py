@@ -54,7 +54,6 @@ printed once, after the names of the components that ship them.
 """
 
 LICENCE_FILE = re.compile(r"^(licen[cs]e|copying|notice|copyright|unlicense)", re.I)
-# Extract only licence files from the upstream source archives, never the tree.
 TAR_PATTERNS = (
     "*/LICENSES/*",
     "*LICENSE*",
@@ -63,16 +62,12 @@ TAR_PATTERNS = (
     "*[Cc]opyright*",
     "*NOTICE*",
     "*/qt_attribution.json",
-    # The shiboken support header carries a PSF licence in its body.
     "*/bufferprocs_py37.h",
     "*/PSF-*.txt",
 )
 
-# Licence files of Qt's tests, examples and docs: none of that is in the package.
 SKIP_PATTERNS = ("*/tests/*", "*/examples/*", "*/doc/*")
 
-# Wheels that ship no licence file, only metadata: their texts from the release's source tag.
-# {v} is the installed version. A new wheel without licence files fails the build until listed.
 UPSTREAM_LICENCES = {
     "sqlite-vec": ("https://github.com/asg017/sqlite-vec", ["LICENSE-MIT", "LICENSE-APACHE"]),
 }
@@ -374,10 +369,7 @@ def main() -> None:
     ).rstrip("\n"))
     out.append("")
 
-    # 2. Semma itself, followed by 3. the llama.cpp licences.
     section("Semma", ("LICENSE", read(repo / "LICENSE")))
-    # build/llama is scripts/build-llama.sh's output (the libraries and their licenses), which CI
-    # restores from its cache without the llama.cpp source.
     llama = repo / "build" / "llama"
     llama_texts = [("llama.cpp/LICENSE", read(llama / "LICENSE.llama.cpp"))]
     for path in sorted(need_dir(llama / "licenses").iterdir()):
@@ -385,7 +377,6 @@ def main() -> None:
             llama_texts.append((f"llama.cpp/licenses/{path.name}", read(path)))
     section("llama.cpp licences", *llama_texts)
 
-    # 4. CPython and the python-build-standalone component licences.
     qt_base, qt_wayland, pyside, pbs_dir = source_licences(
         repo / "build" / "notices-src", qt_version, py_version, pbs
     )
@@ -397,7 +388,6 @@ def main() -> None:
             python_texts.append((f"python/{path.name}", read(path)))
     section("Python licences", *python_texts)
 
-    # 5. ICU, Qt, Qt Wayland and PySide/shiboken sources at the staged version.
     icu_url = (
         f"https://raw.githubusercontent.com/unicode-org/icu/release-"
         f"{icu_parts[0]}-{icu_parts[1]}/icu4c/LICENSE"
@@ -412,7 +402,6 @@ def main() -> None:
             qt_texts.append((f"{prefix_name}/{name}", text))
     section("Qt/PySide licence files", *qt_texts)
 
-    # 6. Every installed Python distribution (except Semma's own licence, above).
     package_texts: list[tuple[str, str]] = []
     metadata_only = []
     for name, (dist, meta) in sorted(dists.items()):

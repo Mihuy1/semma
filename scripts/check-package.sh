@@ -1,20 +1,7 @@
 #!/bin/bash
-# Checks a package the way someone first meets it: installed with the distribution's own package
-# manager in a bare container (no desktop, no GPU, so the model runs on the processor), the daemon
-# must find every library it needs without pulling in desktop libraries, the window must find all of
-# its libraries (Wayland, X11 and offscreen) once the package's recommended GUI libraries are
-# installed and open cleanly with QT_QPA_PLATFORM=offscreen, and Semma must index a note and a
-# picture with the real model, find both by meaning, and start its service when something asks for
-# it on the session bus (as KRunner and GNOME Shell do).
-#   scripts/check-package.sh dist/semma-0.6.0-1.x86_64.rpm [image]   (default: fedora:latest)
-#   scripts/check-package.sh dist/semma_0.6.0-1_amd64.deb [image]    (default: ubuntu:24.04)
-# The model comes from ~/.local/share/semma/models when it is there, else it is downloaded into
-# build/models once. Needs podman or docker.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 package=${1:?usage: scripts/check-package.sh <package> [image]}
-# install_gui: the recommends without Vulkan, ffmpeg and Tesseract (optional for the daemon, not
-# libraries of the window, and OCR is off by default), so only the window's libraries come in.
 case $package in
   *.rpm) image=${2:-registry.fedoraproject.org/fedora:latest}
          install="dnf install -y -q --setopt=install_weak_deps=False /pkg/$(basename "$package") dbus-daemon systemd > /dev/null"
@@ -43,9 +30,6 @@ echo "checking $package on $image"
   -e SEMMA_MODEL_DIR=/models -e install_gui="$install_gui" -e reinstall="$reinstall" -e remove="$remove" "$image" bash -c "
 set -euo pipefail
 $install"'
-# The licenses of everything the package carries (scripts/notices.py). A .deb also has them where
-# Debian looks for them, in copyright: the only file under /usr/share/doc that minimized systems
-# (such as the Ubuntu container here) install, so on Debian/Ubuntu that is what is checked.
 doc=/usr/share/doc/semma
 if command -v dpkg > /dev/null; then
   notices=$doc/copyright
@@ -64,14 +48,11 @@ for dist in pyside6_essentials shiboken6; do
   test -s /usr/lib/semma/python/lib/python3.13/site-packages/"$dist"-*.dist-info/METADATA ||
     { echo "missing $dist metadata"; exit 1; }
 done
-# Without recommends (a minimal or headless install), everything the daemon and CLI use must
-# already find its libraries; only PySide6 waits for the recommended desktop libraries.
 missing=$(find /usr/lib/semma \( -path "*/site-packages/PySide6" -o -path "*/site-packages/shiboken6" \) -prune \
   -o -type f \( -name "*.so*" -o -name python3.13 \) -exec ldd {} + 2>&1 |
   grep "not found" | grep -v libvulkan.so.1 | sort -u || true)   # Vulkan is optional
 if [[ -n $missing ]]; then echo "missing daemon libraries:"; echo "$missing"; exit 1; fi
 test -L /etc/systemd/user/graphical-session.target.wants/semma.service || { echo "the service is not enabled for users"; exit 1; }
-# An upgrade (here the same version again) leaves the service off where an administrator turned it off.
 systemctl --global disable semma.service 2> /dev/null
 $reinstall > /dev/null
 test ! -e /etc/systemd/user/graphical-session.target.wants/semma.service || { echo "an upgrade enabled the service again"; exit 1; }
@@ -87,8 +68,6 @@ grep -qx "Exec=/usr/lib/semma/python/bin/python3.13 -I -m semma gui" /usr/share/
 grep -qx "Exec=/usr/lib/semma/python/bin/python3.13 -I -m semma tray" /etc/xdg/autostart/io.github.Semma.Tray.desktop ||
   { echo "tray autostart entry does not start semma tray"; exit 1; }
 
-# With the recommended GUI libraries installed, every carried library and plugin (including the
-# X11 and Wayland platform plugins) must resolve, and `semma gui` must open and render cleanly.
 eval "$install_gui"
 missing=$(find /usr/lib/semma -type f \( -name "*.so*" -o -name python3.13 \) -exec ldd {} + 2>&1 |
   grep "not found" | grep -v libvulkan.so.1 | sort -u || true)
@@ -105,8 +84,6 @@ from PySide6.QtCore import QLibraryInfo, QTimer
 from semma.gui import app as gui_app, main as gui_main
 from semma.gui.onboarding import OnboardingWindow
 assert QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath).startswith(\"/usr/lib/semma/\")
-# Qt only prints an exception raised in a slot and keeps running, so a failed check must end the
-# process itself, and a window that never settles must not hang the job.
 def fail(*exc):
     traceback.print_exception(*exc)
     sys.stderr.flush()
@@ -125,8 +102,6 @@ def grab(win):
     assert not pix.isNull() and pix.width() > 0 and pix.height() > 0
     return f\"{pix.width()}x{pix.height()}\"
 def check_setup():
-    # A fresh install has not been set up, so the setup window opens first; finishing it opens the
-    # main window in its place.
     wizards = visible(OnboardingWindow)
     assert len(wizards) == 1 and not visible(gui_app.MainWindow), app.topLevelWidgets()
     print(f\"setup window: ok ({grab(wizards[0])})\", flush=True)
@@ -169,8 +144,6 @@ semma index > /dev/null
 semma status
 [[ $(semma search "how long to bake the cake" -n 1 --json) == *recipe.txt* ]] ||
   { echo "search did not find recipe.txt"; exit 1; }
-# Meaning, not words (three files are too few for the search to rank by meaning alone): each
-# question is closest to its own file, and the picture to its own description.
 /usr/lib/semma/python/bin/python3.13 -c "
 from pathlib import Path
 from PIL import Image
@@ -189,7 +162,6 @@ assert image @ circle > max(image @ cake, image @ money), (image @ circle, image
 print(\"meaning: ok on\", e.device)
 e.unload()"
 
-# The session bus starts the service from its .service file, as it does for KRunner and GNOME Shell.
 dbus-run-session -- /usr/lib/semma/python/bin/python3.13 -c "
 from semma.daemon import daemon_call
 status = daemon_call(\"Status\", auto_start=True, timeout=60)

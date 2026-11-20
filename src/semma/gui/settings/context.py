@@ -35,7 +35,7 @@ class SettingsContext:
         raw = read_raw(path)
         try:
             cfg = load_config(path, home)
-        except Exception as exc:  # a value of the wrong type in a hand-edited file
+        except Exception as exc:
             raise ConfigWriteError(f"cannot read {path}: {exc}") from exc
         return cls(path, cfg, raw)
 
@@ -59,7 +59,7 @@ class Problem:
     """A note under a section's form. A blocking one keeps Apply disabled."""
     text: str
     blocking: bool = False
-    code: str = ""  # a stable name for callers that treat one problem specially; not shown
+    code: str = ""
 
 
 def merge_changes(*parts: Changes) -> Changes:

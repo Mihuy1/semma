@@ -1,10 +1,3 @@
-# Builds the .rpm and the .deb with scripts/package.sh and checks each with scripts/check-package.sh
-# in a clean Fedora or Ubuntu container: installs it, opens the window, indexes and searches with the
-# real model on the processor, and starts the service over D-Bus. The built packages are kept with
-# the run for a week. The release workflow runs this one and publishes what it built.
-#
-# The llama.cpp build is cached on scripts/build-llama.sh (its commit and flags live there), and the
-# model on its revision and file list in embedder.py, so most runs build and download neither.
 name: Package
 
 on:
@@ -39,7 +32,6 @@ on:
         value: ${{ jobs.build.outputs.version }}
 
 concurrency:
-  # A newer push replaces a run still going on the same branch; a release (a tag) is never cancelled.
   group: package-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
@@ -67,9 +59,6 @@ jobs:
           path: build/llama
           key: llama-${{ hashFiles('scripts/build-llama.sh') }}
 
-      # The license files scripts/notices.py takes from the Qt, PySide and Python sources (~175 MB of
-      # downloads; only the licenses are kept). Its folders are named by version, so an older cache
-      # is a fine start: only a changed version downloads again.
       - name: Notices sources cache
         uses: actions/cache@v4
         with:
@@ -109,7 +98,6 @@ jobs:
         id: model
         run: echo "key=$(sed -n '/^GGUF_REVISION/,/^}/p' src/semma/embedder.py | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
-      # check-package.sh downloads the model into build/models when it is not there.
       - name: Model cache
         uses: actions/cache@v4
         with:

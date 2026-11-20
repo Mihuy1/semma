@@ -163,7 +163,6 @@ def test_bridge_forwards_results_metas_errors_and_timeouts(two_private_buses) ->
             bridge_local.export(GNOME_PATH, bridge)
             assert await bridge_local.request_name(BUS_NAME) == RequestNameReply.PRIMARY_OWNER
 
-            # Confirm dbus-fast unpacks aa{sv} values directly as Variant objects.
             direct_metas = await bridge_upstream.call(
                 Message(
                     destination=BUS_NAME,
@@ -177,12 +176,10 @@ def test_bridge_forwards_results_metas_errors_and_timeouts(two_private_buses) ->
             assert direct_metas.message_type == MessageType.METHOD_RETURN
             assert all(isinstance(v, Variant) for v in direct_metas.body[0][0].values())
 
-            # 1. GetInitialResultSet round-trip through the bridge.
             res = await _call_gnome(client, "GetInitialResultSet", "as", [["rocket", "launch"]])
             assert res.message_type == MessageType.METHOD_RETURN
             assert res.body[0] == ["doc:rocket_launch"]
 
-            # 2. GetResultMetas with icon-data (iiibiiay) round-trip through the bridge.
             metas_msg = await _call_gnome(client, "GetResultMetas", "as", [["doc:rocket_launch"]])
             assert metas_msg.message_type == MessageType.METHOD_RETURN
             metas = metas_msg.body[0]
@@ -195,7 +192,6 @@ def test_bridge_forwards_results_metas_errors_and_timeouts(two_private_buses) ->
             assert icon_data.signature == "(iiibiiay)"
             assert icon_data.value == (2, 2, 8, True, 8, 4, fake.icon_pixels)
 
-            # 3. Upstream error -> empty default.
             fake.mode = "error"
             err_res = await _call_gnome(client, "GetInitialResultSet", "as", [["boom"]])
             assert err_res.message_type == MessageType.METHOD_RETURN
@@ -204,7 +200,6 @@ def test_bridge_forwards_results_metas_errors_and_timeouts(two_private_buses) ->
             assert err_metas.message_type == MessageType.METHOD_RETURN
             assert err_metas.body[0] == []
 
-            # 4. Upstream timeout -> empty default.
             fake.mode = "ok"
             fake.delay = 0.6
             to_res = await _call_gnome(client, "GetInitialResultSet", "as", [["slow"]])

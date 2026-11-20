@@ -217,7 +217,6 @@ async def _run_bridge(upstream_address: str, timeout: float) -> int:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
         for task in done:
-            # Consume any exception from wait_for_disconnect on abrupt close.
             task.exception() if not task.cancelled() else None
         return 0
     finally:

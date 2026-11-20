@@ -139,7 +139,6 @@ class PerformanceSection(SettingsSection):
         super().__init__(parent)
         self._saved = pfm.PerformanceValues()
 
-        # Model & GPU group
         self.hw_box = GraphicsCardGroup(
             "Changing this setting requires a service restart.", self
         )
@@ -150,7 +149,6 @@ class PerformanceSection(SettingsSection):
         self.gpu_busy_threshold = self.hw_box.gpu_busy_threshold
         self.hw_box.edited.connect(self._edited)
 
-        # Scanning & search group
         scan_box = QGroupBox("Scanning and desktop search", self)
         sl = QVBoxLayout(scan_box)
         sl.setSpacing(8)

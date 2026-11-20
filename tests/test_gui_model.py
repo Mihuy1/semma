@@ -15,8 +15,6 @@ from semma.gui.settings.context import Problem, SettingsContext, merge_changes
 HOME = Path("/home/u")
 
 
-# -- formatting -----------------------------------------------------------------------------
-
 @pytest.mark.parametrize(("n", "text"), [
     (0, "0 B"), (999, "999 B"), (1000, "1.0 kB"), (1500, "1.5 kB"), (12_345_678, "12 MB"),
     (864_676_480, "865 MB"), (2_500_000_000, "2.5 GB"),
@@ -29,7 +27,7 @@ def test_format_bytes_of_uses_the_unit_of_the_total() -> None:
     assert m.format_bytes_of(412_000_000, 864_676_480) == "412 of 865 MB"
     assert m.format_bytes_of(5_000_000, 2_500_000_000) == "0.0 of 2.5 GB"
     assert m.format_bytes_of(900, 1000) == "0.9 of 1.0 kB"
-    assert m.format_bytes_of(2000, 1000) == "1.0 of 1.0 kB"  # never more than the total
+    assert m.format_bytes_of(2000, 1000) == "1.0 of 1.0 kB"
 
 
 def test_counts_and_plurals() -> None:
@@ -42,7 +40,7 @@ def test_counts_and_plurals() -> None:
 @pytest.mark.parametrize(("ago", "text"), [
     (0, "Just now"), (59, "Just now"), (60, "1 minute ago"), (12 * 60 + 30, "12 minutes ago"),
     (3600, "1 hour ago"), (5 * 3600, "5 hours ago"), (86400, "1 day ago"), (3 * 86400, "3 days ago"),
-    (-30, "Just now"),  # clocks of two processes
+    (-30, "Just now"),
 ])
 def test_format_ago(ago: float, text: str) -> None:
     assert m.format_ago(1_000_000.0 - ago, now=1_000_000.0) == text
@@ -73,8 +71,6 @@ def test_elide_middle() -> None:
     text = m.elide_middle("~/" + "a" * 100 + "/end", 20)
     assert len(text) == 20 and text.startswith("~/aa") and text.endswith("/end") and "…" in text
 
-
-# -- headlines ------------------------------------------------------------------------------
 
 def test_headline_downloading_uses_all_model_files() -> None:
     h = m.headline(status(state="downloading", download_file="model.gguf", download_done=100_000_000,
@@ -193,8 +189,6 @@ def test_status_view_paused_flag() -> None:
     assert not m.status_view(status(state="indexing"), HOME).paused
 
 
-# -- the Folders section -------------------------------------------------------------------
-
 @pytest.fixture
 def home(tmp_path: Path) -> Path:
     h = tmp_path / "home"
@@ -285,7 +279,6 @@ def test_folders_problems(home: Path) -> None:
     assert not any(p.blocking for p in fm.problems(v, ctx))
     assert [p.text for p in fm.problems(fm.FoldersValues([], [], False, True), ctx)] == [
         "Nothing is indexed: add a folder, or index external drives."]
-    # under a mount point with external drives on: fine
     assert fm.problems(fm.FoldersValues(["~"], ["/run/media/u/disk/junk"], True, True), ctx) == []
 
 

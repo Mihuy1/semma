@@ -21,9 +21,9 @@ from .media import Probe, check_exit, ffmpeg_pipe, input_args, probe, time_range
 if TYPE_CHECKING:
     from ..config import Config
 
-MIN_TRAILING_SECONDS = 2.0  # a shorter last segment is dropped (unless it is the only one)
-SILENCE_RMS = 1e-4  # ~ -80 dBFS: digital silence / dead air
-MAX_SEGMENT_SECONDS = 300  # the model accepts at most ~320 s per audio chunk
+MIN_TRAILING_SECONDS = 2.0
+SILENCE_RMS = 1e-4
+MAX_SEGMENT_SECONDS = 300
 
 
 def segment_seconds(cfg: Config) -> float:

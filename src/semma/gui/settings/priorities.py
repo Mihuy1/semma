@@ -46,7 +46,6 @@ class PrioritiesSection(SettingsSection):
         self._defaults: dict[str, int] = dict(pm.DEFAULT_LOCATIONS)
         self._folders: list[str] = []
         self.score_spins: dict[str, QSpinBox] = {}
-        # Replaced in tests; returns the chosen folder or "".
         self.choose_folder: Callable[[str], str] = self._choose_folder
 
         folders_box = QGroupBox("Folder scores", self)

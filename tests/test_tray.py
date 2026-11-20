@@ -83,9 +83,6 @@ def make_tray(app: QtWidgets.QApplication):
         tray.stop()
 
 
-# -- pure tray_view unit tests -----------------------------------------------------------------
-
-
 def test_tray_view_offline() -> None:
     v = tray_view(None)
     assert v.kind == "offline"
@@ -156,9 +153,6 @@ def test_tray_view_paused() -> None:
     assert not plain.can_pause and plain.can_resume
 
 
-# -- icons -------------------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("kind", ["idle", "busy", "paused", "offline"])
 def test_tray_svg_icons_exist_and_load(app: QtWidgets.QApplication, kind: str) -> None:
     path = icon_path(kind)
@@ -168,14 +162,10 @@ def test_tray_svg_icons_exist_and_load(app: QtWidgets.QApplication, kind: str) -
     assert not icon.isNull()
 
 
-# -- Tray Qt behavior --------------------------------------------------------------------------
-
-
 def test_tray_updates_menu_icon_and_poll_interval(app: QtWidgets.QApplication, make_tray) -> None:
     client = FakeTrayClient(None)
     tray = make_tray(client)
 
-    # Menu order: status (disabled), sep, Open Semma, Pause/Resume, Rescan, sep, Quit.
     actions = tray.menu.actions()
     assert actions[0] is tray.status_action and not tray.status_action.isEnabled()
     assert actions[1].isSeparator()
@@ -185,13 +175,11 @@ def test_tray_updates_menu_icon_and_poll_interval(app: QtWidgets.QApplication, m
     assert actions[5].isSeparator()
     assert actions[6] is tray.quit_action and tray.quit_action.text() == "Quit"
 
-    # Offline initially
     assert tray.icon_kind == "offline"
     assert not tray.pause_action.isEnabled()
     assert not tray.rescan_action.isEnabled()
     assert tray.timer.interval() == IDLE_POLL_MS
 
-    # Setup pending
     tray.set_state({"state": "idle", "setup_pending": True})
     assert tray.view.kind == "setup"
     assert tray.icon_kind == "offline"
@@ -199,7 +187,6 @@ def test_tray_updates_menu_icon_and_poll_interval(app: QtWidgets.QApplication, m
     assert not tray.pause_action.isEnabled()
     assert not tray.rescan_action.isEnabled()
 
-    # Busy indexing
     tray.set_state({
         "state": "indexing",
         "run_done": 120,
@@ -213,7 +200,6 @@ def test_tray_updates_menu_icon_and_poll_interval(app: QtWidgets.QApplication, m
     assert tray.rescan_action.isEnabled()
     assert tray.timer.interval() == BUSY_POLL_MS
 
-    # Paused
     tray.set_state({"state": "paused", "paused": True, "pause_reason": "paused by request"})
     assert tray.icon_kind == "paused"
     assert tray.pause_action.text() == "Resume indexing"
@@ -221,7 +207,6 @@ def test_tray_updates_menu_icon_and_poll_interval(app: QtWidgets.QApplication, m
     assert tray.rescan_action.isEnabled()
     assert tray.timer.interval() == IDLE_POLL_MS
 
-    # Idle
     tray.set_state({"state": "idle", "paused": False})
     assert tray.icon_kind == "idle"
     assert tray.pause_action.text() == "Pause indexing"
@@ -280,7 +265,6 @@ def test_tray_does_not_stack_polls(app: QtWidgets.QApplication, make_tray) -> No
     tray.poll()
     assert client.state_calls == 1
 
-    # Once the in-flight poll resolves, the next poll goes through.
     client.pending_state_future = None
     client.state_value = {"state": "idle", "paused": False}
     pending.set_result({"state": "scanning"})

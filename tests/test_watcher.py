@@ -64,7 +64,6 @@ def test_watcher_file_and_subdir_operations(tmp_path: Path) -> None:
     watcher.set_dirs([str(dir_a), str(dir_b)])
     watcher.start()
     try:
-        # 1. Create and write a file in dir_a
         f1 = dir_a / "doc.md"
         f1.write_text("initial")
         assert _wait_for(lambda: len(batches) >= 1)
@@ -72,7 +71,6 @@ def test_watcher_file_and_subdir_operations(tmp_path: Path) -> None:
             assert batches[-1] == {str(dir_a)}
             batches.clear()
 
-        # 2. Modify (close_write) and delete file in dir_a, move file into dir_b
         f1.write_text("updated")
         f2 = dir_a / "move_me.txt"
         f2.write_text("moving")
@@ -84,8 +82,6 @@ def test_watcher_file_and_subdir_operations(tmp_path: Path) -> None:
             assert combined == {str(dir_a), str(dir_b)}
             batches.clear()
 
-        # 3. Create a subdirectory in dir_a and move a subdirectory into dir_b:
-        #    both the parent watched dir and the new subdir path must be reported.
         sub_new = dir_a / "new_sub"
         sub_new.mkdir()
         assert _wait_for(lambda: len(batches) >= 1)
@@ -118,7 +114,6 @@ def test_watcher_ignores_temp_files_but_not_dirs(tmp_path: Path) -> None:
         time.sleep(0.3)
         assert batches == []
 
-        # A hidden directory creation is a directory event and must not be ignored as a temp file
         (tmp_path / ".newdir").mkdir()
         assert _wait_for(lambda: len(batches) >= 1)
         assert str(tmp_path / ".newdir") in batches[-1]
@@ -140,9 +135,8 @@ def test_set_dirs_incremental_add_remove_and_skip_missing(tmp_path: Path) -> Non
     wd_d2_before = watcher._path_to_wd[str(d2)]
     watcher.start()
     try:
-        # Update watched dirs while running: remove d1, keep d2, add d3
         watcher.set_dirs([str(d2), str(d3)])
-        assert watcher._path_to_wd[str(d2)] == wd_d2_before  # not re-added
+        assert watcher._path_to_wd[str(d2)] == wd_d2_before
         assert str(d1) not in watcher.watched_dirs
         assert str(d3) in watcher.watched_dirs
 
@@ -178,7 +172,6 @@ def test_max_delay_fires_under_continuous_churn(tmp_path: Path) -> None:
     try:
         started = time.monotonic()
         i = 0
-        # Write a file every 80ms (< 350ms debounce) for ~0.65s; max_delay (0.45s) must still fire.
         while time.monotonic() - started < 0.65:
             (tmp_path / f"file_{i}.txt").write_text(str(i))
             i += 1

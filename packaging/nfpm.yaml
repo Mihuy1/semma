@@ -1,5 +1,3 @@
-# One description for both packages: scripts/package.sh fills build/stage and the variables, then
-# runs `nfpm package` once for the .rpm and once for the .deb.
 name: semma
 arch: amd64
 platform: linux
@@ -25,7 +23,6 @@ contents:
     type: config
     file_info:
       mode: 0644
-  # Debian looks for a package's licenses in /usr/share/doc/<package>/copyright.
   - src: build/THIRD_PARTY_NOTICES.txt
     dst: /usr/share/doc/semma/copyright
     packager: deb
@@ -37,16 +34,6 @@ scripts:
   preremove: packaging/preremove.sh
   postremove: packaging/postremove.sh
 
-# The service downloads the model over HTTPS with the carried Python, which verifies it against the
-# system's certificates: ca-certificates is a dependency (a bare Ubuntu or Debian has none).
-# Python and its libraries are inside the package; the llama.cpp libraries need the C and C++
-# runtimes of the image they were built in or newer, and OpenMP. Vulkan, ffmpeg and the desktop
-# libraries linked by the bundled Qt Widgets subset (`semma gui` on Wayland and X11) are in
-# recommends: a normal desktop install brings them in, while a minimal or headless install with
-# --no-install-recommends / install_weak_deps=False keeps the daemon free of the desktop stack.
-# Tesseract (the library and English; OCR of screenshots, off by default, loaded with dlopen only
-# when on) is a recommend too: Debian's libtesseract5 brings no language data, Fedora's
-# tesseract-libs brings English already. Other languages are the distribution's language packs.
 overrides:
   deb:
     depends:

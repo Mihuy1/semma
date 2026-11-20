@@ -29,16 +29,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-MAX_SIDE = 1536  # px; the model's processor resizes anyway, this bounds memory
-MIN_SIDE = 32  # smaller images (icons, spacer gifs) are not worth indexing
-# Pillow raises DecompressionBombError above twice this many pixels: 100 MP (checked from the
-# header, before decoding). JPEG (draft) and JPEG 2000 (reduce) decode at a reduced size, so
-# their cost stays small; every other format (PNG, WebP, TIFF, GIF, BMP, HEIC, AVIF, ...) is
-# fully decoded before downscaling, i.e. up to ~400 MB for a 100 MP RGBA image.
+MAX_SIDE = 1536
+MIN_SIDE = 32
 MAX_IMAGE_PIXELS = 50_000_000
 
 HEIF_SUFFIXES = frozenset({".heic", ".heif", ".hif"})
-HEIF_TIMEOUT = 60.0  # s for ffmpeg to decode one picture
+HEIF_TIMEOUT = 60.0
 
 _initialised = False
 
@@ -128,11 +124,10 @@ def load_image(path: Path) -> PILImage.Image | None:
             with Image.open(path) as img:
                 if min(img.size) < MIN_SIDE:
                     return None
-                img.seek(0)  # first frame of animations
+                img.seek(0)
                 if img.format == "JPEG":
-                    img.draft("RGB", (MAX_SIDE, MAX_SIDE))  # DCT-domain downscale: fast, low memory
+                    img.draft("RGB", (MAX_SIDE, MAX_SIDE))
                 elif img.format == "JPEG2000":
-                    # wavelet-level reduction while decoding (power of two, still >= MAX_SIDE)
                     factor = 0
                     while max(img.size) >> (factor + 1) >= MAX_SIDE and factor < 5:
                         factor += 1
@@ -149,7 +144,7 @@ def load_image(path: Path) -> PILImage.Image | None:
         raise ExtractionError("not a recognised image") from e
     except OSError as e:
         raise ExtractionError(f"cannot decode image: {e.strerror or e}") from e
-    except (ValueError, SyntaxError, EOFError) as e:  # Pillow plugins raise these on bad data
+    except (ValueError, SyntaxError, EOFError) as e:
         raise ExtractionError(f"corrupt image: {e}") from e
 
 
@@ -170,7 +165,7 @@ def extract_image(path: Path, cfg: Config | None = None) -> Iterator[Chunk]:
         return
     try:
         text = ocr_text(path, languages)
-    except Exception as exc:  # a broken library or an odd image must not fail the file
+    except Exception as exc:
         log.warning("OCR of %s failed: %s", path, exc)
         return
     if text:

@@ -39,7 +39,6 @@ class FolderList(QWidget):
         self._chooser_title = chooser_title
         self.ctx: SettingsContext | None = None
         self.on_message: Callable[[str], None] = lambda text: None
-        # Replaced in tests; returns the chosen folder or "".
         self.choose_folder: Callable[[str], str] = self._choose_folder
 
         lay = QHBoxLayout(self)
@@ -47,7 +46,6 @@ class FolderList(QWidget):
         lay.setSpacing(10)
         self.list = QListWidget(self)
         self.list.setUniformItemSizes(True)
-        # About four rows: the form stays without a scroll bar at the default window size.
         row = max(self.list.fontMetrics().height(), self.list.iconSize().height(), 16) + 6
         self.list.setMinimumHeight(3 * row)
         self.list.setMaximumHeight(4 * row + 2 * self.list.frameWidth())

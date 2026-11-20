@@ -58,9 +58,6 @@ def ocr_cfg(tmp_path: Path, enabled: bool = True) -> Config:
     return cfg
 
 
-# ---------------------------------------------------------------------------------- extraction
-
-
 def test_screenshot_yields_its_text_after_the_image(tmp_path: Path, fake_ocr: list[str]) -> None:
     shot = png(tmp_path / "Pictures" / "Screenshot From 2026-09-25 14-20-31.png")
     chunks = list(extract(shot, "image", ocr_cfg(tmp_path)))
@@ -83,7 +80,7 @@ def test_ocr_off_or_no_language_reads_nothing(tmp_path: Path, fake_ocr: list[str
                                               monkeypatch: pytest.MonkeyPatch) -> None:
     shot = png(tmp_path / "Screenshots" / "Screenshot From 2026-09-25 14-20-31.png")
     assert [c.modality for c in extract(shot, "image", ocr_cfg(tmp_path, enabled=False))] == ["image"]
-    monkeypatch.setattr(ocr, "effective_languages", lambda cfg: [])  # e.g. no library installed
+    monkeypatch.setattr(ocr, "effective_languages", lambda cfg: [])
     assert [c.modality for c in extract(shot, "image", ocr_cfg(tmp_path))] == ["image"]
     assert fake_ocr == []
 
@@ -133,8 +130,6 @@ def test_real_tesseract_reads_a_screenshot(tmp_path: Path) -> None:
     assert [c.modality for c in chunks] == ["image", "text"]
     assert chunks[1].content == "Select Interpreter\nCreate Virtual Environment"
 
-
-# ---------------------------------------------------------------------------------- the index
 
 FILES = {
     "Pictures/Screenshots/Screenshot From 2026-09-25 14-20-31.png": "white",
@@ -192,14 +187,12 @@ def test_screenshots_are_indexed_with_their_text(env) -> None:
     assert store.get_meta("ocr_languages") == "eng"
     assert fts(store, "interpreter") == {SHOT}
     assert fts(store, "hakumenetelmien") == {"kuva.png"}
-    # Search finds it by a word only in the screenshot, and shows the text, even when the
-    # picture is the closer match in meaning (its chunk has no snippet to show).
     image_chunk = store.db.execute("SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id "
                                    "WHERE f.path LIKE ? AND c.modality = 'image'", (f"%{SHOT}",)).fetchone()[0]
     store.db.execute("UPDATE vec_chunks SET embedding = ? WHERE chunk_id = ?",
                      (bag_of_words("select interpreter").tobytes(), image_chunk))
     store.db.commit()
-    cfg.z_gate, cfg.z_floor = 0.5, 0.0  # 5 chunks: no z can exceed 2
+    cfg.z_gate, cfg.z_floor = 0.5, 0.0
     res = Searcher(store, cfg, FakeEmbedder()).search("select interpreter")
     assert res[0].path.endswith(SHOT) and res[0].similarity == pytest.approx(1.0, abs=1e-4)
     assert res[0].modality == "text" and res[0].snippet.startswith("Select Interpreter")
@@ -223,9 +216,8 @@ def test_turning_ocr_off_deletes_the_text_without_reindexing(env) -> None:
     stored = store.db.execute("SELECT embedding FROM vec_chunks WHERE chunk_id = ?",
                               (int(cache.chunk_ids[row]),)).fetchone()[0]
     assert np.allclose(cache.mat[row], np.frombuffer(stored, dtype=np.float32), atol=1e-6)
-    assert ix.reconcile_ocr() == 0 and calls == []  # recorded: nothing more to do
+    assert ix.reconcile_ocr() == 0 and calls == []
 
-    # On again: only the screenshots are read again.
     cfg.ocr_enabled = True
     assert ix.reconcile_ocr() == 2
     assert pending(store) == {SHOT, "kuva.png"}
@@ -239,7 +231,7 @@ def test_other_languages_reread_the_screenshots(env, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(ocr, "effective_languages", lambda cfg: ["fin", "eng"])
     assert ix.reconcile_ocr() == 2
     assert pending(store) == {SHOT, "kuva.png"}
-    assert modalities(store)[SHOT] == ["image", "text"]  # searchable until replaced
+    assert modalities(store)[SHOT] == ["image", "text"]
     assert store.get_meta("ocr_languages") == "fin+eng"
     assert ix.reconcile_ocr() == 0
 
@@ -247,7 +239,7 @@ def test_other_languages_reread_the_screenshots(env, monkeypatch: pytest.MonkeyP
 def test_index_from_before_ocr_counts_as_off(env) -> None:
     cfg, store, ix, _ = env
     cfg.ocr_enabled = False
-    ix.reconcile_ocr()  # no OCR chunks left, like an index from before OCR existed
+    ix.reconcile_ocr()
     store.db.execute("DELETE FROM meta WHERE key = 'ocr_languages'")
     store.db.commit()
     assert ix.reconcile_ocr() == 0 and store.get_meta("ocr_languages") == ""

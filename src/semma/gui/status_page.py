@@ -124,7 +124,7 @@ class StatusPage(QWidget):
         self._poll_error = False
         self.status: dict[str, Any] | None = None
         self.view: model.StatusView | None = None
-        self.running: bool | None = None  # None until the first answer
+        self.running: bool | None = None
 
         self.timer = QTimer(self)
         self.timer.setInterval(POLL_MS)
@@ -140,7 +140,6 @@ class StatusPage(QWidget):
         lay.addWidget(self.error)
         lay.addWidget(self.pages, 1)
 
-    # -- building ---------------------------------------------------------------------------
     def _build_waiting(self) -> QWidget:
         w = QWidget(self)
         lay = QVBoxLayout(w)
@@ -295,7 +294,6 @@ class StatusPage(QWidget):
         if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
             self._apply_icons()
 
-    # -- polling ----------------------------------------------------------------------------
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
         super().showEvent(event)
         self.timer.start()
@@ -326,9 +324,8 @@ class StatusPage(QWidget):
     def _status_failed(self, exc: BaseException) -> None:
         self._in_flight = False
         self.error.show_message("error", f"Could not get the status: {describe_error(exc)}")
-        self._poll_error = True  # cleared by the next answer
+        self._poll_error = True
 
-    # -- showing ------------------------------------------------------------------------------
     def set_status(self, st: dict[str, Any] | None, now: float | None = None) -> None:
         self.status = st
         if st is None:
@@ -345,7 +342,6 @@ class StatusPage(QWidget):
         self.headline.setText(h.text)
         if h.progress is not None:
             done, total = h.progress
-            # QProgressBar takes ints; byte counts of a model file can pass 2**31.
             scale = max(1, (max(total, 1) + 2**30) // 2**30)
             self.progress.setRange(0, max(total // scale, 1))
             self.progress.setValue(min(done, total) // scale)
@@ -415,7 +411,6 @@ class StatusPage(QWidget):
         for label in self._kind_heads:
             label.setVisible(bool(rows))
 
-    # -- actions ----------------------------------------------------------------------------
     def _call(self, method: str, button: QPushButton | None = None) -> None:
         if button is not None:
             button.setEnabled(False)

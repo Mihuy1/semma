@@ -18,11 +18,10 @@ if TYPE_CHECKING:
     from ..config import Config
 
 MAX_PAGES = 500
-# A page with fewer non-whitespace characters than this is treated as scanned / pictorial.
 MIN_TEXT_CHARS = 40
-RENDER_LONG_SIDE = 1600  # px
+RENDER_LONG_SIDE = 1600
 RENDER_MAX_PIXELS = 1600 * 1600
-RENDER_MAX_SCALE = 4.0  # never upscale tiny pages beyond 288 dpi
+RENDER_MAX_SCALE = 4.0
 
 
 def _page_text(page) -> str:
@@ -31,13 +30,12 @@ def _page_text(page) -> str:
         raw = textpage.get_text_range()
     finally:
         textpage.close()
-    # PDFium marks hyphens it believes are soft line-break hyphens with U+0002.
     raw = raw.replace("\x02\r\n", "").replace("\x02", "-")
     return normalize_newlines(raw).replace("\ufffe", "")
 
 
 def _render(page):
-    w, h = page.get_size()  # points (1/72 in)
+    w, h = page.get_size()
     if w <= 0 or h <= 0:
         return None
     scale = min(RENDER_LONG_SIDE / max(w, h), RENDER_MAX_SCALE)
@@ -70,8 +68,6 @@ def extract_pdf(path: Path, cfg: Config | None = None) -> Iterator[Chunk]:
         for index in range(n_pages):
             number = index + 1
             locator = f"p. {number}"
-            # One broken page (bad content stream, render failure, ...) must not lose the rest
-            # of the document: every pdfium call for a page is guarded and the page skipped.
             chunks: list[Chunk] = []
             page = None
             try:
@@ -84,7 +80,7 @@ def extract_pdf(path: Path, cfg: Config | None = None) -> Iterator[Chunk]:
                     image = _render(page)
                     if image is not None:
                         chunks.append(Chunk("image", image, locator, make_snippet(text), float(number)))
-            except Exception as e:  # pdfium raises PdfiumError, but also ValueError/OSError/...
+            except Exception as e:
                 failed += 1
                 last_error = e
                 continue

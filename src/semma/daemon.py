@@ -68,30 +68,25 @@ from .store import Store
 log = logging.getLogger("semma.daemon")
 
 MIN_QUERY_CHARS = 3
-PROGRESS_LOG_EVERY = 100  # files
+PROGRESS_LOG_EVERY = 100
 GPU_BUSY_RECHECK_S = 60.0
-GPU_BUSY_UNLOAD_S = 60.0  # unload after 1 min without queries while another app uses the GPU
-# A slice that only skipped/deferred files (changed since the scan, database busy) leaves them
-# pending; don't spin on them, wait for the rescan their change triggers (or this long).
+GPU_BUSY_UNLOAD_S = 60.0
 NO_PROGRESS_RETRY_S = 300.0
-WORKER_BACKOFF_S = (5.0, 600.0)  # after an unexpected error: first wait, maximum wait
-DOWNLOAD_BACKOFF_S = (5.0, 300.0)  # model download failed: first wait, maximum wait
+WORKER_BACKOFF_S = (5.0, 600.0)
+DOWNLOAD_BACKOFF_S = (5.0, 300.0)
 MODEL_WAIT_REASON = "waiting for the model download"
-DOWNLOAD_JOIN_S = 2.0  # don't let a stuck transfer hold up shutdown; the part file resumes
+DOWNLOAD_JOIN_S = 2.0
 SHUTDOWN_JOIN_S = 60.0
-MAX_PARTIAL_SCAN_DIRS = 64  # more changed directories than this: one full scan instead
+MAX_PARTIAL_SCAN_DIRS = 64
 
-_DEFAULT: Any = object()  # "construct the real collaborator"; None means "none"
+_DEFAULT: Any = object()
 
-# How `Daemon.reload_config` applies each Config field, with the config.toml name it reports.
-# Taken over only by a restart (the embedder, the store and its vector cache are built from them):
 RESTART_FIELDS: dict[str, str] = {
     "db_path": "db_path", "model_name": "model.name", "device": "model.device",
     "query_device": "model.query_device", "llama_lib_dir": "model.llama_lib_dir",
     "model_dir": "model.model_dir", "batch_sizes": "index.batch_sizes",
     "vector_cache_max_chunks": "search.vector_cache_max_chunks",
 }
-# Decide what is indexed: a change runs a full rescan.
 SCAN_FIELDS: dict[str, str] = {
     "roots": "scan.roots", "include_mounts": "scan.include_mounts", "skip_hidden": "scan.skip_hidden",
     "skip_app_installs": "scan.skip_app_installs", "kinds": "scan.kinds",
@@ -100,7 +95,6 @@ SCAN_FIELDS: dict[str, str] = {
     "project_build_dir_names": "scan.project_build_dir_names", "project_markers": "scan.project_markers",
     "exclude_paths": "scan.exclude_paths", "max_bytes": "scan.max_file_mb",
 }
-# Priority scores: a full rescan stores the new score of every file, changed or not.
 PRIORITY_FIELDS: dict[str, str] = {
     "locations": "priority.locations", "other_location": "priority.other_location",
     "type_weights": "priority.type_weights", "project_penalty": "priority.project_penalty",
@@ -110,15 +104,11 @@ PRIORITY_FIELDS: dict[str, str] = {
     "tiny_bytes": "priority.tiny_bytes", "tiny_penalty": "priority.tiny_penalty",
     "huge_video_bytes": "priority.huge_video_bytes", "huge_video_penalty": "priority.huge_video_penalty",
 }
-# Read when a file is indexed (or a slice starts): files indexed from then on. A new media limit
-# or segment length also re-queues or trims indexed audio/video (Indexer.reconcile_media), and
-# new OCR settings re-queue the screenshots or delete their OCR text (Indexer.reconcile_ocr).
 NEXT_FILE_FIELDS: dict[str, str] = {
     "max_media_seconds": "media.max_minutes", "media_segment_seconds": "media.segment_seconds",
     "prefetch_chunks": "index.prefetch_chunks",
     "ocr_enabled": "ocr.enabled", "ocr_languages": "ocr.languages",
 }
-# Read at use time (or pushed to the component that copied them).
 LIVE_FIELDS: dict[str, str] = {
     "z_gate": "search.z_gate", "z_floor": "search.z_floor", "knn_k": "search.knn_k",
     "location_prior": "search.location_prior", "duplicate_similarity": "search.duplicate_similarity",
@@ -129,13 +119,9 @@ LIVE_FIELDS: dict[str, str] = {
     "gpu_busy_threshold": "daemon.gpu_busy_threshold", "gpu_check_seconds": "daemon.gpu_check_seconds",
     "krunner_max_results": "daemon.krunner_max_results", "query_debounce_ms": "daemon.query_debounce_ms",
 }
-# First-run setup. false stops scanning and indexing; true starts a full scan. The index is kept.
 ONBOARDING_FIELDS: dict[str, str] = {"onboarding_complete": "onboarding_complete"}
-# Not settings: always those the daemon started with.
 FIXED_FIELDS: tuple[str, ...] = ("home", "source_path", "source_home")
 
-# Parents of the drives `include_mounts` adds (config.detect_mounts). With it on, files below
-# them are "configured": a drive that is unplugged keeps its index.
 MOUNT_PARENTS: tuple[Path, ...] = (Path("/mnt"), Path("/media"), Path("/run/media"))
 
 
@@ -164,9 +150,6 @@ WatcherFactory = Callable[[Callable[[set[str]], None], float], WatcherLike]
 RunnerFactory = Callable[..., ServiceInterface]
 
 
-# -- thread priority ------------------------------------------------------------------------
-
-# ioprio_set(2) syscall numbers; other architectures just keep the normal IO class.
 _IOPRIO_SET_NR = {"x86_64": 251, "aarch64": 30, "riscv64": 30, "ppc64le": 273, "ppc64": 273,
                   "i386": 289, "i686": 289, "armv7l": 314}
 IOPRIO_WHO_PROCESS = 1
@@ -192,11 +175,9 @@ def lower_thread_priority(nice: int = 10) -> None:
                            ctypes.c_int(IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT))
         if res != 0:
             log.debug("ioprio_set failed: %s", os.strerror(ctypes.get_errno()))
-    except Exception as exc:  # no libc, no syscall(): keep the default IO class
+    except Exception as exc:
         log.debug("ioprio_set unavailable: %s", exc)
 
-
-# -- partial rescans ------------------------------------------------------------------------
 
 def partial_scan_roots(cfg: Config, changed: Iterable[str], roots: list[Path] | None = None) -> list[Path] | None:
     """Directories to rescan for a set of changed directories, or None for a full scan.
@@ -208,7 +189,7 @@ def partial_scan_roots(cfg: Config, changed: Iterable[str], roots: list[Path] | 
     directories are replaced by their nearest existing parent.
     """
     roots = cfg.effective_roots() if roots is None else roots
-    root_strs = sorted((str(r) for r in roots), key=len, reverse=True)  # most specific first
+    root_strs = sorted((str(r) for r in roots), key=len, reverse=True)
     anchors = {str(p) for p in cfg.locations}
     excluded = {str(p) for p in cfg.exclude_paths}
     markers = cfg.project_markers
@@ -222,7 +203,7 @@ def partial_scan_roots(cfg: Config, changed: Iterable[str], roots: list[Path] | 
             d = parent
         root = next((r for r in root_strs if d == r or d.startswith(r.rstrip("/") + "/")), None)
         if root is None:
-            continue  # outside every root (an unmounted drive, an excluded path's parent...)
+            continue
         if d == root:
             out.add(d)
             continue
@@ -252,7 +233,6 @@ def partial_scan_roots(cfg: Config, changed: Iterable[str], roots: list[Path] | 
         if in_project or any(n.casefold() in cfg.root_system_dir_names for n in names):
             return None
         out.add(d)
-    # Keep only the topmost of nested directories (the scanner walks subdirectories itself).
     top: list[str] = []
     for d in sorted(out):
         if not any(d == t or d.startswith(t.rstrip("/") + "/") for t in top):
@@ -265,8 +245,6 @@ def partial_scan_roots(cfg: Config, changed: Iterable[str], roots: list[Path] | 
 class _ScanAborted(Exception):
     pass
 
-
-# -- the daemon -----------------------------------------------------------------------------
 
 class Daemon:
     """Search service plus background indexing; every collaborator can be injected (tests).
@@ -286,8 +264,6 @@ class Daemon:
                  bus_name: str = dbus_names.BUS_NAME,
                  config_loader: Callable[[], Config] | None = None) -> None:
         self.cfg = cfg
-        # ReloadConfig: the settings the daemon started with (restart-only settings compare
-        # against these), the newest settings accepted, and the loader of the config file.
         self._start_cfg = cfg
         self._accepted_cfg = cfg
         self._reload_lock = threading.Lock()
@@ -295,7 +271,6 @@ class Daemon:
         self.bus_name = bus_name
         self.store = store if store is not None else Store(
             cfg.db_path, vector_cache=True, cache_max_chunks=cfg.vector_cache_max_chunks)
-        # None: the caller disabled the download (tests). `_DEFAULT`: download the GGUF files.
         self._model_download = download_model_files if model_download is _DEFAULT else model_download
         self._download_error = ""
         self._download_thread: threading.Thread | None = None
@@ -314,9 +289,8 @@ class Daemon:
         self._runner_factory = _default_runner_factory() if runner_factory is _DEFAULT else runner_factory
         self._gnome_factory = _default_gnome_factory() if gnome_factory is _DEFAULT else gnome_factory
         self.watcher: WatcherLike | None = None
-        self._services: list[Any] = []  # the KRunner / GNOME interfaces (serve sets them)
+        self._services: list[Any] = []
 
-        # Worker state, guarded by _cv (simple reads of single attributes are fine without it).
         self._cv = threading.Condition()
         self._wakeup = False
         self._stopping = threading.Event()
@@ -324,33 +298,29 @@ class Daemon:
         self._user_paused = False
         self._scan_full = False
         self._scan_dirs: set[str] = set()
-        self._pending_cfg: Config | None = None  # accepted by a reload, applied by the worker
-        self._phase = "idle"  # idle | scanning | indexing | paused
+        self._pending_cfg: Config | None = None
+        self._phase = "idle"
         self._pause_reason = ""
         self._current_file = ""
-        self._last_scan_at = 0.0  # wall clock
-        self._last_full_scan = float("-inf")  # monotonic
+        self._last_scan_at = 0.0
+        self._last_full_scan = float("-inf")
         self._no_progress_until = 0.0
-        self._last_work = 0.0  # monotonic: last file indexed
+        self._last_work = 0.0
         self._watched: set[str] = set()
         self._gpu_busy = False
         self._gpu_checked_at = float("-inf")
         self._gpu_sample_lock = threading.Lock()
         self._run_logged = 0
-        # Progress for Status, each replaced whole by the worker (one attribute write) and read
-        # by the event loop: (done, total, failed, files per second) of the running slice, and
-        # the scanner of the running scan (its stats are only read).
         self._run_progress: tuple[int, int, int, float] = (0, 0, 0, 0.0)
         self._scanner: Scanner | None = None
         self._worker: threading.Thread | None = None
         self._gpu_thread: threading.Thread | None = None
 
-        # Query state (event loop only).
         self._loop: asyncio.AbstractEventLoop | None = None
         self._query_seq = 0
         self._newest: asyncio.Future[None] | None = None
         self._queries_in_flight = 0
-        self._last_query = 0.0  # monotonic
+        self._last_query = 0.0
         self._load_task: asyncio.Future[None] | None = None
         self._idle_task: asyncio.Task[None] | None = None
         self._search_exec = ThreadPoolExecutor(1, thread_name_prefix="semma-search")
@@ -360,7 +330,6 @@ class Daemon:
         self._running = False
         self._closed = False
 
-    # -- lifecycle ------------------------------------------------------------------------
     def start(self) -> None:
         """Start the background threads and timers (call from the running event loop).
 
@@ -427,7 +396,6 @@ class Daemon:
         self._running = False
         log.info("stopped")
 
-    # -- queries --------------------------------------------------------------------------
     def record_activity(self) -> None:
         self._last_query = time.monotonic()
 
@@ -452,8 +420,6 @@ class Daemon:
             parsed = parse_query(q)
             if len(parsed.text) < MIN_QUERY_CHARS or self._closed:
                 return []
-            # Setup is still open: don't load the model (that would pin the device). Run setup
-            # again keeps the index, so a model that is loaded already still answers.
             if not self._setup_done and not self._can_search_during_setup():
                 return []
             debounce = self.cfg.query_debounce_ms / 1000
@@ -493,7 +459,7 @@ class Daemon:
         await asyncio.wait({fut, newer}, return_when=asyncio.FIRST_COMPLETED)
         if fut.done():
             return True, fut.result()
-        fut.add_done_callback(lambda f: f.cancelled() or f.exception())  # no "never retrieved"
+        fut.add_done_callback(lambda f: f.cancelled() or f.exception())
         return False, None
 
     def _search_sync(self, query: str, seq: int) -> list[SearchResult] | None:
@@ -501,7 +467,7 @@ class Daemon:
         if seq != self._query_seq:
             return None
         parsed = parse_query(query)
-        qvec = self.embedder.embed_query(parsed.text)  # GpuLock: ahead of waiting index batches
+        qvec = self.embedder.embed_query(parsed.text)
         if seq != self._query_seq:
             return None
         return self.searcher.search_vector(qvec, query, self.cfg.krunner_max_results)
@@ -541,7 +507,6 @@ class Daemon:
         await loop.run_in_executor(self._model_exec, load_fn)
         log.info("model ready in %.1fs", time.monotonic() - started)
 
-    # -- idle unload ----------------------------------------------------------------------
     def _idle_seconds(self) -> float:
         return self.cfg.model_idle_unload_minutes * 60
 
@@ -550,7 +515,6 @@ class Daemon:
 
     async def _idle_loop(self) -> None:
         while True:
-            # Re-read every round: a reload may change the times (0: never unload).
             candidates = [x for x in (self._idle_seconds(), self._index_unload_seconds()) if x > 0]
             interval = min(60.0, max(0.02, min(candidates) / 4)) if candidates else 60.0
             await asyncio.sleep(interval)
@@ -567,65 +531,42 @@ class Daemon:
 
     async def check_idle(self) -> bool:
         """Unload the full index model after its grace period once indexing finishes, and unload
-        the query model (or legacy single model) after `model_idle_unload_minutes` without queries."""
+        the query model after `model_idle_unload_minutes` without queries."""
         if self._load_task is not None and not self._load_task.done():
             return False
         loop = asyncio.get_running_loop()
         now = time.monotonic()
         any_unloaded = False
 
-        has_split = hasattr(self.embedder, "unload_index") and hasattr(self.embedder, "unload_query")
-        if has_split:
-            # 1. Full index model: unload after index_model_unload_seconds once not indexing and no
-            #    pending work. Paused indexing (GPU busy, user pause) gives it back even with
-            #    files pending; the next slice loads it again.
-            idx_grace = self._index_unload_seconds()
-            if (idx_grace > 0 and self._index_model_loaded() and self._phase != "indexing"
-                    and not self._queries_in_flight):
-                last_idx = max(self._last_work, float(getattr(self.embedder, "index_last_used", 0.0)))
-                idx_dev = str(getattr(self.embedder, "device", "") or "").strip().lower()
-                idx_on_gpu = idx_dev != "cpu"
-                needed_idx = min(idx_grace, GPU_BUSY_UNLOAD_S) if (self._gpu_busy and idx_on_gpu) else idx_grace
-                if now - last_idx >= needed_idx:
-                    unloaded = await loop.run_in_executor(self._model_exec, self._unload_index_if_no_work)
-                    if unloaded is not False:
-                        log.info("index model unloaded after %.0fs without indexing%s", needed_idx,
-                                 " (GPU busy)" if (self._gpu_busy and idx_on_gpu) else "")
-                        any_unloaded = True
+        idx_grace = self._index_unload_seconds()
+        if (idx_grace > 0 and self._index_model_loaded() and self._phase != "indexing"
+                and not self._queries_in_flight):
+            last_idx = max(self._last_work, float(getattr(self.embedder, "index_last_used", 0.0)))
+            idx_dev = str(getattr(self.embedder, "device", "") or "").strip().lower()
+            idx_on_gpu = idx_dev != "cpu"
+            needed_idx = min(idx_grace, GPU_BUSY_UNLOAD_S) if (self._gpu_busy and idx_on_gpu) else idx_grace
+            if now - last_idx >= needed_idx:
+                unloaded = await loop.run_in_executor(self._model_exec, self._unload_index_if_no_work)
+                if unloaded is not False:
+                    log.info("index model unloaded after %.0fs without indexing%s", needed_idx,
+                             " (GPU busy)" if (self._gpu_busy and idx_on_gpu) else "")
+                    any_unloaded = True
 
-            # 2. Text-only query model: unload after model_idle_unload_minutes without queries.
-            q_idle = self._idle_seconds()
-            if q_idle > 0 and self._query_model_loaded() and not self._queries_in_flight:
-                last_q = max(self._last_query, float(getattr(self.embedder, "query_last_used", 0.0)))
-                q_on_gpu = str(getattr(self.embedder, "query_device", "") or "").strip().lower().startswith(
-                    ("cuda", "vulkan", "gpu")
-                )
-                needed_q = min(q_idle, GPU_BUSY_UNLOAD_S) if (self._gpu_busy and q_on_gpu) else q_idle
-                if now - last_q >= needed_q:
-                    unloaded = await loop.run_in_executor(self._model_exec, self.embedder.unload_query)
-                    if unloaded is not False:
-                        log.info("query model unloaded after %.0f min without queries%s", needed_q / 60,
-                                 " (GPU busy)" if (self._gpu_busy and q_on_gpu) else "")
-                        any_unloaded = True
-            return any_unloaded
+        q_idle = self._idle_seconds()
+        if q_idle > 0 and self._query_model_loaded() and not self._queries_in_flight:
+            last_q = max(self._last_query, float(getattr(self.embedder, "query_last_used", 0.0)))
+            q_on_gpu = str(getattr(self.embedder, "query_device", "") or "").strip().lower().startswith(
+                ("cuda", "vulkan", "gpu")
+            )
+            needed_q = min(q_idle, GPU_BUSY_UNLOAD_S) if (self._gpu_busy and q_on_gpu) else q_idle
+            if now - last_q >= needed_q:
+                unloaded = await loop.run_in_executor(self._model_exec, self.embedder.unload_query)
+                if unloaded is not False:
+                    log.info("query model unloaded after %.0f min without queries%s", needed_q / 60,
+                             " (GPU busy)" if (self._gpu_busy and q_on_gpu) else "")
+                    any_unloaded = True
+        return any_unloaded
 
-        # Legacy single-model embedder fallback (e.g. simple test doubles without unload_index/unload_query).
-        idle = self._idle_seconds()
-        if (idle <= 0 or not self._model_ready() or not hasattr(self.embedder, "unload")
-                or self._queries_in_flight or self._phase == "indexing"):
-            return False
-        last = max(self._last_query, self._last_work, float(getattr(self.embedder, "last_used", 0.0)))
-        # While another application (a game) keeps the GPU busy, give its VRAM back quickly.
-        needed = min(idle, GPU_BUSY_UNLOAD_S) if self._gpu_busy else idle
-        if now - last < needed:
-            return False
-        unloaded = await loop.run_in_executor(self._model_exec, self.embedder.unload)
-        if unloaded is not False:
-            log.info("model unloaded after %.0f min without queries or indexing%s", needed / 60,
-                     " (GPU busy)" if self._gpu_busy else "")
-        return True
-
-    # -- control --------------------------------------------------------------------------
     def pause(self) -> None:
         with self._cv:
             self._user_paused = True
@@ -768,11 +709,8 @@ class Daemon:
         return bool(self._model_files_status().get("ready"))
 
     def _download_sync(self) -> dict[str, Any] | None:
-        probe = getattr(self.embedder, "download_progress", None)  # test doubles have none
-        if probe is None:
-            return None
         try:
-            return probe()
+            return self.embedder.download_progress()
         except Exception:
             log.debug("download progress unavailable", exc_info=True)
             return None
@@ -785,7 +723,6 @@ class Daemon:
             self._status_exec, lambda: self.store.failed_files(limit or None, db=self.store.reader()))
         return [(r["path"], r["error"] or "") for r in rows]
 
-    # -- model download -------------------------------------------------------------------
     def _start_download(self) -> None:
         """Start the download thread unless one is running (or the download is disabled)."""
         thread = self._download_thread
@@ -815,7 +752,6 @@ class Daemon:
             log.info("model files are ready")
             return
 
-    # -- worker ---------------------------------------------------------------------------
     def _wake(self, stop_slice: bool = False) -> None:
         with self._cv:
             self._wakeup = True
@@ -878,7 +814,7 @@ class Daemon:
                 self._logged_wait_setup = True
             self._current_file = ""
             self._set_phase("idle")
-            self._wait(3600.0)  # a reload that finishes setup wakes the worker
+            self._wait(3600.0)
             return
         self._logged_wait_setup = False
         if full or dirs:
@@ -904,7 +840,7 @@ class Daemon:
             if not self._logged_wait_model:
                 log.info("indexing waits until the model has been downloaded")
                 self._logged_wait_model = True
-            self._start_download()  # the files were there and are gone again: fetch them
+            self._start_download()
             self._set_phase("paused", MODEL_WAIT_REASON)
             self._wait(min(sleep, 2.0))
             return
@@ -927,13 +863,12 @@ class Daemon:
         release = getattr(self.embedder, "release_cache", None)
         if release is not None and self._model_ready():
             try:
-                release()  # cached video/batch activations go back to the driver
+                release()
             except Exception:
                 log.debug("release_cache failed", exc_info=True)
 
     def _index_slice(self, pending: int) -> None:
         self._slice_stop.clear()
-        # Requests that set _slice_stop before the clear above are seen here.
         if self._stopping.is_set() or self._user_paused:
             return
         with self._cv:
@@ -941,7 +876,7 @@ class Daemon:
                 return
         if self._phase != "indexing":
             log.info("indexing %d pending files", pending)
-        self._run_progress = (0, pending, 0, 0.0)  # before the phase: Status sees both together
+        self._run_progress = (0, pending, 0, 0.0)
         self._set_phase("indexing")
         self._run_logged = 0
         try:
@@ -975,7 +910,6 @@ class Daemon:
         if scan_wanted or self._user_paused or self._stopping.is_set():
             self._slice_stop.set()
 
-    # -- GPU ------------------------------------------------------------------------------
     def _sample_gpu(self) -> bool:
         if not self.cfg.pause_when_gpu_busy:
             self._gpu_busy = False
@@ -1007,7 +941,7 @@ class Daemon:
     def _gpu_main(self) -> None:
         """While a slice runs, sample every gpu_check_seconds; stop the slice when busy."""
         while not self._stopping.is_set():
-            interval = max(0.01, self.cfg.gpu_check_seconds)  # a reload may change it
+            interval = max(0.01, self.cfg.gpu_check_seconds)
             with self._cv:
                 self._cv.wait_for(
                     lambda: (self._phase == "indexing" and self.cfg.pause_when_gpu_busy)
@@ -1025,7 +959,6 @@ class Daemon:
             if self._sample_gpu():
                 self._slice_stop.set()
 
-    # -- scanning -------------------------------------------------------------------------
     def _scan(self, dirs: set[str] | None) -> None:
         roots: list[Path] | None = None
         if dirs is not None:
@@ -1033,11 +966,11 @@ class Daemon:
             if roots is None:
                 log.debug("changes need a full scan")
             elif not roots:
-                return  # only pruned or vanished places changed
+                return
         full = roots is None
         self._set_phase("scanning")
         scanner = Scanner(self.cfg)
-        self._scanner = scanner  # Status reads its stats until the scan is done
+        self._scanner = scanner
         try:
             self._scan_roots(scanner, roots, full)
         finally:
@@ -1055,7 +988,6 @@ class Daemon:
         try:
             upserted = self.store.upsert_scanned(files(), gen)
         except _ScanAborted:
-            # Files not seen keep their old generation: nothing lost.
             if self._stopping.is_set():
                 log.info("scan aborted")
                 return
@@ -1070,22 +1002,18 @@ class Daemon:
         cfg = scanner.cfg
         removed = self.store.finish_scan(gen, st.roots, st.failed_dirs)
         if full:
-            # finish_scan only cleans below the roots just walked: forget what the settings no
-            # longer cover anywhere else (a removed root, mounts no longer included, a kind
-            # turned off on an unplugged drive). Configured but unavailable roots are kept.
             removed += self.store.forget_unconfigured(configured_areas(cfg, st.roots), cfg.exclude_paths,
                                                       cfg.kinds, cfg.exclude_extensions, cfg.max_bytes)
         self._last_scan_at = time.time()
         if full:
             self._last_full_scan = time.monotonic()
         self._no_progress_until = 0.0
-        self._update_watches(None if full else st.roots, getattr(st, "walked_dirs", None))
+        self._update_watches(None if full else st.roots, st.walked_dirs)
         log.log(logging.INFO if full else logging.DEBUG,
                 "%s scan of %s in %.1fs: %d dirs, %d indexable files, %d removed, %d unreadable",
                 "full" if full else "partial", ", ".join(map(str, st.roots)) if not full or len(st.roots) < 4
                 else f"{len(st.roots)} roots", st.seconds, st.dirs, upserted, removed, st.errors)
 
-    # -- settings reload ------------------------------------------------------------------
     def _load_config_file(self) -> Config:
         """Read the config file the daemon was started with again (raises ConfigError)."""
         path = self._start_cfg.source_path
@@ -1113,11 +1041,8 @@ class Daemon:
         start = self._start_cfg
         with self._reload_lock:
             base = self._accepted_cfg
-            # The device is read when the model is loaded. Until then a new choice applies now,
-            # so first-run setup does not restart the service (and does not interrupt the download).
             chosen_device = {attr: getattr(new, attr) for attr in ("device", "query_device")}
             restart = [name for attr, name in RESTART_FIELDS.items() if getattr(new, attr) != getattr(start, attr)]
-            # A load that has started has read the device already.
             loading = ((self._load_task is not None and not self._load_task.done())
                        or bool(getattr(self.embedder, "loading", False)))
             models_loaded = self._index_model_loaded() or self._query_model_loaded() or loading
@@ -1127,13 +1052,11 @@ class Daemon:
                 hot = [RESTART_FIELDS[attr] for attr, value in chosen_device.items()
                        if value != getattr(base, attr)]
             for attr in (*RESTART_FIELDS, *FIXED_FIELDS):
-                setattr(new, attr, getattr(start, attr))  # keep running with what we started with
+                setattr(new, attr, getattr(start, attr))
             if not models_loaded:
                 for attr, value in chosen_device.items():
                     setattr(new, attr, value)
                 if hot:
-                    # `_start_cfg` may be the live Config. Copy before changing it so a device
-                    # choice does not show up on the running settings before the worker swaps them.
                     if self._start_cfg is self.cfg or self._start_cfg is base:
                         self._start_cfg = copy.copy(self._start_cfg)
                     for attr, value in chosen_device.items():
@@ -1174,7 +1097,7 @@ class Daemon:
         a language package installed or removed since (applied by `_apply_config`)."""
         recorded = getattr(self.indexer, "ocr_setup", None)
         if recorded is None or not cfg.ocr_enabled:
-            return False  # not reconciled yet (the next slice does it), or off either way
+            return False
         from . import ocr
 
         return "+".join(ocr.effective_languages(cfg)) != recorded
@@ -1187,11 +1110,11 @@ class Daemon:
         self.cfg = cfg
         self.indexer.cfg = cfg
         if media_changed:
-            try:  # trim at once; re-queued files wake the worker's next pending check
+            try:
                 self.indexer.reconcile_media()
             except Exception:
                 log.exception("applying the new media settings to the index failed")
-        try:  # cheap when nothing changed (also catches a language installed since)
+        try:
             self.indexer.reconcile_ocr()
         except Exception:
             log.exception("applying the new OCR settings to the index failed")
@@ -1207,8 +1130,7 @@ class Daemon:
         if not cfg.pause_when_gpu_busy:
             self._gpu_busy = False
         self._gpu_checked_at = float("-inf")
-        with contextlib.suppress(RuntimeError):  # shutting down
-            # On the search thread, between queries: a query sees one Config throughout.
+        with contextlib.suppress(RuntimeError):
             self._search_exec.submit(setattr, self.searcher, "cfg", cfg)
         watcher = self.watcher
         if watcher is not None and hasattr(watcher, "debounce"):
@@ -1218,15 +1140,13 @@ class Daemon:
             n = max(1, int(cfg.krunner_max_results))
             for svc in self._services:
                 if hasattr(svc, "_max_results"):
-                    with contextlib.suppress(RuntimeError):  # loop closed
+                    with contextlib.suppress(RuntimeError):
                         loop.call_soon_threadsafe(setattr, svc, "_max_results", n)
         log.debug("new settings applied")
 
-    def _update_watches(self, partial_roots: list[Path] | None, walked: list[str] | None) -> None:
-        if walked is None:
-            return  # scanner without walked_dirs: keep watching what we had
+    def _update_watches(self, partial_roots: list[Path] | None, walked: list[str]) -> None:
         db_dir = str(Path(self.cfg.db_path).parent)
-        new = {d for d in walked if d != db_dir}  # our own writes must not trigger rescans
+        new = {d for d in walked if d != db_dir}
         if partial_roots is None:
             self._watched = new
         else:
@@ -1292,26 +1212,16 @@ def _default_gnome_factory() -> RunnerFactory | None:
     return GnomeSearchService
 
 
-# -- D-Bus ----------------------------------------------------------------------------------
-
 STATUS_SIGNATURES = {
     "state": "s", "model_loaded": "b", "query_model_loaded": "b", "index_model_loaded": "b",
     "paused": "b", "pause_reason": "s", "pending": "x", "indexed": "x", "failed": "x",
     "chunks": "x", "current_file": "s", "last_scan_at": "d", "uptime": "d", "watched_dirs": "x",
-    # file counts per kind (every kind in filetypes.KINDS, 0 if none)
     "pending_by_kind": "a{sx}", "indexed_by_kind": "a{sx}", "failed_by_kind": "a{sx}",
-    # the model download in progress ("" / 0 when none): the file, its bytes on disk and
-    # expected, and the same over every model file
     "download_file": "s", "download_done": "x", "download_total": "x",
     "download_all_done": "x", "download_all_total": "x",
-    # first-run setup is not finished: nothing is scanned or indexed and searches return nothing
     "setup_pending": "b",
     "download_error": "s", "model_files_ready": "b", "model_bytes_done": "x", "model_bytes_total": "x",
-    # the running indexing slice (0 when not indexing): files done (indexed, failed, skipped or
-    # deferred) of the files queued when it started, failed among them, files per second
     "run_done": "x", "run_total": "x", "run_failed": "x", "run_rate": "d",
-    # the running scan ("" / 0 when not scanning): the directory being listed, directories
-    # listed, regular files seen and indexable files among them
     "scan_dir": "s", "scan_dirs": "x", "scan_files": "x", "scan_matched": "x",
 }
 
@@ -1449,10 +1359,7 @@ def setup_logging(level: str | int | None = None) -> None:
         fmt = "%(asctime)s " + fmt
     logging.basicConfig(level=level, format=fmt, stream=sys.stderr)
     for noisy in ("httpx", "httpx2", "httpcore", "urllib3", "huggingface_hub", "sentence_transformers"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)  # one INFO line per Hub request otherwise
-    # The unit sets HF_HUB_OFFLINE=1, so the Hub's "offline mode, using cached commit" warning is
-    # expected on every model load (and huggingface_hub prints it twice via its own handler).
-    # huggingface_hub resets its logger level when imported, so set its own verbosity variable.
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     os.environ.setdefault("HF_HUB_VERBOSITY", "error")
     logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
@@ -1475,8 +1382,6 @@ def run_daemon(cfg: Config, *, bus_address: str | None = None, bus_name: str = d
 
     return asyncio.run(main())
 
-
-# -- client side (CLI) ----------------------------------------------------------------------
 
 class DaemonNotRunning(RuntimeError):
     pass

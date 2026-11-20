@@ -44,7 +44,7 @@ def test_window_builds_and_shows_status(app: QtWidgets.QApplication, home: Path)
     w.show()
     app.processEvents()
     page = w.status_page
-    assert "Status" in client.calls  # polled when shown
+    assert "Status" in client.calls
     assert page.running is True
     assert page.headline.text() == "Indexing: 10 of 40 files"
     assert page.detail.fullText() == "~/Documents/a.md"
@@ -108,7 +108,6 @@ def test_daemon_not_running_and_start_service(app: QtWidgets.QApplication, home:
     assert client.calls[-1] == "systemctl start"
     assert "Unit semma.service not found." in page.start_message.text()
     assert page.start_button.isEnabled()
-    # the daemon appears: the page recovers on the next answer
     page.set_status(status(indexed=1))
     assert page.running is True and page.pages.currentIndex() == 1
 
@@ -139,7 +138,7 @@ def test_settings_apply_writes_config_and_reloads(app: QtWidgets.QApplication, h
     folders = page.select("folders")
     assert not page.apply_button.isEnabled() and not page.revert_button.isEnabled()
     folders.roots.add(str(home / "Pictures"))
-    folders.roots.add(str(home / "Pictures"))  # twice: refused
+    folders.roots.add(str(home / "Pictures"))
     assert "already" in folders.message.text()
     folders.skip_hidden.setChecked(False)
     assert page.apply_button.isEnabled() and page.revert_button.isEnabled()
@@ -204,7 +203,6 @@ def test_settings_invalid_config_is_shown_and_nothing_written(app: QtWidgets.QAp
 def test_settings_write_error_is_shown(app: QtWidgets.QApplication, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     page = make_settings(home, FakeClient(status()), "[scan]\nskip_hidden = true\n")
     page.select("folders").skip_hidden.setChecked(False)
-    # the file is broken by hand after the page loaded it
     config_path(home).write_text("[scan\n")
     page.apply()
     assert "were not saved" in page.error.text()
@@ -252,17 +250,15 @@ def test_close_prompts_on_unapplied_changes_and_handles_cancel_discard_apply(
     w.show()
     app.processEvents()
 
-    # No changes: closes without prompting.
     monkeypatch.setattr(QMessageBox, "exec", fake_exec(QMessageBox.StandardButton.Cancel))
     assert w.close() is True
     assert prompts == []
 
-    # Reopen, edit Media while currently viewing Status, then try to close -> Cancel.
     w.show()
     media = w.settings_page.select("media")
     media.max_video_gb.setValue(10.0)
-    w.settings_page.select("folders")  # view a different section
-    w.tabs.setCurrentWidget(w.status_page)  # and switch back to Status
+    w.settings_page.select("folders")
+    w.tabs.setCurrentWidget(w.status_page)
 
     monkeypatch.setattr(QMessageBox, "exec", fake_exec(QMessageBox.StandardButton.Cancel))
     assert w.close() is False
@@ -279,21 +275,19 @@ def test_close_prompts_on_unapplied_changes_and_handles_cancel_discard_apply(
     assert w.settings_page.stack.currentIndex() == w.settings_page.sections.index(media)
     assert not config_path(home).exists()
 
-    # Discard: closes without saving or reloading.
     monkeypatch.setattr(QMessageBox, "exec", fake_exec(QMessageBox.StandardButton.Discard))
     assert w.close() is True
     assert not w.isVisible()
     assert not config_path(home).exists()
     assert "ReloadConfig" not in client.calls
 
-    # Reopen (reloads clean defaults), edit Media, Apply -> saves, reloads asynchronously, then closes.
     w.settings_page.reload()
     w.show()
     w.settings_page.select("media").max_video_gb.setValue(12.0)
     pending_reload: Future[list[str] | None] = Future()
     monkeypatch.setattr(client, "reload_config", lambda: pending_reload)
     monkeypatch.setattr(QMessageBox, "exec", fake_exec(QMessageBox.StandardButton.Apply))
-    assert w.close() is False  # waiting for ReloadConfig
+    assert w.close() is False
     assert w.isVisible()
     assert read_raw(config_path(home)) == {"scan": {"max_file_mb": {"video": 12288}}}
 
@@ -320,7 +314,6 @@ def test_close_apply_keeps_window_open_when_restart_needed(
     assert RESTART_NOTICE in w.settings_page.notice.text()
     assert read_raw(config_path(home)) == {"scan": {"skip_hidden": False}}
 
-    # No unapplied changes left -> closing again succeeds immediately.
     assert w.close() is True
 
 
@@ -355,7 +348,7 @@ def test_close_apply_write_error_keeps_window_open(
     w.show()
     w.settings_page.select("folders").skip_hidden.setChecked(False)
     w.tabs.setCurrentWidget(w.status_page)
-    config_path(home).write_text("[scan\n")  # broken on disk before Apply
+    config_path(home).write_text("[scan\n")
 
     monkeypatch.setattr(QMessageBox, "exec", lambda self: int(QMessageBox.StandardButton.Apply))
     assert w.close() is False
@@ -423,7 +416,6 @@ def test_disabled_button_icons_are_muted_not_bright_white(
             assert not icon.isNull()
             normal_lum, normal_alpha = _icon_avg_channel(icon, QIcon.Mode.Normal)
             disabled_lum, disabled_alpha = _icon_avg_channel(icon, QIcon.Mode.Disabled)
-            # Either luminance is noticeably darker on dark mode or alpha is significantly reduced.
             assert disabled_lum < normal_lum - 30 or disabled_alpha < normal_alpha * 0.65, (
                 f"{btn.text()} disabled icon not muted: normal=({normal_lum:.1f}, {normal_alpha:.1f}) "
                 f"disabled=({disabled_lum:.1f}, {disabled_alpha:.1f})"
@@ -556,7 +548,6 @@ def test_live_theme_switch_refreshes_icons_and_stylesheet(
         wiz.show()
         app.processEvents()
 
-        # Selected tab icon uses HighlightedText (white) even in light mode; unselected tab uses dark ButtonText.
         assert _icon_avg_channel(w.tabs.tabIcon(0), QIcon.Mode.Normal)[0] > 180
         light_lums = {
             "tab1": _icon_avg_channel(w.tabs.tabIcon(1), QIcon.Mode.Normal)[0],
@@ -572,7 +563,6 @@ def test_live_theme_switch_refreshes_icons_and_stylesheet(
         for name, lum in light_lums.items():
             assert lum < 100, f"{name} light icon should be dark, got lum={lum:.1f}"
 
-        # Switching tabs in light mode swaps which tab icon is white vs dark.
         w.tabs.setCurrentWidget(w.settings_page)
         app.processEvents()
         assert _icon_avg_channel(w.tabs.tabIcon(0), QIcon.Mode.Normal)[0] < 100
@@ -580,7 +570,6 @@ def test_live_theme_switch_refreshes_icons_and_stylesheet(
         w.tabs.setCurrentWidget(w.status_page)
         app.processEvents()
 
-        # Live switch to dark palette (which triggers ApplicationPaletteChange -> stylesheet rebuild + PaletteChange)
         app.setPalette(theme.build_gnome_palette(dark=True))
         app.processEvents()
 
@@ -630,7 +619,6 @@ def test_priorities_spinbox_cells_and_messagebar_styling(
             app.processEvents()
 
             spin = next(iter(priorities.score_spins.values()))
-            # Child QSpinBox must keep its palette Base background, not transparent from parent stylesheet.
             expected_base = app.palette().color(QPalette.ColorRole.Base)
             assert spin.palette().color(QPalette.ColorRole.Base) == expected_base
             assert priorities.table.rowHeight(0) >= spin.sizeHint().height() + 4
@@ -717,7 +705,6 @@ def test_main_and_onboarding_share_exact_window_background_and_transparent_welco
                 vp_pt = scroll.mapTo(wiz, QPoint(scroll.width() - 30, 6))
                 assert img_wiz.pixelColor(vp_pt) == expected_bg
 
-            # Check _WelcomePage icon label corners have exact Window background (no dark square).
             wiz._show_page(0)
             app.processEvents()
             img_welcome = wiz.grab().toImage()
@@ -735,7 +722,6 @@ def test_main_and_onboarding_share_exact_window_background_and_transparent_welco
             wiz.close()
             w.close()
 
-        # Live switch on breeze-dark must re-tint monochrome welcome icon for light vs dark palette.
         if Path("/usr/share/icons/breeze-dark/index.theme").is_file():
             QIcon.setThemeName("breeze-dark")
             app.setPalette(theme.build_gnome_palette(dark=False))
@@ -834,11 +820,9 @@ def test_settings_nav_uses_colored_icons_on_breeze_like_theme(
     green = QColor("#63984b")
     teal = QColor("#4ce0c6")
 
-    # Mirror Breeze's mixed-size `folder` (monochrome at <=22 px, blue at 32 px+)
     write_square_png(theme_dir / "places/16/folder.png", 16, mono)
     write_square_png(theme_dir / "places/22/folder.png", 22, mono)
     write_square_png(theme_dir / "places/32/folder.png", 32, blue)
-    # Mirror Breeze's monochrome action fallbacks vs colored preferences/categories/apps icons
     write_square_png(theme_dir / "actions/22/document-multiple.png", 22, mono)
     write_square_png(theme_dir / "actions/22/view-sort-descending.png", 22, mono)
     write_square_png(theme_dir / "actions/22/speedometer.png", 22, mono)
@@ -854,7 +838,6 @@ def test_settings_nav_uses_colored_icons_on_breeze_like_theme(
         QIcon.setThemeSearchPaths([str(theme_root)])
         QIcon.setThemeName("breeze-sim")
 
-        # Default theme_icon("folder") still preserves monochrome small sizes; prefer_color upscales/downscales color.
         default_folder = widgets.theme_icon("folder")
         assert widgets._is_monochrome_pixmap(default_folder.pixmap(QSize(16, 16)))
         assert not widgets._is_monochrome_pixmap(default_folder.pixmap(QSize(32, 32)))

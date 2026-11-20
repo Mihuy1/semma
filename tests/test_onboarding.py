@@ -30,7 +30,7 @@ def test_missing_flag_follows_whether_the_index_was_used(tmp_path: Path) -> None
 
     store = Store(cfg.db_path)
     store.close()
-    assert onboarding_done(cfg) is False  # an empty database is created at daemon start
+    assert onboarding_done(cfg) is False
 
     store = Store(cfg.db_path)
     store.set_meta("last_scan_at", "10")
@@ -203,11 +203,11 @@ def test_semma_setup_finishes_setup_without_the_window(
     assert cli.main(["--config", str(path), "setup"]) == 0
     cfg = load_config(path, home)
     assert cfg.onboarding_complete is True and onboarding_done(cfg)
-    assert [str(r) for r in cfg.roots] == [str(home / "Documents")]  # the other settings are kept
+    assert [str(r) for r in cfg.roots] == [str(home / "Documents")]
     assert reloads == [True]
     assert "Setup finished" in capsys.readouterr().out
 
-    assert cli.main(["--config", str(path), "setup"]) == 0  # again: nothing to write
+    assert cli.main(["--config", str(path), "setup"]) == 0
     assert "already finished" in capsys.readouterr().out
 
 
@@ -247,10 +247,10 @@ def test_running_setup_again_keeps_search_while_the_model_is_loaded(tmp_path: Pa
             settings["onboarding_complete"] = False
             assert await reload_and_settle(d, tmp_path, settings, rescan=False) == []
             await wait_until(lambda: d._setup_done is False, what="setup paused")
-            assert await d.search("rocket launch")  # the index is kept and the model is loaded
+            assert await d.search("rocket launch")
             loads = emb.load_calls + emb.query_load_calls
             emb.unload()
-            assert await d.search("rocket launch") == []  # not loaded: setup may change the device
+            assert await d.search("rocket launch") == []
             assert emb.load_calls + emb.query_load_calls == loads
         finally:
             await d.stop()
@@ -276,7 +276,7 @@ def test_download_starts_again_when_the_model_files_are_gone(tmp_path: Path) -> 
         def download(config: object) -> None:
             calls.append(1)
             if len(calls) >= 2:
-                emb.ready = True  # the first run "finished" but the files are not there
+                emb.ready = True
 
         d = make_daemon(cfg, embedder=emb, model_download=download)
         d.start()

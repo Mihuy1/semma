@@ -30,11 +30,8 @@ from .text import (
 if TYPE_CHECKING:
     from ..config import Config
 
-# Uncompressed size of one XML part. An ElementTree takes ~15-20x the XML size in memory, so
-# 32 MiB of XML can already cost ~0.5 GB; real documents are far smaller (a 500-page thesis
-# has a document.xml of a few MiB).
 MAX_MEMBER_BYTES = 32 * 2**20
-MAX_TOTAL_BYTES = 256 * 2**20  # uncompressed bytes read from one archive
+MAX_TOTAL_BYTES = 256 * 2**20
 MAX_SLIDES = 1000
 MIN_SLIDE_CHARS = 3
 
@@ -98,7 +95,7 @@ class _Zip:
             raise ExtractionError(f"{name} too large ({info.file_size >> 20} MiB uncompressed)")
         try:
             with self.zf.open(info) as fh:
-                data = fh.read(MAX_MEMBER_BYTES + 1)  # file_size in the header may lie
+                data = fh.read(MAX_MEMBER_BYTES + 1)
         except (zipfile.BadZipFile, OSError, EOFError, NotImplementedError) as e:
             raise ExtractionError(f"cannot read {name}: {e}") from e
         if len(data) > MAX_MEMBER_BYTES:
@@ -124,7 +121,7 @@ class _NoDTDBuilder(ET.TreeBuilder):
     misses UTF-16 parts).
     """
 
-    def doctype(self, name, pubid, system):  # called by the C XMLParser
+    def doctype(self, name, pubid, system):
         raise _DTDFound
 
 
@@ -134,7 +131,7 @@ def _reject_dtd(*_args) -> None:
 
 def parse_xml(data: bytes, name: str = "XML") -> ET.Element:
     parser = ET.XMLParser(target=_NoDTDBuilder())
-    expat = getattr(parser, "parser", None)  # only the pure-Python XMLParser exposes expat
+    expat = getattr(parser, "parser", None)
     if expat is not None:
         expat.StartDoctypeDeclHandler = _reject_dtd
         expat.EntityDeclHandler = _reject_dtd
@@ -143,11 +140,8 @@ def parse_xml(data: bytes, name: str = "XML") -> ET.Element:
         return parser.close()
     except _DTDFound:
         raise ExtractionError(f"{name} contains a DTD; refusing to parse") from None
-    except (ET.ParseError, ValueError) as e:  # ValueError: e.g. an unsupported encoding
+    except (ET.ParseError, ValueError) as e:
         raise ExtractionError(f"{name} is not valid XML ({e}); encrypted or corrupt?") from e
-
-
-# ------------------------------------------------------------------------- shared output
 
 
 class _Doc:
@@ -194,8 +188,6 @@ def _slide_chunks(slides: Iterator[tuple[int, str]]) -> Iterator[Chunk]:
             yield Chunk("text", span.text, f"slide {number}", make_snippet(span.text), float(number))
 
 
-# ---------------------------------------------------------------------------------- ODF
-
 _ODF_SKIP = {
     _q(t)
     for t in (
@@ -226,7 +218,7 @@ def _odf_inline(el: ET.Element, out: list[str], notes: list[ET.Element]) -> None
         elif tag == _ODF_BR:
             out.append("\n")
         elif tag == _ODF_NOTE_BODY or tag == _ODF_FRAME:
-            notes.append(child)  # footnotes, text boxes: emitted as their own paragraphs
+            notes.append(child)
         elif tag not in _ODF_SKIP:
             _odf_inline(child, out, notes)
         if child.tail:
@@ -254,7 +246,7 @@ def _odf_blocks(el: ET.Element, doc: _Doc) -> None:
             _odf_paragraph_text(child, doc, heading=tag == _q("text:h"))
         elif tag == _ODF_ROW:
             cells = []
-            for cell in child:  # direct cells only: nested tables are handled recursively
+            for cell in child:
                 if cell.tag not in (_ODF_CELL, _q("table:covered-table-cell")):
                     continue
                 sub = _Doc()
@@ -282,7 +274,7 @@ def _odp_slides(root: ET.Element) -> Iterator[tuple[int, str]]:
         if number > MAX_SLIDES:
             break
         doc = _Doc()
-        _odf_blocks(page, doc)  # includes presentation:notes (speaker notes)
+        _odf_blocks(page, doc)
         yield number, doc.text()
 
 
@@ -294,8 +286,6 @@ def extract_odf(path: Path) -> Iterator[Chunk]:
     else:
         yield from _doc_chunks(_odf_text(root))
 
-
-# --------------------------------------------------------------------------------- DOCX
 
 _W_P, _W_TBL, _W_TR, _W_TC = _q("w:p"), _q("w:tbl"), _q("w:tr"), _q("w:tc")
 _W_T, _W_TAB, _W_BR, _W_CR = _q("w:t"), _q("w:tab"), _q("w:br"), _q("w:cr")
@@ -367,7 +357,7 @@ def _docx_blocks(el: ET.Element, doc: _Doc, heading_styles: set[str]) -> None:
                     cells.append(" ".join(sub.text().split()))
                 doc.para(" | ".join(c for c in cells if c))
         elif tag not in (_MC_FALLBACK, _q("w:sectPr"), _q("w:del")):
-            _docx_blocks(child, doc, heading_styles)  # w:sdt, w:sdtContent, w:ins, mc:...
+            _docx_blocks(child, doc, heading_styles)
 
 
 def extract_docx(path: Path) -> Iterator[Chunk]:
@@ -384,8 +374,6 @@ def extract_docx(path: Path) -> Iterator[Chunk]:
                 _docx_blocks(z.xml(part), doc, heading_styles)
     yield from _doc_chunks(doc)
 
-
-# --------------------------------------------------------------------------------- PPTX
 
 _A_P, _A_T, _A_BR = _q("a:p"), _q("a:t"), _q("a:br")
 _SLIDE_RE = re.compile(r"ppt/slides/slide(\d+)\.xml$")
@@ -455,8 +443,6 @@ def _pptx_slide_order(z: _Zip) -> list[str]:
 
 def extract_pptx(path: Path) -> Iterator[Chunk]:
     with _Zip(path) as z:
-        # Presentation order (slide N = Nth slide in the show); if presentation.xml is missing
-        # or broken, fall back to the numeric order of the slide file names.
         order = _pptx_slide_order(z)
         if order:
             slides = list(enumerate(order, 1))[:MAX_SLIDES]
@@ -477,12 +463,9 @@ def extract_pptx(path: Path) -> Iterator[Chunk]:
                         text = f"{text}\n\n{note_text}"
                 yield number, text
 
-        # Materialise inside the `with` (the zip must stay open while reading slides).
         items = list(gen())
     yield from _slide_chunks(iter(items))
 
-
-# ---------------------------------------------------------------------------------- RTF
 
 _RTF_TOKEN = re.compile(
     rb"\\([a-zA-Z]{1,32})(-?\d{1,10})? ?|\\'([0-9a-fA-F]{2})|\\(.)|([{}])|[\r\n]+|([^\\{}\r\n]+)",
@@ -511,12 +494,12 @@ def rtf_to_text(data: bytes) -> str:
     if not data.lstrip().startswith(b"{\\rtf"):
         raise ExtractionError("not an RTF document")
     out: list[str] = []
-    pending = bytearray()  # \'hh bytes, decoded together (multi-byte codepages)
+    pending = bytearray()
     encoding = "cp1252"
     skip = False
     uc = 1
     stack: list[tuple[bool, int]] = []
-    to_skip = 0  # fallback characters still to drop after a \uN
+    to_skip = 0
     first_in_group = False
     star = False
 
@@ -528,7 +511,7 @@ def rtf_to_text(data: bytes) -> str:
     pos, n = 0, len(data)
     while pos < n:
         m = _RTF_TOKEN.match(data, pos)
-        if m is None:  # lone backslash at EOF etc.
+        if m is None:
             pos += 1
             continue
         pos = m.end()
@@ -547,13 +530,13 @@ def rtf_to_text(data: bytes) -> str:
             continue
         was_first, first_in_group = first_in_group, False
         if symbol == b"*":
-            star = was_first  # {\*\dest ...}: an optional destination, never plain text
+            star = was_first
             continue
         if word is not None:
             if star or word in _RTF_SKIP_DEST:
                 skip = True
             star = False
-            if word == b"bin" and arg:  # raw binary data
+            if word == b"bin" and arg:
                 pos += max(0, int(arg))
                 continue
             if word == b"ansicpg" and arg:
@@ -567,8 +550,6 @@ def rtf_to_text(data: bytes) -> str:
                 continue
             if word == b"u" and arg is not None:
                 if not skip:
-                    # Signed 16-bit UTF-16 code units; non-BMP characters come as surrogate
-                    # pairs, combined below. Anything out of range becomes U+FFFD.
                     code = int(arg)
                     if -32768 <= code < 0:
                         code += 65536
@@ -603,9 +584,7 @@ def rtf_to_text(data: bytes) -> str:
             if not skip and text:
                 out.append(text.decode(encoding, errors="replace"))
     flush()
-    # Combine \uN surrogate pairs (emoji etc.); lone surrogates become U+FFFD.
     text = "".join(out).encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
-    # Collapse the blank lines produced by \par sequences into paragraph breaks.
     text = re.sub(r"[ \t]+\n", "\n", text)
     return re.sub(r"\n{3,}", "\n\n", text)
 
@@ -621,10 +600,6 @@ def extract_rtf(path: Path) -> Iterator[Chunk]:
     yield from _doc_chunks(doc)
 
 
-# ----------------------------------------------------------------------------- dispatch
-
-# filetypes.py routes only odt/ott/odp/docx/pptx/rtf here; the template/macro variants share
-# the same formats and are listed so that enabling them there is all it takes.
 _BY_SUFFIX = {
     ".odt": extract_odf, ".ott": extract_odf, ".odp": extract_odf, ".otp": extract_odf,
     ".docx": extract_docx, ".docm": extract_docx, ".dotx": extract_docx,

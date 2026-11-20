@@ -35,8 +35,8 @@ def test_track_matches(tmp_path: Path) -> None:
     link = tmp_path / "link.mp3"
     link.symlink_to(f)
     assert track_matches(f.as_uri(), str(f), new_player=False)
-    assert track_matches(link.as_uri(), str(f), new_player=False)  # same file through a symlink
-    portal = "file:///run/user/1000/doc/abc123/ep%201.mp3"  # a Flatpak player's view of the file
+    assert track_matches(link.as_uri(), str(f), new_player=False)
+    portal = "file:///run/user/1000/doc/abc123/ep%201.mp3"
     assert track_matches(portal, str(f), new_player=True)
     assert not track_matches(portal, str(f), new_player=False)
     assert not track_matches(None, str(f), new_player=True)
@@ -107,7 +107,7 @@ def test_seeks_the_player_that_loaded_the_file(tmp_path: Path) -> None:
             assert name in await mpris.snapshot()
             assert await mpris.seek_when_loaded(str(f), 125.5, timeout=5)
         assert player.position == 125_500_000
-        assert len(player.set_calls) == 3  # retried while the player ignored it
+        assert len(player.set_calls) == 3
         assert other.set_calls == [] and other.position == 0
 
     asyncio.run(go())

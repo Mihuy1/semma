@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 type IconData = tuple[int, int, int, bool, int, int, bytes]
 
 DEFAULT_SIZE = 64
-MAX_KRUNNER_SIDE = 2047  # KRunner requires width/height < 2048
+MAX_KRUNNER_SIDE = 2047
 DEFAULT_LRU_CAPACITY = 256
 FFMPEG_TIMEOUT = 10.0
 MAX_IMAGE_PIXELS = 50_000_000
@@ -184,7 +184,6 @@ def _generate_image_thumb(path: Path, size: int):
             with Image.open(path) as img:
                 img.seek(0)
                 if img.format == "JPEG":
-                    # Request at least 2x size because EXIF orientation may swap width/height.
                     draft_side = max(size * 2, 128)
                     img.draft("RGB", (draft_side, draft_side))
                 elif img.format == "JPEG2000":
@@ -314,17 +313,14 @@ def make_icon_data(
     root = cache_dir if cache_dir is not None else xdg_cache_home()
     own_dir = root / "semma" / "thumbnails"
 
-    # 1. Freedesktop cache ($XDG_CACHE_HOME/thumbnails/{normal,large}/<md5(uri)>.png).
     img = _load_freedesktop_thumb(root, path_str, mtime)
     if img is not None:
         return _image_to_icon_data(img, size)
 
-    # 2. Our own disk cache ($XDG_CACHE_HOME/semma/thumbnails/<sha1(path|mtime|size)>.png).
     img = _load_own_cache_thumb(own_dir, path_str, mtime, size)
     if img is not None:
         return _image_to_icon_data(img, size)
 
-    # 3. Generate with Pillow (image) or ffmpeg (video).
     if kind == ft.IMAGE:
         img = _generate_image_thumb(p, size)
     else:
@@ -336,7 +332,6 @@ def make_icon_data(
     if icon is None:
         return None
 
-    # Save generated RGBA thumbnail atomically into our own cache.
     from PIL import Image
 
     w, h, _, _, _, _, raw = icon

@@ -1,18 +1,4 @@
 #!/bin/bash
-# Builds the llama.cpp libraries the packages carry into build/llama/lib: the pinned commit, as shared
-# libraries with ggml's backends as modules loaded at run time (GGML_BACKEND_DL) - every x86-64 CPU
-# variant, so one build runs on any machine, plus Vulkan. Only the libraries are built (libllama,
-# libmtmd, ggml): no tools, no server.
-#
-#   scripts/build-llama.sh              build inside a container (podman or docker), so the libraries
-#                                       need only that image's glibc and libstdc++ (default
-#                                       ubuntu:24.04: glibc 2.39; set SEMMA_BUILD_IMAGE for another)
-#   scripts/build-llama.sh --native     build with this machine's compiler (needs cmake, a C++
-#                                       compiler, git, glslc, and Vulkan + SPIR-V headers)
-#
-# Does nothing when build/llama already holds that build. A new COMMIT ships only if
-# `uv run pytest tests/test_parity.py` passes against it (same vectors, so every index is kept) and
-# the ctypes structures in src/semma/embedder.py still match its headers.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -29,8 +15,6 @@ if [[ ${1:-} != --native ]]; then
   fi
   engine=$(command -v podman || command -v docker) || { echo "needs podman or docker (or --native)" >&2; exit 1; }
   mkdir -p build
-  # glslc compiles the Vulkan backend's shaders at build time; the backend loads the system's Vulkan
-  # at run time.
   "$engine" run --rm --security-opt label=disable -v "$PWD:/src" -w /src "$IMAGE" bash -c '
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
@@ -60,9 +44,6 @@ cmake -S "$SOURCE" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLAMA_OPENSSL=OFF -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON '-DCMAKE_INSTALL_RPATH=$ORIGIN' > /dev/null
 cmake --build "$BUILD" -j "$(nproc)" > /dev/null
 
-# Each library once, under the name the others ask for (libllama.so.0), plus the unversioned name
-# embedder.py loads; the backends (libggml-cpu-*.so, libsemma-ggml-vulkan.so) are loaded by path. They find
-# each other in their own folder ($ORIGIN, not the build's folders).
 rm -rf "$OUT"
 mkdir -p "$OUT/lib"
 for file in "$BUILD"/bin/*.so*; do
@@ -74,11 +55,8 @@ for file in "$BUILD"/bin/*.so*; do
     cp "$file" "$OUT/lib/"
   fi
 done
-# Under a name ggml does not look for: embedder.py loads it, and only in a worker that uses the GPU.
 mv "$OUT/lib/libggml-vulkan.so" "$OUT/lib/libsemma-ggml-vulkan.so"
 strip --strip-unneeded "$OUT"/lib/*.so.* "$OUT"/lib/lib*ggml-*.so 2>/dev/null || true
-# Its licenses beside the libraries, so a cached build/llama (CI keeps only that) still has them
-# for scripts/notices.py.
 cp "$SOURCE/LICENSE" "$OUT/LICENSE.llama.cpp"
 rm -rf "$OUT/licenses"
 cp -r "$SOURCE/licenses" "$OUT/licenses"

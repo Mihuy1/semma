@@ -50,7 +50,7 @@ def test_wizard_blocks_empty_scope_discards_on_close_and_writes_on_finish(
     assert wizard.footer_bar.isVisible()
     assert wizard.next_button.text() == "Next" and not wizard.back_button.isEnabled()
 
-    wizard.next_button.click()  # folders
+    wizard.next_button.click()
     assert wizard.folders.isVisible() or wizard.stack.currentIndex() == 1
     wizard.folders.roots.set_folders([])
     wizard.folders.include_mounts.setChecked(False)
@@ -59,7 +59,7 @@ def test_wizard_blocks_empty_scope_discards_on_close_and_writes_on_finish(
     wizard.folders.include_mounts.setChecked(True)
     assert wizard.next_button.isEnabled()
 
-    wizard.next_button.click()  # file types
+    wizard.next_button.click()
     for box in wizard.filetypes.kind_checks.values():
         box.setChecked(False)
     assert not wizard.next_button.isEnabled()
@@ -67,7 +67,7 @@ def test_wizard_blocks_empty_scope_discards_on_close_and_writes_on_finish(
     assert wizard.next_button.isEnabled()
 
     wizard.folders.skip_hidden.setChecked(False)
-    wizard.confirm_close = lambda: "stay"  # closing asks first; "stay" keeps the wizard open
+    wizard.confirm_close = lambda: "stay"
     wizard.close()
     app.processEvents()
     assert wizard.isVisible()
@@ -130,7 +130,6 @@ def test_run_setup_again_pauses_and_opens_the_wizard(app: QtWidgets.QApplication
     wizard = window._wizard
     assert wizard is not None and wizard.isVisible()
     assert not window.isVisible()
-    # Prefilled with the saved folders, and closing does not turn indexing back on.
     assert wizard.folders.roots.folders() == ["~/Documents"]
     assert wizard.rerun
     wizard.confirm_close = lambda: "later"
@@ -140,7 +139,6 @@ def test_run_setup_again_pauses_and_opens_the_wizard(app: QtWidgets.QApplication
     assert window.tabs.currentWidget() is window.status_page
     assert read_raw(config_path(home))["onboarding_complete"] is False
 
-    # Run it again and close with "Keep current settings": indexing resumes, page edits are dropped.
     client.calls.clear()
     window.settings_page.setup_button.click()
     app.processEvents()
@@ -154,7 +152,7 @@ def test_run_setup_again_pauses_and_opens_the_wizard(app: QtWidgets.QApplication
     raw = read_raw(config_path(home))
     assert raw["onboarding_complete"] is True
     assert raw["scan"] == {"roots": ["~/Documents"]}
-    assert client.calls.count("ReloadConfig") == 2  # paused, then resumed
+    assert client.calls.count("ReloadConfig") == 2
 
 
 def test_closing_the_first_run_wizard_with_defaults_starts_indexing(
@@ -214,7 +212,6 @@ def test_wizard_gpu_busy_pause_and_threshold(
     assert wizard.device.gpu_busy_label.isEnabled()
     assert wizard.device.gpu_busy_threshold.value() == DEFAULT_GPU_BUSY_THRESHOLD
 
-    # Turning GPU pause off disables the threshold input and writes pause_when_gpu_busy = false.
     wizard.device.pause_when_gpu_busy.setChecked(False)
     assert not wizard.device.gpu_busy_threshold.isEnabled()
     assert not wizard.device.gpu_busy_label.isEnabled()
@@ -228,7 +225,6 @@ def test_wizard_gpu_busy_pause_and_threshold(
         "daemon": {"pause_when_gpu_busy": False},
     }
 
-    # Re-opening setup loads the disabled state, and re-enabling + setting a value saves both.
     finished.clear()
     client.calls.clear()
     wizard = OnboardingWindow(client, config_path(home), home, rerun=True)

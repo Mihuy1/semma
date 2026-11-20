@@ -33,13 +33,8 @@ MAX_VIDEO_FRAMES = 32
 class Chunk:
     modality: Modality
     content: Content
-    # Human-readable position inside the file shown in search results: "p. 4", "01:00–02:00",
-    # or "" when the chunk is the whole file.
     locator: str = ""
-    # Short plain text shown as the result description (text chunks: their opening words).
     snippet: str = ""
-    # Machine-readable position used to open the file there: page number (1-based) for
-    # documents, start second for audio/video, None otherwise.
     position: float | None = None
 
 

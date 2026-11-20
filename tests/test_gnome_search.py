@@ -149,7 +149,6 @@ def test_order_cap_and_subsearch_reruns() -> None:
         results = [_result(f"/x/{i}.txt") for i in (5, 1, 9, 3, 7)]
         svc, queries = _service(results, max_results=3)
         assert await svc._run_search(["rocket", "launch"]) == ["/x/5.txt", "/x/1.txt", "/x/9.txt"]
-        # Subsearch ignores the previous ids and searches again with the new terms.
         assert await svc._run_search(["rocket", "launches"]) == ["/x/5.txt", "/x/1.txt", "/x/9.txt"]
         assert queries == ["rocket launch", "rocket launches"]
 
@@ -216,7 +215,6 @@ def test_dbus_round_trip_metas_activate_and_signatures(tmp_path: Path) -> None:
                 "gicon": text["gicon"],
             }
             assert "icon-data" not in text and text["gicon"]
-            # Thumbnails replace the themed icon (gicon would win over icon-data in the shell).
             for m in (image, video):
                 assert "gicon" not in m
                 assert list(m["icon-data"]) == [2, 1, 8, True, 8, 4, bytes(range(8))]
@@ -238,7 +236,6 @@ def test_metas_fall_back_to_gicon_past_thumbnail_budget() -> None:
         ids = await svc._run_search(["sunset"])
         metas = await _call_metas(svc, ids)
         assert "gicon" in metas[0] and "icon-data" not in metas[0]
-        # Generation continues in the background; the next lookup gets the thumbnail.
         await asyncio.sleep(0.4)
         metas = await _call_metas(svc, ids)
         assert "icon-data" in metas[0]
@@ -248,8 +245,7 @@ def test_metas_fall_back_to_gicon_past_thumbnail_budget() -> None:
 
 
 async def _call_metas(svc: GnomeSearchService, ids: list[str]):
-    # dbus-fast's @method keeps the undecorated coroutine function as __wrapped__.
-    metas = await type(svc).__dict__["GetResultMetas"].__wrapped__(svc, ids)
+    metas = await svc.get_result_metas(ids)
     return [{k: v.value for k, v in m.items()} for m in metas]
 
 
@@ -261,8 +257,7 @@ def test_activate_failure_never_raises() -> None:
     async def check() -> None:
         svc, _ = _service([_result("/x/a.txt")], launcher=Broken())
         ids = await svc._run_search(["abc"])
-        fn = type(svc).__dict__["ActivateResult"].__wrapped__
-        await fn(svc, ids[0], ["abc"], 0)
+        await svc.activate_result(ids[0])
 
     asyncio.run(check())
 
@@ -299,7 +294,6 @@ def test_shorten_folder_examples_and_edges() -> None:
     assert shorten_folder("~/Pictures/Trips") == "~/Pictures/Trips"
     assert shorten_folder("/mnt/games") == "/mnt/games"
 
-    # Single-component paths (or no middle components to elide) stay untouched.
     assert shorten_folder("/") == "/"
     assert shorten_folder("~") == "~"
     long_single = "/" + "a" * 60
@@ -309,12 +303,10 @@ def test_shorten_folder_examples_and_edges() -> None:
     long_root_child = "/mnt/" + "a" * 60
     assert shorten_folder(long_root_child) == long_root_child
 
-    # Always keeps at least the last component even when longer than limit.
     long_last = "x" * 60
     assert shorten_folder(f"/mnt/middle/{long_last}") == f"/mnt/\u2026/{long_last}"
     assert shorten_folder(f"~/middle/{long_last}") == f"~/\u2026/{long_last}"
 
-    # Limit boundary: len == limit untouched, len == limit + 1 shortened; exact fit at limit.
     at_limit = "/mnt/alpha/beta/gamma"
     assert shorten_folder(at_limit, limit=len(at_limit)) == at_limit
     assert shorten_folder(at_limit, limit=len(at_limit) - 1) == "/mnt/…/beta/gamma"
@@ -322,7 +314,6 @@ def test_shorten_folder_examples_and_edges() -> None:
     assert shorten_folder(exact_fit, limit=len("/mnt/…/bb/cc")) == "/mnt/…/bb/cc"
     assert shorten_folder(exact_fit, limit=len("/mnt/…/bb/cc") - 1) == "/mnt/…/cc"
 
-    # Unicode folder names.
     uni = "~/Документы/проекты/фотографии/лето_2025/архив_снимков_выходные"
     short_uni = shorten_folder(uni)
     assert short_uni == "~/…/фотографии/лето_2025/архив_снимков_выходные"
@@ -468,10 +459,9 @@ def test_gnome_budget_default_and_prewarm_cap() -> None:
         svc, _ = _service(results, thumbnailer=thumb, max_results=10)
         assert svc._thumbnail_budget == GNOME_THUMBNAIL_BUDGET_SECONDS
         ids = await svc._run_search(["sunset"])
-        assert len(ids) == 8  # max_results is unchanged; only prewarming is capped
+        assert len(ids) == 8
         await asyncio.sleep(0.05)
         assert thumb.calls == GNOME_VISIBLE_RESULTS
-        # Asking for a result past the cap still produces its thumbnail on demand.
         metas = await _call_metas(svc, [ids[7]])
         assert "icon-data" in metas[0]
         assert thumb.calls == GNOME_VISIBLE_RESULTS + 1
@@ -510,7 +500,6 @@ def test_activate_unknown_id_opens_existing_indexable_file_only(tmp_path: Path) 
     async def check() -> None:
         launcher = FakeLauncher()
         svc, _ = _service([], launcher=launcher)
-        activate = type(svc).__dict__["ActivateResult"].__wrapped__
         doc = tmp_path / "report.pdf"
         doc.write_bytes(b"%PDF")
         script = tmp_path / "run.desktop"
@@ -518,11 +507,11 @@ def test_activate_unknown_id_opens_existing_indexable_file_only(tmp_path: Path) 
         folder = tmp_path / "dir.txt"
         folder.mkdir()
 
-        await activate(svc, str(doc), ["x"], 0)
-        await activate(svc, str(tmp_path / "gone.txt"), ["x"], 0)  # missing
-        await activate(svc, str(script), ["x"], 0)  # not an indexable kind
-        await activate(svc, str(folder), ["x"], 0)  # not a regular file
-        await activate(svc, "report.pdf", ["x"], 0)  # relative
+        await svc.activate_result(str(doc))
+        await svc.activate_result(str(tmp_path / "gone.txt"))
+        await svc.activate_result(str(script))
+        await svc.activate_result(str(folder))
+        await svc.activate_result("report.pdf")
         assert launcher.opened == [str(doc)]
 
     asyncio.run(check())
@@ -541,8 +530,7 @@ def test_launch_search_spawns_gui_detached(monkeypatch: pytest.MonkeyPatch) -> N
 
     async def check() -> None:
         svc, _ = _service([], launcher=launcher)
-        launch = type(svc).__dict__["LaunchSearch"].__wrapped__
-        await launch(svc, ["ignored", "terms"], 42)
+        await svc.launch_search()
 
     asyncio.run(check())
     assert len(calls) == 1
@@ -568,14 +556,13 @@ def test_launch_search_failure_logs_warning_and_never_raises(
 
     async def check() -> None:
         svc, _ = _service([], launcher=launcher)
-        launch = type(svc).__dict__["LaunchSearch"].__wrapped__
-        await launch(svc, ["rocket"], 0)
+        await svc.launch_search()
 
         async def broken_spawn(argv: list[str]) -> bool:
             raise RuntimeError("unexpected failure")
 
         monkeypatch.setattr(launcher, "spawn", broken_spawn)
-        await launch(svc, [], 0)
+        await svc.launch_search()
 
     with caplog.at_level(logging.WARNING, logger="semma.gnome_search"):
         asyncio.run(check())
@@ -590,8 +577,8 @@ def test_gnome_search_trims_results_below_half_top_score() -> None:
     async def check() -> None:
         results = [
             _result("/x/top.txt", score=4.8),
-            _result("/x/border.txt", score=2.4),  # exact 0.5 * top_score -> kept
-            _result("/x/weak.txt", score=2.39),  # < 0.5 * top_score -> dropped
+            _result("/x/border.txt", score=2.4),
+            _result("/x/weak.txt", score=2.39),
             _result("/x/tail.txt", score=1.0),
         ]
         svc, _ = _service(results, max_results=10)

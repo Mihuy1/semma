@@ -173,8 +173,8 @@ class OnboardingWindow(QMainWindow):
         self.client = client
         self.config_path = config_path
         self.home = home
-        self.rerun = rerun  # opened by Run setup again: the saved settings are the user's own
-        self._saved = False  # the completion flag has been written; only the service is behind
+        self.rerun = rerun
+        self._saved = False
         self._relay = Relay(self)
         self._completed = False
         self._saving = False
@@ -294,15 +294,12 @@ class OnboardingWindow(QMainWindow):
                 event.ignore()
                 return
             if self._saved:
-                # Saved already; only a service restart was pending. That is a finished setup.
                 self._complete()
             elif self.ctx is None:
-                self.closed_early.emit()  # nothing can be saved from here
+                self.closed_early.emit()
             else:
                 choice = self.confirm_close()
                 if choice == "skip":
-                    # Not from inside the close: finishing closes this window, and Qt ignores
-                    # a close() made while a close event is being handled.
                     event.ignore()
                     QTimer.singleShot(0, lambda: self._save(include_pages=False))
                     return
@@ -341,7 +338,6 @@ class OnboardingWindow(QMainWindow):
             return "later"
         return "stay"
 
-    # -- pages -----------------------------------------------------------------------------
     def _load(self) -> None:
         try:
             self.ctx = SettingsContext.load(self.config_path, self.home)
@@ -364,7 +360,6 @@ class OnboardingWindow(QMainWindow):
         found = list(self._form().problems())
         if getattr(self._form(), "key", "") != "folders":
             return found
-        # The settings page only warns when nothing would be indexed. Setup refuses to continue.
         return [replace(p, blocking=True) if p.code == NOTHING_INDEXED else p for p in found]
 
     def _blocked(self) -> bool:
@@ -431,7 +426,6 @@ class OnboardingWindow(QMainWindow):
             return
         self._save()
 
-    # -- saving ----------------------------------------------------------------------------
     def _save(self, include_pages: bool = True) -> None:
         """Write the completion flag and tell the service. Without `include_pages` the edits
         on the pages are left out: the saved settings (or the defaults) are used as they are."""
@@ -502,7 +496,6 @@ class OnboardingWindow(QMainWindow):
         self._timer.stop()
         self.finished_ok.emit()
 
-    # -- download footer -------------------------------------------------------------------
     def _poll(self) -> None:
         if self._in_flight:
             return

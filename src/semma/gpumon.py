@@ -7,8 +7,6 @@ import subprocess
 import time
 from collections.abc import Callable, Iterable
 
-# Compositors and desktop shells that continuously use a small amount of GPU on KDE Wayland/X11.
-# They are ignored unless their SM utilization exceeds DEFAULT_IGNORED_MAX_SM.
 DEFAULT_IGNORED_COMMANDS: frozenset[str] = frozenset({
     "kwin_wayland",
     "Xwayland",
@@ -16,7 +14,7 @@ DEFAULT_IGNORED_COMMANDS: frozenset[str] = frozenset({
 })
 
 DEFAULT_IGNORED_MAX_SM: float = 50.0
-UNAVAILABLE_TTL_SECONDS: float = 600.0  # 10 minutes
+UNAVAILABLE_TTL_SECONDS: float = 600.0
 COMMAND_TIMEOUT_SECONDS: float = 5.0
 
 
@@ -34,7 +32,7 @@ def parse_pmon_output(
 ) -> float:
     """Parse `nvidia-smi pmon -c 1 -s u` output and sum foreign SM % on *gpu_index*."""
     total_sm = 0.0
-    cmd_col = 9  # default column index for 'command' in standard 10-column pmon -s u output
+    cmd_col = 9
 
     for raw_line in output.splitlines():
         line = raw_line.strip()

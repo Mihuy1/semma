@@ -11,7 +11,6 @@ VIDEO = "video"
 
 KINDS: tuple[str, ...] = (TEXT, PDF, OFFICE, IMAGE, AUDIO, VIDEO)
 
-# Source code is deliberately absent: it is not indexed.
 EXTENSIONS: dict[str, str] = {
     **dict.fromkeys(("txt", "text", "md", "markdown", "rst", "org", "tex", "adoc", "asciidoc"), TEXT),
     "pdf": PDF,
@@ -24,18 +23,17 @@ EXTENSIONS: dict[str, str] = {
 }
 
 
-# Files with a text extension that are really build files or boilerplate, not user content.
 _EXCLUDED_STEMS = frozenset({
     "cmakelists", "cmakecache", "robots", "constraints", "copying", "notice", "notices",
     "third_party_notices", "thirdpartynotices",
 })
-_EXCLUDED_STEM_PREFIXES = ("requirements", "license", "licence")  # requirements-dev, LICENSE.electron
+_EXCLUDED_STEM_PREFIXES = ("requirements", "license", "licence")
 
 
 def classify(name: str) -> str | None:
     """Return the kind for a file name, or None if it should not be indexed."""
     dot = name.rfind(".")
-    if dot <= 0:  # no extension, or a dotfile like ".bashrc"
+    if dot <= 0:
         return None
     kind = EXTENSIONS.get(name[dot + 1 :].lower())
     if kind == TEXT:

@@ -41,7 +41,7 @@ def _media_result(kind: str = ft.VIDEO, position: float | None = 12.5) -> Search
 def test_spot_for_only_pdf_hits_with_a_page() -> None:
     assert spot_for(_pdf_result()) == Spot(7)
     assert not Spot(7).is_time
-    assert spot_for(_pdf_result(modality="image")) == Spot(7)  # a scanned page
+    assert spot_for(_pdf_result(modality="image")) == Spot(7)
     assert spot_for(_pdf_result(position=None)) is None
     assert spot_for(_pdf_result(position=0.0)) is None
     assert spot_for(replace(_pdf_result(), kind=ft.OFFICE)) is None
@@ -75,7 +75,6 @@ def test_build_argv_per_viewer() -> None:
     assert build_argv(["papers", "%U"], PDF, SPOT) == ["papers", "--page-index=7", PDF]
     assert build_argv(["zathura", "%f"], PDF, SPOT) == ["zathura", "--page=7", PDF]
     assert build_argv(["firefox", "%u"], PDF, SPOT) == ["firefox", "file:///home/u/Docs/paper%20one.pdf#page=7"]
-    # Chromium-based browsers share one PDF viewer that takes the same fragment.
     uri = "file:///home/u/Docs/paper%20one.pdf#page=7"
     for exe in ("/usr/bin/google-chrome-stable", "/usr/bin/brave-browser-stable", "chromium-browser",
                 "/usr/bin/microsoft-edge-stable", "vivaldi-stable", "opera"):
@@ -95,12 +94,10 @@ def test_build_argv_flatpak_options_go_before_forwarding_block() -> None:
 
 
 def test_build_argv_field_codes() -> None:
-    # No field code: options and file appended. %i/%c/%k dropped, %% unescaped, one file only.
     assert build_argv(["okular"], PDF, Spot(1)) == ["okular", "--page", "1", PDF]
     assert build_argv(["okular", "%i", "--caption", "%c", "%k", "%U", "%F"], PDF, Spot(1)) == [
         "okular", "--caption", "--page", "1", PDF]
     assert build_argv(["okular", "--x=100%%", "%U"], PDF, Spot(1)) == ["okular", "--x=100%", "--page", "1", PDF]
-    # Unknown viewer or a field code inside an argument: give up (caller opens plainly).
     assert build_argv(["libreoffice", "--draw", "%U"], PDF, SPOT) is None
     assert build_argv(["okular", "--file=%f"], PDF, SPOT) is None
 
@@ -113,11 +110,9 @@ def test_build_argv_time_players_and_end_of_options() -> None:
     assert build_argv(["cvlc", "%U"], AUDIO, Spot(seconds=12.5)) == ["cvlc", "--start-time=12.5", AUDIO]
     assert build_argv(["celluloid", "%U"], VIDEO, Spot(seconds=45)) == ["celluloid", "--mpv-start=45", VIDEO]
     assert build_argv(["gnome-mpv", "%U"], VIDEO, Spot(seconds=45.25)) == ["gnome-mpv", "--mpv-start=45.25", VIDEO]
-    # Browsers use HTML media fragments.
     assert build_argv(["firefox", "%u"], VIDEO, TIME_SPOT) == ["firefox", "file:///m/a%20b.mp4#t=120"]
     assert build_argv(["/usr/bin/google-chrome-stable", "%U"], AUDIO, Spot(seconds=12.5)) == [
         "/usr/bin/google-chrome-stable", "file:///m/song%20one.flac#t=12.5"]
-    # Unknown media players (handled via MPRIS by caller) -> None.
     for exe in ("dragon", "elisa", "haruna", "totem", "showtime"):
         assert build_argv([exe, "%U"], VIDEO, TIME_SPOT) is None
 
@@ -163,7 +158,6 @@ def test_media_mime(monkeypatch: pytest.MonkeyPatch) -> None:
     assert media_mime("/m/doc.pdf") is None
     assert media_mime("/m/notes.txt") is None
     assert media_mime("/m/noext") is None
-    # Fallback still works when system mimetypes database does not know or returns non-audio/video.
     monkeypatch.setattr(viewer.mimetypes, "guess_type", lambda _p: ("application/ogg", None))
     assert media_mime("/m/voice.opus") == "audio/ogg"
     assert media_mime("/m/song.mp3") is None
@@ -295,7 +289,6 @@ def test_krunner_launcher_opens_viewer_at_spot(monkeypatch: pytest.MonkeyPatch) 
     asyncio.run(launcher.open_file(PDF, activation_token="tok", spot=SPOT))
     assert calls == [(PDF, SPOT)] and spawned == [(["okular", "--page", "7", PDF], "tok")]
 
-    # No spot: the viewer is not looked up. Unknown viewer: plain desktop opener.
     spawned.clear()
     asyncio.run(launcher.open_file(PDF, activation_token="tok"))
     assert len(calls) == 1 and spawned == [(["/usr/bin/kde-open", PDF], "tok")]
@@ -363,9 +356,8 @@ def test_launchers_seek_over_mpris_when_the_player_has_no_start_option(monkeypat
     monkeypatch.setattr(launcher, "_spawn_detached", lambda argv, activation_token=None: events.append(argv) or True)
     _fake_viewer_argv(monkeypatch, kr, None)
     asyncio.run(launcher.open_file(media, activation_token="tok", spot=spot))
-    assert events == ["snapshot", ["/usr/bin/kde-open", media], seek]  # snapshot before the open
+    assert events == ["snapshot", ["/usr/bin/kde-open", media], seek]
 
-    # A player with a start option is started directly; no MPRIS.
     events.clear()
     _fake_viewer_argv(monkeypatch, kr, ["mpv", "--start=720", media])
     asyncio.run(launcher.open_file(media, spot=spot))
@@ -384,7 +376,6 @@ def test_launchers_seek_over_mpris_when_the_player_has_no_start_option(monkeypat
     asyncio.run(glauncher.open_file(media, spot=spot))
     assert events == ["snapshot", ["/usr/bin/gio", "open", media], seek]
 
-    # A PDF page spot never goes to MPRIS.
     events.clear()
     asyncio.run(glauncher.open_file(PDF, spot=SPOT))
     assert events == [["/usr/bin/gio", "open", PDF]]
@@ -408,17 +399,15 @@ def test_services_pass_the_hit_spot(tmp_path: Path) -> None:
         rec = _Recorder()
         krunner = KRunnerService(_no_search, launcher=rec)  # type: ignore[arg-type]
         match_id = krunner._remember(hit)
-        await type(krunner).__dict__["Run"].__wrapped__(krunner, match_id, "")
+        await krunner.run(match_id, "")
         assert rec.calls == [(PDF, Spot(7))]
 
         rec.calls.clear()
         gnome = GnomeSearchService(_no_search, launcher=rec)  # type: ignore[arg-type]
-        activate = type(gnome).__dict__["ActivateResult"].__wrapped__
-        await activate(gnome, gnome._remember(hit), [], 0)
-        # An id no longer remembered opens without a page.
+        await gnome.activate_result(gnome._remember(hit))
         doc = tmp_path / "old.pdf"
         doc.write_bytes(b"%PDF")
-        await activate(gnome, str(doc), [], 0)
+        await gnome.activate_result(str(doc))
         assert rec.calls == [(PDF, Spot(7)), (str(doc), None)]
 
     asyncio.run(check())

@@ -314,7 +314,6 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         embedder.load_query()
-        # Rank like the daemon: all vectors in memory (older Stores without the cache use sqlite-vec).
         if hasattr(store, "warm_vector_cache"):
             store.warm_vector_cache(cfg.vector_cache_max_chunks)
         elif hasattr(store, "enable_vector_cache"):

@@ -20,16 +20,12 @@ SAMPLE_PMON = """\
 
 
 def test_parse_pmon_excludes_own_pids_compositors_and_other_gpus() -> None:
-    # pid 22000 is our own pid; kwin_wayland (12%), plasmashell (4%), Xwayland (8%) are <= 50%;
-    # GPU 1 (95%) is ignored on GPU 0; only steam_game (38%) counts.
     load = parse_pmon_output(SAMPLE_PMON, own_pids={22000})
     assert load == pytest.approx(38.0)
 
-    # If pid 22000 is NOT in own_pids, python3 (45%) + steam_game (38%) = 83%
     load_all = parse_pmon_output(SAMPLE_PMON, own_pids=set())
     assert load_all == pytest.approx(83.0)
 
-    # Querying GPU 1 returns 95%
     load_gpu1 = parse_pmon_output(SAMPLE_PMON, own_pids={22000}, gpu_index=1)
     assert load_gpu1 == pytest.approx(95.0)
 
@@ -43,7 +39,6 @@ def test_compositor_above_max_sm_is_counted_and_ignore_list_configurable() -> No
 """
     assert parse_pmon_output(pmon_high_kwin, own_pids=set()) == pytest.approx(65.0)
 
-    # Custom ignore list
     custom = """\
 # gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command
     0       1000     G     25      5      -      -      -      -    custom_shell
@@ -97,7 +92,6 @@ def test_unavailable_caching_on_missing_or_timeout(monkeypatch: pytest.MonkeyPat
     assert mon.busy() is False
     assert mon.other_load() is None
     assert mon.gpu_utilization() is None
-    # Should have only spawned once because unavailability is cached for 10 min
     assert calls == 1
 
 
@@ -121,12 +115,10 @@ def test_timeout_marks_unavailable_until_ttl_expires(monkeypatch: pytest.MonkeyP
     assert mon.other_load() is None
     assert calls == 1
 
-    # 5 minutes later: still cached as unavailable
     now[0] += 300.0
     assert mon.gpu_utilization() is None
     assert calls == 1
 
-    # 10 minutes + 1s later: cache expires and nvidia-smi is tried again
     should_timeout = False
     now[0] += 301.0
     assert mon.gpu_utilization() == pytest.approx(42.0)

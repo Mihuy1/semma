@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 
 _GNOME_DESKTOPS = ("gnome", "ubuntu", "unity", "pantheon", "budgie", "cinnamon", "mate", "xfce")
 
-DEFAULT_ACCENT: tuple[int, int, int] = (53, 132, 228)  # Adwaita blue #3584e4
+DEFAULT_ACCENT: tuple[int, int, int] = (53, 132, 228)
 
 _NAMED_ACCENTS: dict[str, tuple[int, int, int]] = {
     "blue": (53, 132, 228),
@@ -119,7 +119,6 @@ def read_portal_settings(timeout: float = 0.3) -> dict[str, dict[str, Any]]:
         except RuntimeError:
             in_loop = False
         if in_loop:
-            # Not `with`: its exit waits for the worker, which would defeat the timeout below.
             pool = ThreadPoolExecutor(max_workers=1)
             try:
                 return pool.submit(asyncio.run, _fetch_portal_settings(timeout)).result(timeout=2 * timeout + 0.2)
@@ -249,7 +248,6 @@ def detect_desktop_theme(
     gsettings_data = gsettings or {}
     ini_data = ini if ini is not None else (read_gtk_settings_ini() if gnome else {})
 
-    # 1. Dark / light mode
     dark: bool | None = None
     if semma_theme == "gnome-dark":
         dark = True
@@ -299,13 +297,11 @@ def detect_desktop_theme(
     if dark is None:
         dark = False
 
-    # 2. Accent color
     accent = _parse_portal_accent(appearance.get("accent-color"))
     if accent is None:
         named = str(gnome_iface.get("accent-color") or gsettings_data.get("accent-color") or "").strip().lower()
         accent = _NAMED_ACCENTS.get(named, DEFAULT_ACCENT)
 
-    # 3. Font & icon theme
     font_raw = gnome_iface.get("font-name") or gsettings_data.get("font-name") or ini_data.get("gtk-font-name")
     font_name = str(font_raw).strip() if font_raw else None
 
@@ -657,7 +653,6 @@ def apply_desktop_theme(app: QApplication) -> None:
 
     if not app.property("_semma_theme_connected"):
         app.setProperty("_semma_theme_connected", True)
-        # Rebuild the palette-aware stylesheet when the palette changes (e.g. a KDE color scheme).
         palette_changed = getattr(app, "paletteChanged", None)
         if palette_changed is not None:
             palette_changed.connect(lambda _palette: _refresh_stylesheet(app))

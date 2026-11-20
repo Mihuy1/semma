@@ -24,12 +24,10 @@ if TYPE_CHECKING:
 
 TARGET_CHARS = 2000
 MAX_CHARS = 2500
-MIN_CHARS = 1000  # never cut before this (except at a heading)
-MIN_HEADING_CUT = 300  # a heading closer than this to the chunk start does not end the chunk
+MIN_CHARS = 1000
+MIN_HEADING_CUT = 300
 OVERLAP_CHARS = 250
 SNIPPET_CHARS = 160
-# At most this many chunks per text/office/PDF file (~2 MB of text); the rest is not indexed.
-# Bounds the work and index size for huge logs, dumps and generated files.
 MAX_CHUNKS = 1000
 MAX_HEADING_IN_LOCATOR = 48
 
@@ -46,7 +44,7 @@ class TextSpan:
     start: int
     end: int
     text: str
-    heading: str  # the last heading at or before `start`, "" if none
+    heading: str
 
     @property
     def starts_with_heading(self) -> bool:
@@ -119,7 +117,6 @@ def chunk_text(
                     or _best(_SPACE, text, lo, hi, tgt)
                     or hi
                 )
-                # The next chunk overlaps this one, unless a heading starts right at the cut.
                 j = bisect.bisect_left(h_offsets, end - 2)
                 at_heading = j < len(h_offsets) and h_offsets[j] <= end + 2
                 nxt = end if at_heading else _overlap_start(text, s, end, overlap)
@@ -159,7 +156,7 @@ def _short(s: str, limit: int = MAX_HEADING_IN_LOCATOR) -> str:
 
 def spans_to_chunks(
     spans: Iterable[TextSpan],
-    locate,  # Callable[[TextSpan, int], tuple[str, float | None]] -> (locator, position)
+    locate,
     *,
     single_locator: tuple[str, float | None] = ("", None),
 ) -> Iterator[Chunk]:
@@ -185,8 +182,6 @@ def _chain(a, b, rest):
     yield b
     yield from rest
 
-
-# ---------------------------------------------------------------------------------- decoding
 
 _BOMS = (
     (codecs.BOM_UTF32_LE, "utf-32-le"),
@@ -285,12 +280,6 @@ def decode_text(data: bytes) -> str:
     return normalize_newlines(text)
 
 
-# ---------------------------------------------------------------------------------- headings
-
-# Heading detection works line by line: every pattern is matched against one line (or a line and
-# the next one) with forms that cannot backtrack across a long run of spaces, and lines longer
-# than MAX_HEADING_LINE are never headings. That keeps it linear on pathological input (a
-# heading-like line followed by 100k spaces used to take seconds with `(.+?)[ \t]*$`).
 MAX_HEADING_LINE = 300
 
 _MD_ATX = re.compile(r" {0,3}(#{1,6})[ \t]+(\S.*)")
@@ -322,10 +311,10 @@ def _markdown_headings(text: str) -> list[tuple[int, str]]:
     in_fence = False
     skip_next = False
     for i, (off, line) in enumerate(lines):
-        if skip_next:  # the underline of a setext heading
+        if skip_next:
             skip_next = False
             continue
-        if _MD_FENCE.match(line):  # fence lines (opening and closing) are inside the block
+        if _MD_FENCE.match(line):
             in_fence = not in_fence
             continue
         if in_fence or not _short_line(line):
@@ -361,7 +350,6 @@ def _rst_headings(text: str) -> list[tuple[int, str]]:
         under = lines[i + 1][1]
         if line[:1].strip() and _short_line(line) and _RST_UNDER.fullmatch(under):
             title = line.rstrip(" \t")
-            # the underline must be (about) as long as the title
             if len(title) <= len(line) - len(title) + 1 + len(under) + 2:
                 found.append((off, title))
                 i += 2
@@ -386,9 +374,6 @@ def find_headings(text: str, suffix: str) -> list[tuple[int, str]]:
         found = [(m.start(), m.group(1)) for m in _TEX.finditer(text)]
     found = [(o, " ".join(t.split())) for o, t in found if t.strip()]
     return sorted(set(found))
-
-
-# --------------------------------------------------------------------------------- extractor
 
 
 def extract_text(path: Path, cfg: Config | None = None) -> Iterator[Chunk]:

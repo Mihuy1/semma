@@ -35,7 +35,6 @@ _STANDARD_ICONS = {
     "go-next": QStyle.StandardPixmap.SP_ArrowForward,
 }
 
-# Icons that carry semantic/brand colors and should not be forced to symbolic variants.
 _COLORFUL_ICONS = frozenset({
     "io.github.Semma",
     "system-search",
@@ -58,7 +57,6 @@ def _is_monochrome_pixmap(pm: QPixmap) -> bool:
     img = pm.toImage()
     if img.width() > 24 or img.height() > 24:
         img = img.scaled(24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-    # RGBA8888 is byte-ordered R, G, B, A on every platform (ARGB32 depends on endianness).
     img = img.convertToFormat(QImage.Format.Format_RGBA8888)
     raw = bytes(img.constBits())
     stride = img.bytesPerLine()
@@ -145,8 +143,6 @@ def tinted_icon(
             pm = icon.pixmap(QSize(sz, sz), dpr, QIcon.Mode.Normal, QIcon.State.Off)
             if pm.isNull():
                 continue
-            # Decide per pixmap: themes such as Breeze ship monochrome 16-24 px icons but full-color
-            # 32 px+ ones under the same name, and tinting those would flatten them into silhouettes.
             is_mono = monochrome if monochrome is not None else _is_monochrome_pixmap(pm)
             entries.append((sz, dpr, pm, is_mono))
 

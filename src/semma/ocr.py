@@ -50,40 +50,20 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Every loaded language costs ~25 MB of RAM and slows recognition about linearly.
 MAX_LANGUAGES = 3
 
-# A Tesseract language code: "eng", "chi_sim", "chi_sim_vert", "srp_latn". Script models
-# ("Latin", "Cyrillic") are capitalised and not offered.
 LANGUAGE_CODE = re.compile(r"[a-z]{3}(?:_[a-z]+)*")
-NOT_LANGUAGES = frozenset({"osd", "equ"})  # orientation/script detection, equations
+NOT_LANGUAGES = frozenset({"osd", "equ"})
 
-# OCR runs on the screenshot at its full resolution (the image embedding's 1536 px would make
-# small UI text unreadable), up to one 4K screen: 3840x2160 = 8.3 MP, ~2-3 s for a screen full
-# of text. Bigger images (multi-monitor panoramas, 8K) are scaled down to this many pixels;
-# their text was rendered for a high-DPI screen, so it stays legible.
 MAX_OCR_PIXELS = 3840 * 2160
-SOURCE_DPI = 96  # without a resolution Tesseract guesses one and prints a warning
+SOURCE_DPI = 96
 
-# Word filter, calibrated on 13 real GNOME and KDE screenshots (dialogs, a browser task
-# manager, tables, slides, a diagram, a paper). Real words score 60-97; icons, photos and
-# diagram strokes turn into short tokens below 60 ("o¢eee" 25, "pokes" 22, "ORS" 3) and into
-# symbols that can score high ("@" 90, "|" 92, "©" 96). So a word needs a letter or digit, a
-# confidence of MIN_WORD_CONFIDENCE, and MIN_SHORT_WORD_CONFIDENCE when it has only one or two
-# letters/digits ("a" 55, "Wi" 56, "4" 30 are junk; "2" 96 in "SigLIP 2", "IP" 96 are not).
-# Lost on the way: a few real words read badly (URLs in a browser tab list score 13-54).
 MIN_WORD_CONFIDENCE = 60.0
 MIN_SHORT_WORD_CONFIDENCE = 80.0
-# What is left must be real text: at least this many words of 3+ letters/digits and this many
-# letters/digits in all. Less (a lone "MiniLM-mallin" under a chart) would embed as a generic
-# vector that matches every short query, like the stub files of extract.MIN_TEXT_ALNUM; such a
-# screenshot is still found by its picture and its name.
 MIN_WORDS = 3
 MIN_ALNUM = 20
 
-# -- languages ---------------------------------------------------------------------------------
 
-# English names of the languages Tesseract ships (tessdata, tessdata_fast, tessdata_best).
 LANGUAGE_NAMES: dict[str, str] = {
     "afr": "Afrikaans", "amh": "Amharic", "ara": "Arabic", "asm": "Assamese", "aze": "Azerbaijani",
     "aze_cyrl": "Azerbaijani (Cyrillic)", "bel": "Belarusian", "ben": "Bengali", "bod": "Tibetan",
@@ -116,8 +96,6 @@ LANGUAGE_NAMES: dict[str, str] = {
     "vie": "Vietnamese", "yid": "Yiddish", "yor": "Yoruba",
 }
 
-# ISO 639-1 (the language part of a locale name) -> Tesseract code. Chinese depends on the
-# territory and Serbian on the @latin modifier (see locale_language).
 ISO639_1: dict[str, str] = {
     "af": "afr", "am": "amh", "ar": "ara", "as": "asm", "az": "aze", "be": "bel", "bg": "bul",
     "bn": "ben", "bo": "bod", "br": "bre", "bs": "bos", "ca": "cat", "co": "cos", "cs": "ces",
@@ -159,7 +137,7 @@ def locale_language(environ: dict[str, str] | None = None) -> str | None:
         return "chi_tra" if territory.upper() in _TRADITIONAL_CHINESE else "chi_sim"
     if lang == "sr" and modifier.lower() == "latin":
         return "srp_latn"
-    if lang in LANGUAGE_NAMES:  # glibc has a few three-letter locales: fil_PH, ...
+    if lang in LANGUAGE_NAMES:
         return lang
     return ISO639_1.get(lang)
 
@@ -181,8 +159,6 @@ def effective_languages(cfg: Config) -> list[str]:
     have = set(installed)
     return [c for c in dict.fromkeys(wanted) if c in have][:MAX_LANGUAGES]
 
-
-# -- installing --------------------------------------------------------------------------------
 
 def _os_release() -> dict[str, str]:
     for path in ("/etc/os-release", "/usr/lib/os-release"):
@@ -206,22 +182,14 @@ def install_hint(code: str | None = None, os_release: dict[str, str] | None = No
     family = {info.get("ID", "").lower(), *info.get("ID_LIKE", "").lower().split()}
     if family & {"fedora", "rhel", "centos"}:
         pkgs = [f"tesseract-langpack-{code}"] if code else ["tesseract-libs", "tesseract-langpack-eng"]
-        # Fedora Atomic (Silverblue, Kinoite, ...) layers packages with rpm-ostree.
         tool = "rpm-ostree install" if os.path.exists("/run/ostree-booted") else "sudo dnf install"
         return f"{tool} {' '.join(pkgs)}"
     if family & {"debian", "ubuntu"}:
-        # libtesseract5 brings no language data at all, so the library hint includes English.
         pkgs = [f"tesseract-ocr-{code.replace('_', '-')}"] if code else ["libtesseract5", "tesseract-ocr-eng"]
         return f"sudo apt install {' '.join(pkgs)}"
     return ""
 
 
-# -- what is a screenshot ------------------------------------------------------------------------
-
-# Decided by the path alone. To extend: add the folder name your desktop saves screenshots to
-# (GNOME and KDE translate it) to SCREENSHOT_DIRS, or the word its file names start with to
-# SCREENSHOT_PREFIXES, in lower case; both are compared after _norm (NFC, case-folded,
-# typographic apostrophe -> ', "_" -> " ").
 SCREENSHOT_DIRS = frozenset({
     "screenshots", "screenshot", "kuvakaappaukset", "näyttökuvat", "bildschirmfotos",
     "captures d'écran", "capturas de pantalla", "capturas de ecrã", "capturas de tela", "schermate",
@@ -254,22 +222,13 @@ def is_screenshot(path: Path | str) -> bool:
     return any(_norm(part) in SCREENSHOT_DIRS for part in p.parent.parts)
 
 
-# -- the library ---------------------------------------------------------------------------------
-
-# Where distributions put the library: Fedora /usr/lib64/libtesseract.so.5.5 (the soname has the
-# minor version, so it changes between releases), Debian/Ubuntu
-# /usr/lib/x86_64-linux-gnu/libtesseract.so.5.
 _LIB_DIRS = ("/usr/lib64", "/usr/lib", "/usr/lib/*-linux-gnu", "/usr/local/lib64", "/usr/local/lib")
 _SONAME = re.compile(r"libtesseract\.so\.(\d+)((?:\.\d+)*)$")
 MIN_MAJOR = 5
-# Where distributions put the language data (the library's compiled-in default):
-# Fedora /usr/share/tesseract/tessdata, Debian/Ubuntu /usr/share/tesseract-ocr/5/tessdata,
-# Arch /usr/share/tessdata, a source build /usr/local/share/tessdata.
 _TESSDATA_DIRS = ("/usr/share/tesseract/tessdata", "/usr/share/tesseract-ocr/5/tessdata", "/usr/share/tessdata",
                   "/usr/local/share/tessdata", "/usr/share/tesseract-ocr/4.00/tessdata")
 
 _vp, _cp, _int = ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int
-# (name, restype, argtypes) of every C API function used; a library without one is unusable.
 _API: tuple[tuple[str, Any, list[Any]], ...] = (
     ("TessVersion", _cp, []),
     ("TessBaseAPICreate", _vp, []),
@@ -319,7 +278,7 @@ def _lib_candidates() -> list[str]:
     out = ["libtesseract.so.5", *files]
     try:
         name = ctypes.util.find_library("tesseract")
-    except Exception:  # no ldconfig, no compiler, odd environment
+    except Exception:
         name = None
     if name and (_major(name) or 0) >= MIN_MAJOR:
         out.append(name)
@@ -373,7 +332,7 @@ def tessdata_dir() -> Path | None:
     if env:
         d = Path(env)
         if not any(d.glob("*.traineddata")) and any((d / "tessdata").glob("*.traineddata")):
-            d = d / "tessdata"  # the Tesseract 3 meaning: the directory above tessdata
+            d = d / "tessdata"
         return d if d.is_dir() else None
     for name in _TESSDATA_DIRS:
         d = Path(name)
@@ -399,8 +358,6 @@ def installed_languages() -> list[str]:
     codes = {n.removesuffix(".traineddata") for n in names if n.endswith(".traineddata")}
     return sorted(c for c in codes if LANGUAGE_CODE.fullmatch(c) and c not in NOT_LANGUAGES)
 
-
-# -- recognising ---------------------------------------------------------------------------------
 
 def filter_words(words: Iterable[tuple[str, float, bool]]) -> str:
     """Text from Tesseract's (word, confidence 0-100, ends a line) triples: unreliable words
@@ -448,11 +405,10 @@ class _Engine:
     def __init__(self, lib: ctypes.CDLL, datapath: Path, languages: tuple[str, ...]):
         self.lib = lib
         self.languages = languages
-        self.lock = threading.Lock()  # held while in use, so the exit hook never frees it mid-call
+        self.lock = threading.Lock()
         self.handle: int | None = lib.TessBaseAPICreate()
         if not self.handle:
             raise OSError("TessBaseAPICreate failed")
-        # tprintf output (warnings, "Error opening data file") goes nowhere: it is not for the journal.
         lib.TessBaseAPISetVariable(self.handle, b"debug_file", b"/dev/null")
         if lib.TessBaseAPIInit3(self.handle, os.fsencode(str(datapath)), "+".join(languages).encode()) != 0:
             lib.TessBaseAPIDelete(self.handle)
@@ -489,23 +445,21 @@ class _Engine:
             finally:
                 lib.TessResultIteratorDelete(it)
         finally:
-            lib.TessBaseAPIClear(h)  # the page's results; the loaded languages stay
+            lib.TessBaseAPIClear(h)
         return out
 
     def close(self) -> None:
         h, self.handle = self.handle, None
         if h:
             self.lib.TessBaseAPIEnd(h)
-            # Dictionaries stay in a process-wide cache after End (and are reported as
-            # "ObjectCache ... WARNING! LEAK!" at exit if a handle still holds them).
             self.lib.TessBaseAPIClearPersistentCache(h)
             self.lib.TessBaseAPIDelete(h)
 
 
 _local = threading.local()
-_engines: set[_Engine] = set()  # live engines of all threads, for the exit hook
+_engines: set[_Engine] = set()
 _engines_lock = threading.Lock()
-_failed: set[tuple[str, tuple[str, ...]]] = set()  # (datapath, languages) Tesseract refused
+_failed: set[tuple[str, tuple[str, ...]]] = set()
 _atexit_registered = False
 
 

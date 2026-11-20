@@ -54,7 +54,6 @@ def test_query_and_mixed_modalities(embedder: Embedder) -> None:
 
 def test_semantic_search_end_to_end(tmp_path: Path, embedder: Embedder) -> None:
     cfg = make_cfg(tmp_path)
-    # Three files: no z-score can exceed sqrt(2), so the shipped gate (2.0) and floor are out of reach.
     cfg.z_gate = 1.0
     cfg.z_floor = 0.0
     write_docs(tmp_path, {
@@ -81,7 +80,6 @@ def test_text_only_query_model_matches_full_and_drops_vision_audio(embedder: Emb
     try:
         assert q_emb.query_model_loaded and not q_emb.index_model_loaded
         assert worker is not None
-        # Verify multimodal projector is not loaded in the text-only query worker (for both image and audio).
         with pytest.raises(RuntimeError, match="multimodal projector is not loaded"):
             worker.encode([{"image": Image.new("RGB", (64, 64), (255, 0, 0))}])
         with pytest.raises(RuntimeError, match="multimodal projector is not loaded"):

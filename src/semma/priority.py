@@ -23,7 +23,6 @@ class Score:
 class Scorer:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        # Longest path first so the most specific location wins.
         self._locations = sorted(cfg.locations.items(), key=lambda kv: len(kv[0].parts), reverse=True)
 
     def location(self, path: Path) -> tuple[Path | None, float]:

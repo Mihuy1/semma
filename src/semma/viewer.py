@@ -109,7 +109,6 @@ def _time_flag(prefix: str) -> Callable[[Spot], list[str]]:
     return build
 
 
-# Program name -> options placed before the file.
 OPTION_VIEWERS: dict[str, Callable[[Spot], list[str]]] = {
     "okular": lambda spot: ["--page", str(spot.page)],
     "evince": lambda spot: [f"--page-index={spot.page}"],
@@ -123,7 +122,6 @@ TIME_OPTION_VIEWERS: dict[str, Callable[[Spot], list[str]]] = {
     "celluloid": _time_flag("--mpv-start="),
     "gnome-mpv": _time_flag("--mpv-start="),
 }
-# Program name -> the file argument replaced by a URI.
 BROWSERS = (
     "firefox", "firefox-esr", "firefox-bin",
     "chromium", "chromium-browser", "chrome", "google-chrome", "google-chrome-stable",
@@ -224,7 +222,7 @@ def build_argv(exec_argv: list[str], path: str, spot: Spot) -> list[str] | None:
             continue
         else:
             stripped = arg.replace("%%", "")
-            if "%" in stripped:  # a field code inside an argument ("--file=%f"): not handled
+            if "%" in stripped:
                 return None
             out.append(arg.replace("%%", "%"))
     if not placed:

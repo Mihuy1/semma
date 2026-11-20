@@ -36,8 +36,8 @@ RESTART_NOTICE = "Restart the service to apply these changes."
 
 
 class SettingsPage(QWidget):
-    reload_finished = Signal(bool)  # True when applied cleanly (or daemon stopped); False if restart needed or error
-    setup_requested = Signal()  # Run setup again: the flag is already false and the daemon was told
+    reload_finished = Signal(bool)
+    setup_requested = Signal()
 
     def __init__(self, client: Any, config_path: Path | None = None, home: Path | None = None,
                  sections: list[type[SettingsSection]] | None = None, parent: QWidget | None = None) -> None:
@@ -82,8 +82,8 @@ class SettingsPage(QWidget):
         self.problems_label = QLabel(self)
         self.problems_label.setWordWrap(True)
         self.problems_label.hide()
-        self.error = MessageBar(self)     # the config cannot be read or written
-        self.notice = MessageBar(self)    # saved; restart needed, or the daemon was not told
+        self.error = MessageBar(self)
+        self.notice = MessageBar(self)
 
         self.buttons = QDialogButtonBox(self)
         self.apply_button = self.buttons.addButton(QDialogButtonBox.StandardButton.Apply)
@@ -137,7 +137,6 @@ class SettingsPage(QWidget):
         if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
             self._apply_icons()
 
-    # -- loading and state ----------------------------------------------------------------
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
         """Pick up a config.toml edited by hand meanwhile, unless the user is editing here."""
         super().showEvent(event)
@@ -186,7 +185,6 @@ class SettingsPage(QWidget):
         self.problems_label.setText("\n".join(p.text for p in problems))
         self.problems_label.setVisible(bool(problems))
 
-    # -- actions --------------------------------------------------------------------------
     def revert(self) -> None:
         self.notice.clear()
         self.reload()

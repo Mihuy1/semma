@@ -117,22 +117,19 @@ def test_removed_root_is_forgotten_while_unavailable_root_is_kept(home: Path) ->
             await until_idle(d)
             assert counts(cfg.db_path).get("indexed") == 5
             assert (await d.search("comet tail sun"))[0].path == str(home / "Other" / "comet.md")
-            # The drive is unplugged (its mount point is gone) and Other is removed from the roots.
             shutil.move(home / "Drive", home / "Drive.away")
             settings["scan"]["roots"].remove(str(home / "Other"))
             assert await reload_and_settle(d, home, settings) == []
             indexed = paths(cfg.db_path)
             assert str(home / "Other" / "comet.md") not in indexed
-            assert str(home / "Drive" / "harbor.md") in indexed  # configured, just not there now
+            assert str(home / "Drive" / "harbor.md") in indexed
             assert len(indexed) == 4
-            res = await d.search("comet tail sun")  # the in-memory vectors went with the rows
+            res = await d.search("comet tail sun")
             assert all("Other" not in r.path for r in res)
-            # The daily scan with the drive still away keeps it too.
             d.rescan()
             scanned_at = d._last_scan_at
             await wait_until(lambda: d._last_scan_at > scanned_at, what="rescan")
             assert str(home / "Drive" / "harbor.md") in paths(cfg.db_path)
-            # Plugged in again: found without re-indexing.
             shutil.move(home / "Drive.away", home / "Drive")
             assert (await d.search("fishing boats harbor"))[0].path == str(home / "Drive" / "harbor.md")
         finally:
@@ -176,7 +173,6 @@ def test_max_file_mb_change_removes_too_large_and_requeues_when_raised(home: Pat
             assert str(big) in paths(cfg.db_path)
             assert counts(cfg.db_path) == {"indexed": 4}
 
-            # Lower the text limit below big.md (~2.3 KiB) while keeping the small docs under it.
             settings = base_settings(home)
             settings["scan"]["max_file_mb"] = {"text": 0.001}
             assert await reload_and_settle(d, home, settings) == []
@@ -184,7 +180,6 @@ def test_max_file_mb_change_removes_too_large_and_requeues_when_raised(home: Pat
             assert counts(cfg.db_path) == {"indexed": 3}
             assert all(r.path != str(big) for r in await d.search("whale swimming ocean"))
 
-            # Pause indexing so the rescan after raising the limit leaves big.md observable as pending.
             d.pause()
             await wait_until(lambda: d._phase == "paused", what="paused")
             settings["scan"]["max_file_mb"] = {"text": 10}
@@ -195,7 +190,6 @@ def test_max_file_mb_change_removes_too_large_and_requeues_when_raised(home: Pat
             assert str(big) in paths(cfg.db_path)
             assert counts(cfg.db_path) == {"indexed": 3, "pending": 1}
 
-            # Resume: big.md gets indexed again.
             d.resume()
             await until_idle(d)
             assert counts(cfg.db_path) == {"indexed": 4}
@@ -222,7 +216,6 @@ def test_new_root_is_scanned_and_watched(home: Path) -> None:
             assert str(home / "Other" / "space" / "comet.md") in paths(cfg.db_path)
             assert {str(home / "Other"), str(home / "Other" / "space"), str(home / "Documents")} <= w.dirs
             assert (await d.search("comet tail sun"))[0].path == str(home / "Other" / "space" / "comet.md")
-            # And watches follow a root that is removed again.
             settings["scan"]["roots"].remove(str(home / "Other"))
             await reload_and_settle(d, home, settings)
             assert not any(x.startswith(str(home / "Other")) for x in w.dirs)
@@ -248,7 +241,7 @@ def test_priority_change_rescores_unchanged_files(home: Path) -> None:
             assert await reload_and_settle(d, home, settings) == []
             after = paths(cfg.db_path)[cats]
             assert after == pytest.approx(before - 30 - 20)
-            assert counts(cfg.db_path) == {"indexed": 3}  # rescored, not re-indexed
+            assert counts(cfg.db_path) == {"indexed": 3}
         finally:
             await d.stop()
 
@@ -267,16 +260,13 @@ def test_restart_keys_are_reported_and_not_applied(home: Path) -> None:
             settings["model"] = {"device": "cpu", "name": "other/model"}
             settings["index"] = {"batch_sizes": {"text": 2}}
             settings["search"]["vector_cache_max_chunks"] = 5
-            settings["daemon"]["krunner_max_results"] = 3  # live, applied
+            settings["daemon"]["krunner_max_results"] = 3
             restart = await reload_and_settle(d, home, settings, rescan=False)
-            # Indexing has loaded the model, so the device still waits for a restart.
             assert sorted(restart) == ["db_path", "index.batch_sizes", "model.device", "model.name",
                                        "search.vector_cache_max_chunks"]
             assert d.cfg.db_path == cfg.db_path and d.cfg.device is None and d.cfg.model_name == cfg.model_name
             assert d.cfg.batch_sizes == cfg.batch_sizes and d.cfg.krunner_max_results == 3
-            # Still pending a restart on the next reload; nothing else changes.
             assert sorted(await d.reload_config()) == sorted(restart)
-            # Back to the started values: nothing to restart for.
             assert await reload_and_settle(d, home, base_settings(home), rescan=False) == []
         finally:
             await d.stop()
@@ -297,11 +287,10 @@ def test_device_applies_without_a_restart_before_the_model_is_loaded(home: Path)
         write_config(home, settings)
         restart = await d.reload_config()
         assert "model.device" not in restart
-        assert d.cfg.device is None  # not swapped in until the worker applies it
+        assert d.cfg.device is None
         assert d._pending_cfg is not None and d._pending_cfg.device == "cpu"
         d._apply_config(d._pending_cfg)
         assert d.cfg.device == "cpu" and emb.requested_device == "cpu"
-        # A second reload of the same file does not ask for a restart again.
         assert "model.device" not in await d.reload_config()
 
     asyncio.run(main())
@@ -312,7 +301,7 @@ def test_device_change_needs_a_restart_while_the_model_is_loading(home: Path) ->
         cfg = start_cfg(home)
         from test_daemon import LifecycleEmbedder
         emb = LifecycleEmbedder()
-        emb.loading = True  # the load has read the device already
+        emb.loading = True
         d = make_daemon(cfg, embedder=emb)
         settings = base_settings(home)
         settings["model"] = {"device": "cpu"}
@@ -365,7 +354,7 @@ def test_live_settings_reach_every_holder_without_a_rescan(home: Path) -> None:
             await wait_until(lambda: svc._max_results == 4, what="runner limit")
             assert StubWatcher.instances[-1].debounce == 2
             assert d._last_full_scan == full_scan
-            assert counts(cfg.db_path) == {"indexed": 3}  # nothing re-indexed
+            assert counts(cfg.db_path) == {"indexed": 3}
         finally:
             await d.stop()
 
@@ -383,7 +372,7 @@ def test_new_media_settings_reconcile_the_index_at_once(home: Path) -> None:
             settings = base_settings(home)
             settings["search"]["z_gate"] = 1.5
             await reload_and_settle(d, home, settings, rescan=False)
-            assert calls == []  # media settings unchanged
+            assert calls == []
             settings["media"] = {"max_minutes": 5}
             await reload_and_settle(d, home, settings, rescan=False)
             await wait_until(lambda: calls == [300], what="media reconciled with the new limit")
@@ -409,7 +398,6 @@ def test_ocr_settings_and_newly_installed_languages_reconcile(home: Path, monkey
             settings["ocr"] = {"enabled": True}
             assert await reload_and_settle(d, home, settings, rescan=False) == []
             await wait_until(lambda: d.indexer.ocr_setup == "eng", what="OCR turned on")
-            # A language package installed since: a reload with unchanged settings applies it.
             installed.insert(0, "fin")
             assert await reload_and_settle(d, home, settings, rescan=False) == []
             await wait_until(lambda: d.indexer.ocr_setup == "fin+eng", what="new language picked up")
@@ -439,14 +427,12 @@ def test_reload_toggles_pause_when_gpu_busy_live(home: Path) -> None:
             st = await d.status()
             assert st["paused"] and "GPU" in st["pause_reason"] and st["indexed"] == 0
 
-            # Turning pause_when_gpu_busy off during a GPU pause resumes indexing without a restart.
             settings["daemon"]["pause_when_gpu_busy"] = False
             assert await reload_and_settle(d, home, settings, rescan=False) == []
             await until_idle(d)
             st2 = await d.status()
             assert not st2["paused"] and st2["pause_reason"] == "" and st2["indexed"] == 3
 
-            # Turning it back on makes the next sample count immediately (despite gpu_check_seconds=60).
             calls_before = gpu.calls
             settings["daemon"]["pause_when_gpu_busy"] = True
             assert await reload_and_settle(d, home, settings, rescan=False) == []
@@ -495,7 +481,7 @@ def test_reload_during_a_slice_applies_at_a_file_boundary(home: Path) -> None:
             assert await reload_and_settle(d, home, settings, rescan=False) == []
             await until_idle(d)
             assert counts(cfg.db_path) == {"indexed": 9}
-            assert seen[0] == cfg.max_media_seconds and seen[-1] == 60  # later files: new settings
+            assert seen[0] == cfg.max_media_seconds and seen[-1] == 60
         finally:
             await d.stop()
 
@@ -552,16 +538,12 @@ def test_store_forget_unconfigured(tmp_path: Path) -> None:
         def left() -> list[str]:
             return sorted(r[0] for r in store.db.execute("SELECT path FROM files"))
 
-        # Nothing configured to change: nothing removed.
         assert store.forget_unconfigured([Path("/")]) == 0
-        # /old is no longer a root; /mnt is kept (include_mounts, the drive unplugged).
         assert store.forget_unconfigured([Path("/home/u"), Path("/mnt")]) == 1
         assert "/old/d.md" not in left() and "/mnt/usb/e.md" in left()
-        # An excluded path below a root goes, unless a root lies inside it (walked on its own).
         assert store.forget_unconfigured([Path("/home/u"), Path("/mnt"), Path("/home/u/junk/keep")],
                                          [Path("/home/u/junk")]) == 0
         assert store.forget_unconfigured([Path("/home/u"), Path("/mnt")], [Path("/home/u/junk")]) == 2
-        # Kinds and extensions (after the last dot, any case; "_" is not a wildcard).
         assert store.forget_unconfigured([Path("/")], kinds=["text"], exclude_extensions=["txt", "tar.gz", "y.md"]) == 2
         assert left() == ["/home/u/a.md", "/home/u/g.tar.gz", "/home/u/x_y.md", "/mnt/usb/e.md"]
         assert store.forget_unconfigured([Path("/")], exclude_extensions=["m_", "%"]) == 0

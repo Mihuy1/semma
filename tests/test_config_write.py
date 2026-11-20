@@ -66,7 +66,6 @@ def test_preserves_comments_blank_lines_key_order_and_unknown_keys(tmp_path: Pat
     assert "[custom_unknown]\n" in updated
     assert 'note = "leave me alone"' in updated
 
-    # Existing key order in [scan] preserved, and new section [daemon] added at the end.
     assert updated.index("roots =") < updated.index("future_flag =") < updated.index("skip_hidden =")
     assert updated.index("[custom_unknown]") < updated.index("[daemon]")
 
@@ -108,7 +107,6 @@ def test_none_removes_keys_and_emptied_sections(tmp_path: Path) -> None:
     assert "db_path" not in text
     assert read_raw(cfg_path) == {"daemon": {"watch_debounce_seconds": 3}}
 
-    # Removing the last key of [daemon] also removes [daemon].
     update_config(cfg_path, {"daemon": {"watch_debounce_seconds": None}})
     assert read_raw(cfg_path) == {}
     assert "[daemon]" not in cfg_path.read_text(encoding="utf-8")
@@ -128,7 +126,6 @@ def test_none_keeps_section_when_unknown_key_remains(tmp_path: Path) -> None:
 
 
 def test_dict_values_inline_table_and_subtable_keep_form_and_replace_keys(tmp_path: Path) -> None:
-    # 1. Inline table form stays inline
     inline_path = tmp_path / "inline.toml"
     inline_path.write_text(
         "[priority]\n"
@@ -144,14 +141,12 @@ def test_dict_values_inline_table_and_subtable_keep_form_and_replace_keys(tmp_pa
     assert "locations = {" in inline_text
     assert read_raw(inline_path) == {"priority": {"locations": {"~/Documents": 55, "~/Music": 35}}}
 
-    # Updating inline table to empty dict stays inline and empties it
     update_config(inline_path, {"priority": {"locations": {}}})
     empty_inline_text = inline_path.read_text(encoding="utf-8")
     assert "[priority.locations]" not in empty_inline_text
     assert "locations = {" in empty_inline_text
     assert read_raw(inline_path) == {"priority": {"locations": {}}}
 
-    # 2. Sub-table form stays a sub-table and preserves comments
     subtable_path = tmp_path / "subtable.toml"
     subtable_path.write_text(
         "[priority]\n"
@@ -178,7 +173,6 @@ def test_dict_values_inline_table_and_subtable_keep_form_and_replace_keys(tmp_pa
         }
     }
 
-    # 3. Dotted-key form replaces keys cleanly, including empty dict
     dotted_path = tmp_path / "dotted.toml"
     dotted_path.write_text(
         "[index]\n"
@@ -293,7 +287,6 @@ def test_round_trip_with_load_config(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert loaded.locations[config.canonical(docs)] == 85.0
     assert loaded.rescan_hours == 12.5
 
-    # Resetting a key to None restores its default on reload.
     update_config(cfg_path, {"daemon": {"rescan_hours": None}})
     reloaded = config.load_config(cfg_path, home=tmp_home)
     assert reloaded.rescan_hours == config.Config(home=tmp_home, db_path=loaded.db_path, roots=[]).rescan_hours
@@ -341,7 +334,6 @@ def test_top_level_key_added_before_existing_sections_and_scalar_updates(tmp_pat
     )
 
     text = cfg_path.read_text(encoding="utf-8")
-    # Unchanged integer keeps its underscore formatting; db_path sits at top level before [scan].
     assert "knn_k = 1_000" in text
     assert text.index("db_path =") < text.index("[scan]")
     assert read_raw(cfg_path) == {

@@ -1,14 +1,4 @@
 #!/bin/bash
-# Releases the version in pyproject.toml: tags the current commit v<version> and pushes the branch and
-# the tag. The tag starts the Release workflow on GitHub (.github/workflows/release.yml), which builds
-# the .rpm and the .deb, checks each in a clean container and publishes them as the release, with the
-# commits since the last tag as its notes. The same workflow can be run from main in the Actions tab
-# instead, which creates the tag when it publishes. Follow either with `gh run watch`.
-# Refuses when the working tree has changes or that version is already released.
-# Needs gh (logged in).
-#   scripts/release.sh
-# To build and check the packages on this machine instead: scripts/package.sh, then
-# scripts/check-package.sh dist/<package>.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

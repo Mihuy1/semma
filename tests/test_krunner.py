@@ -159,27 +159,22 @@ def test_dbus_introspection_exact_signatures() -> None:
             methods = {m.name: m for m in krunner_ifaces[0].methods}
             assert set(methods) == {"Match", "Actions", "Run", "Teardown", "SetActivationToken"}
 
-            # Match(s query) -> a(sssida{sv})
             m_match = methods["Match"]
             assert [a.signature for a in m_match.in_args] == ["s"]
             assert [a.signature for a in m_match.out_args] == ["a(sssida{sv})"]
 
-            # Actions() -> a(sss)
             m_actions = methods["Actions"]
             assert [a.signature for a in m_actions.in_args] == []
             assert [a.signature for a in m_actions.out_args] == ["a(sss)"]
 
-            # Run(s matchId, s actionId) -> void
             m_run = methods["Run"]
             assert [a.signature for a in m_run.in_args] == ["s", "s"]
             assert [a.signature for a in m_run.out_args] == []
 
-            # SetActivationToken(s token) -> void
             m_token = methods["SetActivationToken"]
             assert [a.signature for a in m_token.in_args] == ["s"]
             assert [a.signature for a in m_token.out_args] == []
 
-            # Teardown() -> void
             m_teardown = methods["Teardown"]
             assert [a.signature for a in m_teardown.in_args] == []
             assert [a.signature for a in m_teardown.out_args] == []
@@ -210,7 +205,6 @@ def test_short_queries_return_empty_without_calling_search() -> None:
             assert called == 0
             assert activity == 0
 
-            # Exactly 3 letters/digits triggers search and on_activity
             res = await iface.call_match("  ab1 ")
             assert len(res) == 1
             assert called == 1
@@ -222,8 +216,7 @@ def test_short_queries_return_empty_without_calling_search() -> None:
 def test_mapping_helpers_subtext_icons_and_monotonic_relevance() -> None:
     home = Path("/home/alice")
 
-    # 1. Locator + snippet (whitespace collapsed & trimmed) + duplicates
-    long_text = "word " * 30  # 150 chars
+    long_text = "word " * 30
     r1 = _sample_result(
         path="/home/alice/Documents/paper.pdf",
         locator="p. 12",
@@ -235,7 +228,6 @@ def test_mapping_helpers_subtext_icons_and_monotonic_relevance() -> None:
     assert sub1.endswith("…  (+2 similar)")
     assert "\n" not in sub1 and "\t" not in sub1
 
-    # 2. No snippet -> shortened parent folder (~) + locator if any + duplicates
     r2 = _sample_result(
         path="/home/alice/Pictures/Trips/photo.jpg",
         kind=ft.IMAGE,
@@ -254,7 +246,6 @@ def test_mapping_helpers_subtext_icons_and_monotonic_relevance() -> None:
     )
     assert format_subtext(r3, home=home) == "01:00–02:00 · ~/Videos"
 
-    # 3. Icon names from MIME and fallbacks
     assert icon_name_for("/tmp/a.pdf", ft.PDF) == "application-pdf"
     assert icon_name_for("/tmp/a.png", ft.IMAGE) == "image-png"
     assert icon_name_for("/tmp/a.unknown_ext_xyz", ft.TEXT) == "text-plain"
@@ -263,24 +254,21 @@ def test_mapping_helpers_subtext_icons_and_monotonic_relevance() -> None:
     assert icon_name_for("/tmp/a.unknown_ext_xyz", ft.AUDIO) == "audio-x-generic"
     assert icon_name_for("/tmp/a.unknown_ext_xyz", ft.VIDEO) == "video-x-generic"
 
-    # 4. Relevance: linear in the search score ([0, 8] -> [0.3, 0.9]), strictly decreasing in rank.
-    # Similarity no longer matters: the score already ranks the results.
     results = [
         _sample_result(path="/a", score=4.0, similarity=None, matched=["name"]),
-        _sample_result(path="/b", score=4.0, similarity=0.80, matched=["vector"], z=6.0),  # a tie
+        _sample_result(path="/b", score=4.0, similarity=0.80, matched=["vector"], z=6.0),
         _sample_result(path="/c", score=0.0, similarity=0.55, matched=["vector"]),
-        _sample_result(path="/d", score=2.0, similarity=0.90, matched=["vector"]),  # out of order
+        _sample_result(path="/d", score=2.0, similarity=0.90, matched=["vector"]),
     ]
     rels = compute_monotonic_relevances(results)
     assert all(0.0 < x <= 0.9 for x in rels)
     assert all(a > b for a, b in itertools.pairwise(rels))
     assert rels[0] == pytest.approx(0.6)
-    assert rels[1] == pytest.approx(0.6 - 1e-4)  # ties are split in rank order
+    assert rels[1] == pytest.approx(0.6 - 1e-4)
     assert rels[2] == pytest.approx(0.3)
     assert rels[3] < rels[2]
     assert raw_relevance(100.0) == pytest.approx(0.9) and raw_relevance(-1.0) == pytest.approx(0.3)
 
-    # Category relevance never increases down the list: 50 while results are strong, then 30.
     assert category_relevances(results) == [50, 50, 30, 30]
     assert category_relevances([_sample_result(score=1.0), _sample_result(score=9.0)]) == [30, 30]
     assert category_relevances([_sample_result(score=STRONG_SCORE, matched=["text"])]) == [50]
@@ -295,7 +283,6 @@ def test_moderate_needs_words_or_a_meaning_match_that_stands_far_out() -> None:
     assert category_relevances([_sample_result(score=5.0, matched=["name"], z=None)]) == [50]
     assert category_relevances([_sample_result(score=3.0, matched=["vector", "text"], z=2.0)]) == [30]
     assert category_relevances([_sample_result(score=4.2, matched=["vector", "folder"], z=3.9)]) == [30]
-    # Strong after weak is still Low: category relevance never increases down the ranking.
     assert category_relevances([_sample_result(score=6.0, matched=["vector"], z=4.0),
                                 _sample_result(score=5.0, matched=["text"])]) == [30, 30]
 
@@ -363,7 +350,6 @@ def test_match_properties_urls_thumbnails_and_actions(tmp_path: Path) -> None:
             matches = await iface.call_match("johdanto")
             assert len(matches) == 2
 
-            # Match 0: PDF (no icon-data, score 6.4 >= STRONG_SCORE -> cat_rel 50)
             m0_id, m0_text, m0_icon, m0_cat_rel, m0_rel, m0_props = matches[0]
             assert m0_id == str(doc_path)
             assert m0_text == "Muistiinpanot & raportti.pdf"
@@ -377,7 +363,6 @@ def test_match_properties_urls_thumbnails_and_actions(tmp_path: Path) -> None:
             assert m0_props["actions"].value == [ACTION_OPEN_FOLDER, ACTION_COPY_PATH]
             assert "icon-data" not in m0_props
 
-            # Match 1: Image (has icon-data, score 3.5 < STRONG_SCORE -> cat_rel 30)
             m1_id, m1_text, m1_icon, m1_cat_rel, m1_rel, m1_props = matches[1]
             assert m1_id == str(img_path)
             assert m1_text == "kesä kuva (1).png"
@@ -413,29 +398,23 @@ def test_run_actions_and_activation_token() -> None:
             matches = await iface.call_match("report")
             match_id = matches[0][0]
 
-            # 1. SetActivationToken + default Run ("")
             await iface.call_set_activation_token("wayland-token-123")
             await iface.call_run(match_id, "")
             assert launcher.opened_files == [("/home/user/Documents/report.pdf", "wayland-token-123")]
 
-            # Token must be cleared after Run
             await iface.call_run(match_id, "")
             assert launcher.opened_files[-1] == ("/home/user/Documents/report.pdf", None)
 
-            # 2. open-folder action with token
             await iface.call_set_activation_token("token-folder-456")
             await iface.call_run(match_id, ACTION_OPEN_FOLDER)
             assert launcher.opened_folders == [("/home/user/Documents/report.pdf", "token-folder-456")]
 
-            # 3. copy-path action
             await iface.call_run(match_id, ACTION_COPY_PATH)
             assert launcher.copied_paths == ["/home/user/Documents/report.pdf"]
 
-            # 4. Unknown matchId is safely ignored
             await iface.call_run("/nonexistent/id", "")
             assert len(launcher.opened_files) == 2
 
-            # 5. Teardown clears token and keeps recent map bounded
             await iface.call_set_activation_token("token-to-clear")
             await iface.call_teardown()
             await iface.call_run(match_id, "")
@@ -469,14 +448,11 @@ def test_search_exception_and_concurrent_matches_and_thumbnail_budget() -> None:
         svc = KRunnerService(
             fake_search,
             thumbnailer=slow_thumb,
-            thumbnail_budget=0.02,  # 20 ms budget, shorter than 120 ms generation
+            thumbnail_budget=0.02,
         )
         async with exported_krunner(svc) as (iface, _, _):
-            # 1. Search exception returns [] cleanly over D-Bus
             assert await iface.call_match("failing query") == []
 
-            # 2. Slow thumbnail misses the first Match budget -> returned without icon-data,
-            #    then cached on the second Match after background task completes.
             mode = "ok"
             m_first = await iface.call_match("photo")
             assert len(m_first) == 1
@@ -489,7 +465,6 @@ def test_search_exception_and_concurrent_matches_and_thumbnail_budget() -> None:
             assert tuple(m_second[0][5]["icon-data"].value) == fake_icon
             assert slow_thumb.calls == 1
 
-            # 3. Multiple concurrent Match calls in flight (one per keystroke)
             concurrent = await asyncio.gather(
                 iface.call_match("pho"),
                 iface.call_match("phot"),
@@ -505,8 +480,8 @@ def test_trim_weak_results_and_krunner_drops_below_half_top_score() -> None:
     assert trim_weak_results([]) == []
     results = [
         _sample_result(path="/a.txt", score=4.8),
-        _sample_result(path="/b.txt", score=2.4),  # exact 0.5 * top_score -> kept
-        _sample_result(path="/c.txt", score=2.39),  # < 0.5 * top_score -> dropped
+        _sample_result(path="/b.txt", score=2.4),
+        _sample_result(path="/c.txt", score=2.39),
         _sample_result(path="/d.txt", score=1.2),
     ]
     assert [r.path for r in trim_weak_results(results)] == ["/a.txt", "/b.txt"]
