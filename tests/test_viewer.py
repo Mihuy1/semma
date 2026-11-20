@@ -399,16 +399,15 @@ def test_services_pass_the_hit_spot(tmp_path: Path) -> None:
         rec = _Recorder()
         krunner = KRunnerService(_no_search, launcher=rec)  # type: ignore[arg-type]
         match_id = krunner._remember(hit)
-        await type(krunner).__dict__["Run"].__wrapped__(krunner, match_id, "")
+        await krunner.run(match_id, "")
         assert rec.calls == [(PDF, Spot(7))]
 
         rec.calls.clear()
         gnome = GnomeSearchService(_no_search, launcher=rec)  # type: ignore[arg-type]
-        activate = type(gnome).__dict__["ActivateResult"].__wrapped__
-        await activate(gnome, gnome._remember(hit), [], 0)
+        await gnome.activate_result(gnome._remember(hit))
         doc = tmp_path / "old.pdf"
         doc.write_bytes(b"%PDF")
-        await activate(gnome, str(doc), [], 0)
+        await gnome.activate_result(str(doc))
         assert rec.calls == [(PDF, Spot(7)), (str(doc), None)]
 
     asyncio.run(check())

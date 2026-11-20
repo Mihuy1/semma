@@ -435,22 +435,25 @@ class KRunnerService(ServiceInterface):
 
     @method()
     async def Run(self, matchId: "s", actionId: "s"):  # noqa: F821, N803, UP037
+        await self.run(matchId, actionId)
+
+    async def run(self, match_id: str, action_id: str) -> None:
         token, self._activation_token = self._activation_token, None
-        result = self._recent.get(matchId)
+        result = self._recent.get(match_id)
         if result is None:
             return
         path = result.path
         try:
-            if actionId == "":
+            if action_id == "":
                 await self._launcher.open_file(path, activation_token=token, spot=spot_for(result))
-            elif actionId == ACTION_OPEN_FOLDER:
+            elif action_id == ACTION_OPEN_FOLDER:
                 await self._launcher.open_folder(path, activation_token=token)
-            elif actionId == ACTION_COPY_PATH:
+            elif action_id == ACTION_COPY_PATH:
                 await self._launcher.copy_path(path)
             else:
-                log.debug("unknown KRunner action %r for %s", actionId, path)
+                log.debug("unknown KRunner action %r for %s", action_id, path)
         except Exception:
-            log.exception("Run(%r, %r) failed", matchId, actionId)
+            log.exception("Run(%r, %r) failed", match_id, action_id)
 
     @method()
     def Teardown(self):

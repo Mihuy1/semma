@@ -346,6 +346,9 @@ class GnomeSearchService(ServiceInterface):
 
     @method()
     async def GetResultMetas(self, identifiers: "as") -> "aa{sv}":  # noqa: F821, N802, UP037
+        return await self.get_result_metas(list(identifiers))
+
+    async def get_result_metas(self, identifiers: list[str]) -> list[dict[str, Variant]]:
         results = [self._recent[i] for i in identifiers if i in self._recent]
         try:
             thumbs = await self._gather_thumbnails(results)
@@ -397,6 +400,9 @@ class GnomeSearchService(ServiceInterface):
 
     @method()
     async def ActivateResult(self, identifier: "s", terms: "as", timestamp: "u"):  # noqa: F821, N802, UP037
+        await self.activate_result(identifier)
+
+    async def activate_result(self, identifier: str) -> None:
         result = self._recent.get(identifier)
         spot: Spot | None = None
         if result is not None:
@@ -414,6 +420,9 @@ class GnomeSearchService(ServiceInterface):
 
     @method()
     async def LaunchSearch(self, terms: "as", timestamp: "u"):  # noqa: F821, N802, UP037
+        await self.launch_search()
+
+    async def launch_search(self) -> None:
         try:
             await self._launcher.open_gui()
         except Exception:

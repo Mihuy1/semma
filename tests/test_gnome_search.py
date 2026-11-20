@@ -245,7 +245,7 @@ def test_metas_fall_back_to_gicon_past_thumbnail_budget() -> None:
 
 
 async def _call_metas(svc: GnomeSearchService, ids: list[str]):
-    metas = await type(svc).__dict__["GetResultMetas"].__wrapped__(svc, ids)
+    metas = await svc.get_result_metas(ids)
     return [{k: v.value for k, v in m.items()} for m in metas]
 
 
@@ -257,8 +257,7 @@ def test_activate_failure_never_raises() -> None:
     async def check() -> None:
         svc, _ = _service([_result("/x/a.txt")], launcher=Broken())
         ids = await svc._run_search(["abc"])
-        fn = type(svc).__dict__["ActivateResult"].__wrapped__
-        await fn(svc, ids[0], ["abc"], 0)
+        await svc.activate_result(ids[0])
 
     asyncio.run(check())
 
@@ -501,7 +500,6 @@ def test_activate_unknown_id_opens_existing_indexable_file_only(tmp_path: Path) 
     async def check() -> None:
         launcher = FakeLauncher()
         svc, _ = _service([], launcher=launcher)
-        activate = type(svc).__dict__["ActivateResult"].__wrapped__
         doc = tmp_path / "report.pdf"
         doc.write_bytes(b"%PDF")
         script = tmp_path / "run.desktop"
@@ -509,11 +507,11 @@ def test_activate_unknown_id_opens_existing_indexable_file_only(tmp_path: Path) 
         folder = tmp_path / "dir.txt"
         folder.mkdir()
 
-        await activate(svc, str(doc), ["x"], 0)
-        await activate(svc, str(tmp_path / "gone.txt"), ["x"], 0)
-        await activate(svc, str(script), ["x"], 0)
-        await activate(svc, str(folder), ["x"], 0)
-        await activate(svc, "report.pdf", ["x"], 0)
+        await svc.activate_result(str(doc))
+        await svc.activate_result(str(tmp_path / "gone.txt"))
+        await svc.activate_result(str(script))
+        await svc.activate_result(str(folder))
+        await svc.activate_result("report.pdf")
         assert launcher.opened == [str(doc)]
 
     asyncio.run(check())
@@ -532,8 +530,7 @@ def test_launch_search_spawns_gui_detached(monkeypatch: pytest.MonkeyPatch) -> N
 
     async def check() -> None:
         svc, _ = _service([], launcher=launcher)
-        launch = type(svc).__dict__["LaunchSearch"].__wrapped__
-        await launch(svc, ["ignored", "terms"], 42)
+        await svc.launch_search()
 
     asyncio.run(check())
     assert len(calls) == 1
@@ -559,14 +556,13 @@ def test_launch_search_failure_logs_warning_and_never_raises(
 
     async def check() -> None:
         svc, _ = _service([], launcher=launcher)
-        launch = type(svc).__dict__["LaunchSearch"].__wrapped__
-        await launch(svc, ["rocket"], 0)
+        await svc.launch_search()
 
         async def broken_spawn(argv: list[str]) -> bool:
             raise RuntimeError("unexpected failure")
 
         monkeypatch.setattr(launcher, "spawn", broken_spawn)
-        await launch(svc, [], 0)
+        await svc.launch_search()
 
     with caplog.at_level(logging.WARNING, logger="semma.gnome_search"):
         asyncio.run(check())
