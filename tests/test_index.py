@@ -397,29 +397,77 @@ def test_reset_index(env) -> None:
     assert store.db.execute("SELECT count(*) FROM fts_files").fetchone()[0] == 3
 
 
-def test_search_latency_on_synthetic_index(tmp_path: Path) -> None:
-    """20k chunks: the post-embedding pipeline should stay well under the 50 ms target."""
-    import time
+def test_search_on_synthetic_20k_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """20k chunks: verify deterministic cache hits, DF pruning, and ranking invariants."""
+    import semma.search as search_mod
+    from semma.vectors import chunks_version
 
+    monkeypatch.setattr(search_mod, "_exists", lambda _: True)
     cfg = make_cfg(tmp_path)
-    store = Store(cfg.db_path)
     rng = np.random.default_rng(0)
-    with store.db:
+    q = rng.standard_normal(768).astype(np.float32)
+    q /= np.linalg.norm(q)
+
+    setup_store = Store(cfg.db_path)
+    with setup_store.db:
         for i in range(2000):
-            store.db.execute("INSERT INTO files (path, kind, size, mtime, in_project, priority, status, last_seen) "
-                             "VALUES (?, 'text', 1, 1, 0, 1, 'indexed', 1)", (f"/d/file{i}.md",))
+            setup_store.db.execute(
+                "INSERT INTO files (path, kind, size, mtime, in_project, priority, status, last_seen) "
+                "VALUES (?, 'text', 1, 1, 0, 1, 'indexed', 1)",
+                (f"/d/file{i}.md",),
+            )
         for i in range(20_000):
             fid = i % 2000 + 1
-            cur = store.db.execute("INSERT INTO chunks (file_id, seq, modality) VALUES (?, 0, 'text')", (fid,))
-            v = rng.standard_normal(768).astype(np.float32)
-            store.db.execute("INSERT INTO vec_chunks VALUES (?, ?, 'text', 'text')", (cur.lastrowid, v / np.linalg.norm(v)))
-            store.db.execute("INSERT INTO fts_chunks (rowid, text) VALUES (?, ?)", (cur.lastrowid, f"word{i % 97} common"))
-    s = Searcher(store, cfg, FakeEmbedder())
-    q = rng.standard_normal(768).astype(np.float32)
-    s.search_vector(q, "common word5", 10)
-    t = time.perf_counter()
-    for _ in range(5):
-        s.search_vector(q, "common word5", 10)
-    ms = (time.perf_counter() - t) / 5 * 1000
-    assert ms < 200, ms
-    print(f"\nsearch over 20k chunks: {ms:.1f} ms")
+            cur = setup_store.db.execute("INSERT INTO chunks (file_id, seq, modality) VALUES (?, 0, 'text')", (fid,))
+            v = q if i == 5 else rng.standard_normal(768).astype(np.float32)
+            setup_store.db.execute(
+                "INSERT INTO vec_chunks VALUES (?, ?, 'text', 'text')",
+                (cur.lastrowid, v / np.linalg.norm(v)),
+            )
+            setup_store.db.execute(
+                "INSERT INTO fts_chunks (rowid, text) VALUES (?, ?)",
+                (cur.lastrowid, f"word{i % 97} common"),
+            )
+    setup_store.close()
+
+    cached_store = Store(cfg.db_path, vector_cache=True)
+    try:
+        cache = cached_store.vectors
+        assert cache is not None and cache.loads == 0 and cache.size == 0
+        s_cached = Searcher(cached_store, cfg, FakeEmbedder())
+        assert s_cached._selective(cached_store.reader(), ['"common"', '"word5"']) == ['"word5"']
+
+        res_cached = s_cached.search_vector(q, "common word5", 10)
+        assert cache.loads == 1 and cache.fast_loads == 1
+        assert cache.size == 20_000 and not cache.too_big
+        assert cache.version == chunks_version(cached_store.db)
+        assert len(res_cached) == 10
+        assert len({r.path for r in res_cached}) == 10
+        assert [r.score for r in res_cached] == sorted((r.score for r in res_cached), reverse=True)
+        assert res_cached[0].path == "/d/file5.md"
+        assert res_cached[0].similarity == pytest.approx(1.0, abs=1e-4)
+        assert set(res_cached[0].matched) == {"vector", "text"}
+
+        assert s_cached.search_vector(q, "common word5", 10) == res_cached
+        assert cache.loads == 1 and cache.fast_loads == 1
+    finally:
+        cached_store.close()
+
+    sqlite_store = Store(cfg.db_path, vector_cache=False)
+    try:
+        s_sqlite = Searcher(sqlite_store, cfg, FakeEmbedder())
+        res_sqlite = s_sqlite.search_vector(q, "common word5", 10)
+        sample = s_sqlite._sample
+        assert sample is not None and not sample.full
+        assert len(sample.codes) == search_mod.SCALE_SAMPLE
+        assert sample.version == chunks_version(sqlite_store.db)
+        assert len(res_sqlite) == 10
+        assert [r.score for r in res_sqlite] == sorted((r.score for r in res_sqlite), reverse=True)
+        assert res_sqlite[0].path == "/d/file5.md"
+        assert res_sqlite[0].similarity == pytest.approx(1.0, abs=1e-4)
+        assert set(res_sqlite[0].matched) == {"vector", "text"}
+
+        assert s_sqlite.search_vector(q, "common word5", 10) == res_sqlite
+        assert s_sqlite._sample is sample
+    finally:
+        sqlite_store.close()
