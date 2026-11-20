@@ -38,6 +38,15 @@ class FakeEmbedder:
         self.calls: list[tuple[str, int]] = []
         self.fail_on: set[str] = set()
 
+    def unload_index(self) -> bool:
+        return False
+
+    def unload_query(self) -> bool:
+        return False
+
+    def download_progress(self) -> dict[str, Any] | None:
+        return None
+
     def embed_query(self, query: str) -> np.ndarray:
         return bag_of_words(query)
 

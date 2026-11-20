@@ -531,57 +531,41 @@ class Daemon:
 
     async def check_idle(self) -> bool:
         """Unload the full index model after its grace period once indexing finishes, and unload
-        the query model (or legacy single model) after `model_idle_unload_minutes` without queries."""
+        the query model after `model_idle_unload_minutes` without queries."""
         if self._load_task is not None and not self._load_task.done():
             return False
         loop = asyncio.get_running_loop()
         now = time.monotonic()
         any_unloaded = False
 
-        has_split = hasattr(self.embedder, "unload_index") and hasattr(self.embedder, "unload_query")
-        if has_split:
-            idx_grace = self._index_unload_seconds()
-            if (idx_grace > 0 and self._index_model_loaded() and self._phase != "indexing"
-                    and not self._queries_in_flight):
-                last_idx = max(self._last_work, float(getattr(self.embedder, "index_last_used", 0.0)))
-                idx_dev = str(getattr(self.embedder, "device", "") or "").strip().lower()
-                idx_on_gpu = idx_dev != "cpu"
-                needed_idx = min(idx_grace, GPU_BUSY_UNLOAD_S) if (self._gpu_busy and idx_on_gpu) else idx_grace
-                if now - last_idx >= needed_idx:
-                    unloaded = await loop.run_in_executor(self._model_exec, self._unload_index_if_no_work)
-                    if unloaded is not False:
-                        log.info("index model unloaded after %.0fs without indexing%s", needed_idx,
-                                 " (GPU busy)" if (self._gpu_busy and idx_on_gpu) else "")
-                        any_unloaded = True
+        idx_grace = self._index_unload_seconds()
+        if (idx_grace > 0 and self._index_model_loaded() and self._phase != "indexing"
+                and not self._queries_in_flight):
+            last_idx = max(self._last_work, float(getattr(self.embedder, "index_last_used", 0.0)))
+            idx_dev = str(getattr(self.embedder, "device", "") or "").strip().lower()
+            idx_on_gpu = idx_dev != "cpu"
+            needed_idx = min(idx_grace, GPU_BUSY_UNLOAD_S) if (self._gpu_busy and idx_on_gpu) else idx_grace
+            if now - last_idx >= needed_idx:
+                unloaded = await loop.run_in_executor(self._model_exec, self._unload_index_if_no_work)
+                if unloaded is not False:
+                    log.info("index model unloaded after %.0fs without indexing%s", needed_idx,
+                             " (GPU busy)" if (self._gpu_busy and idx_on_gpu) else "")
+                    any_unloaded = True
 
-            q_idle = self._idle_seconds()
-            if q_idle > 0 and self._query_model_loaded() and not self._queries_in_flight:
-                last_q = max(self._last_query, float(getattr(self.embedder, "query_last_used", 0.0)))
-                q_on_gpu = str(getattr(self.embedder, "query_device", "") or "").strip().lower().startswith(
-                    ("cuda", "vulkan", "gpu")
-                )
-                needed_q = min(q_idle, GPU_BUSY_UNLOAD_S) if (self._gpu_busy and q_on_gpu) else q_idle
-                if now - last_q >= needed_q:
-                    unloaded = await loop.run_in_executor(self._model_exec, self.embedder.unload_query)
-                    if unloaded is not False:
-                        log.info("query model unloaded after %.0f min without queries%s", needed_q / 60,
-                                 " (GPU busy)" if (self._gpu_busy and q_on_gpu) else "")
-                        any_unloaded = True
-            return any_unloaded
-
-        idle = self._idle_seconds()
-        if (idle <= 0 or not self._model_ready() or not hasattr(self.embedder, "unload")
-                or self._queries_in_flight or self._phase == "indexing"):
-            return False
-        last = max(self._last_query, self._last_work, float(getattr(self.embedder, "last_used", 0.0)))
-        needed = min(idle, GPU_BUSY_UNLOAD_S) if self._gpu_busy else idle
-        if now - last < needed:
-            return False
-        unloaded = await loop.run_in_executor(self._model_exec, self.embedder.unload)
-        if unloaded is not False:
-            log.info("model unloaded after %.0f min without queries or indexing%s", needed / 60,
-                     " (GPU busy)" if self._gpu_busy else "")
-        return True
+        q_idle = self._idle_seconds()
+        if q_idle > 0 and self._query_model_loaded() and not self._queries_in_flight:
+            last_q = max(self._last_query, float(getattr(self.embedder, "query_last_used", 0.0)))
+            q_on_gpu = str(getattr(self.embedder, "query_device", "") or "").strip().lower().startswith(
+                ("cuda", "vulkan", "gpu")
+            )
+            needed_q = min(q_idle, GPU_BUSY_UNLOAD_S) if (self._gpu_busy and q_on_gpu) else q_idle
+            if now - last_q >= needed_q:
+                unloaded = await loop.run_in_executor(self._model_exec, self.embedder.unload_query)
+                if unloaded is not False:
+                    log.info("query model unloaded after %.0f min without queries%s", needed_q / 60,
+                             " (GPU busy)" if (self._gpu_busy and q_on_gpu) else "")
+                    any_unloaded = True
+        return any_unloaded
 
     def pause(self) -> None:
         with self._cv:
@@ -725,11 +709,8 @@ class Daemon:
         return bool(self._model_files_status().get("ready"))
 
     def _download_sync(self) -> dict[str, Any] | None:
-        probe = getattr(self.embedder, "download_progress", None)
-        if probe is None:
-            return None
         try:
-            return probe()
+            return self.embedder.download_progress()
         except Exception:
             log.debug("download progress unavailable", exc_info=True)
             return None
@@ -1027,7 +1008,7 @@ class Daemon:
         if full:
             self._last_full_scan = time.monotonic()
         self._no_progress_until = 0.0
-        self._update_watches(None if full else st.roots, getattr(st, "walked_dirs", None))
+        self._update_watches(None if full else st.roots, st.walked_dirs)
         log.log(logging.INFO if full else logging.DEBUG,
                 "%s scan of %s in %.1fs: %d dirs, %d indexable files, %d removed, %d unreadable",
                 "full" if full else "partial", ", ".join(map(str, st.roots)) if not full or len(st.roots) < 4
@@ -1163,9 +1144,7 @@ class Daemon:
                         loop.call_soon_threadsafe(setattr, svc, "_max_results", n)
         log.debug("new settings applied")
 
-    def _update_watches(self, partial_roots: list[Path] | None, walked: list[str] | None) -> None:
-        if walked is None:
-            return
+    def _update_watches(self, partial_roots: list[Path] | None, walked: list[str]) -> None:
         db_dir = str(Path(self.cfg.db_path).parent)
         new = {d for d in walked if d != db_dir}
         if partial_roots is None:
