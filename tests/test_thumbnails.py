@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import subprocess
-import time
+import threading
 
 from PIL import Image, PngImagePlugin
 import pytest
@@ -154,11 +154,12 @@ def test_slow_thumbnail_continues_in_background_and_caches(tmp_path: Path, monke
 
     orig_make = make_icon_data
     calls = 0
+    release = threading.Event()
 
     def slow_make(path, kind, mt, size=64, *, cache_dir=None):
         nonlocal calls
         calls += 1
-        time.sleep(0.12)
+        assert release.wait(timeout=5.0)
         return orig_make(path, kind, mt, size, cache_dir=cache_dir)
 
     monkeypatch.setattr("semma.thumbnails.make_icon_data", slow_make)
@@ -168,14 +169,14 @@ def test_slow_thumbnail_continues_in_background_and_caches(tmp_path: Path, monke
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(thumb.icon_data(str(img_path), ft.IMAGE, mtime), timeout=0.02)
 
-        await asyncio.sleep(0.15)
+        inflight = list(thumb._inflight.values())
+        assert len(inflight) == 1
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*inflight), timeout=5.0)
         assert thumb.get_cached(str(img_path), mtime) is not None
 
-        t0 = time.perf_counter()
         icon = await thumb.icon_data(str(img_path), ft.IMAGE, mtime)
-        dt = time.perf_counter() - t0
         _check_icon_data(icon, expected_longest=64)
-        assert dt < 0.02
         assert calls == 1
 
     asyncio.run(scenario())

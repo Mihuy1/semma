@@ -577,8 +577,11 @@ class _ConcurrencyStubWorker:
 
     load_seconds = 0.0
     created: list[_ConcurrencyStubWorker] = []
+    load_started = threading.Event()
+    encode_started = threading.Event()
 
     def __init__(self, lib_dir: Path, text_model_path: Path, mmproj_path: Path | None, use_gpu: bool, **_kwargs):
+        type(self).load_started.set()
         time.sleep(type(self).load_seconds)
         self.text_only = mmproj_path is None
         self.use_gpu = use_gpu
@@ -589,10 +592,12 @@ class _ConcurrencyStubWorker:
         self._lock = threading.Lock()
         type(self).created.append(self)
 
-    def _call(self, seconds: float, inputs) -> np.ndarray:
+    def _call(self, seconds: float, inputs, started: threading.Event | None = None) -> np.ndarray:
         with self._lock:
             self.active += 1
             self.max_active = max(self.max_active, self.active)
+        if started is not None:
+            started.set()
         try:
             time.sleep(seconds)
             return np.stack([bag_of_words(str(x)) for x in inputs])
@@ -604,7 +609,7 @@ class _ConcurrencyStubWorker:
         return self._call(0.1, inputs)
 
     def encode(self, inputs, **kw):
-        return self._call(0.3, inputs)
+        return self._call(0.3, inputs, started=type(self).encode_started)
 
     def close(self) -> None:
         self.closed = True
@@ -615,6 +620,8 @@ def _cpu_query_embedder(monkeypatch) -> Embedder:
 
     _ConcurrencyStubWorker.created = []
     _ConcurrencyStubWorker.load_seconds = 0.0
+    _ConcurrencyStubWorker.load_started = threading.Event()
+    _ConcurrencyStubWorker.encode_started = threading.Event()
     monkeypatch.setattr(emb_mod, "ensure_model_file", lambda kind, model_dir: model_dir / f"{kind}.gguf")
     monkeypatch.setattr(emb_mod, "_WorkerHandle", _ConcurrencyStubWorker)
     cfg = load_config(path=Path("/nonexistent.toml"))
@@ -625,19 +632,26 @@ def _cpu_query_embedder(monkeypatch) -> Embedder:
 def test_cpu_query_never_uses_the_index_model_outside_the_gpu_lock(monkeypatch) -> None:
     e = _cpu_query_embedder(monkeypatch)
     e.load_query()
+    query_entered_lock = threading.Event()
+    orig_query_lock = e._query_lock
+
+    def _tracked_query_lock(device=None):
+        query_entered_lock.set()
+        return orig_query_lock(device)
+
+    monkeypatch.setattr(e, "_query_lock", _tracked_query_lock)
     e._cpu_query_lock.acquire()
     q = threading.Thread(target=e.embed_query, args=("hello world",))
     q.start()
-    time.sleep(0.05)
+    assert query_entered_lock.wait(timeout=5.0)
     e._query_model = None
     b = threading.Thread(target=e.embed_batch, args=("text", ["a b c"], ["t"]))
     b.start()
-    while e._model is None:
-        time.sleep(0.005)
-    time.sleep(0.05)
+    assert _ConcurrencyStubWorker.encode_started.wait(timeout=5.0)
     e._cpu_query_lock.release()
     q.join(5)
     b.join(5)
+    assert not q.is_alive() and not b.is_alive()
     full = [m for m in _ConcurrencyStubWorker.created if not m.text_only]
     assert len(full) == 1 and full[0].max_active == 1
 
@@ -646,16 +660,21 @@ def test_cpu_query_model_load_is_shared_after_index_unload(monkeypatch) -> None:
     e = _cpu_query_embedder(monkeypatch)
     e.embed_batch("text", ["a"], ["t"])
     _ConcurrencyStubWorker.load_seconds = 0.3
+    _ConcurrencyStubWorker.load_started.clear()
     with e._gpu.batch():
         q = threading.Thread(target=e.embed_query, args=("hello world",))
         q.start()
-        time.sleep(0.05)
+        deadline = time.monotonic() + 5.0
+        while e._gpu.queries_waiting == 0:
+            assert time.monotonic() < deadline
+            time.sleep(0.001)
         e._model = None
-    time.sleep(0.05)
+    assert _ConcurrencyStubWorker.load_started.wait(timeout=5.0)
     loader = threading.Thread(target=e.load_query)
     loader.start()
     q.join(5)
     loader.join(5)
+    assert not q.is_alive() and not loader.is_alive()
     assert sum(m.text_only for m in _ConcurrencyStubWorker.created) == 1
     assert e.query_model_loaded and e.query_device == "cpu"
 
