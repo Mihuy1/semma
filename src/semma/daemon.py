@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import copy
 import ctypes
 import logging
 import os
@@ -82,8 +81,7 @@ MAX_PARTIAL_SCAN_DIRS = 64
 _DEFAULT: Any = object()
 
 RESTART_FIELDS: dict[str, str] = {
-    "db_path": "db_path", "model_name": "model.name", "device": "model.device",
-    "query_device": "model.query_device", "llama_lib_dir": "model.llama_lib_dir",
+    "db_path": "db_path", "model_name": "model.name", "llama_lib_dir": "model.llama_lib_dir",
     "model_dir": "model.model_dir", "batch_sizes": "index.batch_sizes",
     "vector_cache_max_chunks": "search.vector_cache_max_chunks",
 }
@@ -110,6 +108,7 @@ NEXT_FILE_FIELDS: dict[str, str] = {
     "ocr_enabled": "ocr.enabled", "ocr_languages": "ocr.languages",
 }
 LIVE_FIELDS: dict[str, str] = {
+    "device": "model.device", "query_device": "model.query_device",
     "z_gate": "search.z_gate", "z_floor": "search.z_floor", "knn_k": "search.knn_k",
     "location_prior": "search.location_prior", "duplicate_similarity": "search.duplicate_similarity",
     "model_idle_unload_minutes": "daemon.model_idle_unload_minutes",
@@ -1041,33 +1040,16 @@ class Daemon:
         start = self._start_cfg
         with self._reload_lock:
             base = self._accepted_cfg
-            chosen_device = {attr: getattr(new, attr) for attr in ("device", "query_device")}
             restart = [name for attr, name in RESTART_FIELDS.items() if getattr(new, attr) != getattr(start, attr)]
-            loading = ((self._load_task is not None and not self._load_task.done())
-                       or bool(getattr(self.embedder, "loading", False)))
-            models_loaded = self._index_model_loaded() or self._query_model_loaded() or loading
-            hot: list[str] = []
-            if not models_loaded:
-                restart = [name for name in restart if name not in ("model.device", "model.query_device")]
-                hot = [RESTART_FIELDS[attr] for attr, value in chosen_device.items()
-                       if value != getattr(base, attr)]
             for attr in (*RESTART_FIELDS, *FIXED_FIELDS):
                 setattr(new, attr, getattr(start, attr))
-            if not models_loaded:
-                for attr, value in chosen_device.items():
-                    setattr(new, attr, value)
-                if hot:
-                    if self._start_cfg is self.cfg or self._start_cfg is base:
-                        self._start_cfg = copy.copy(self._start_cfg)
-                    for attr, value in chosen_device.items():
-                        setattr(self._start_cfg, attr, value)
 
             def diff(fields: dict[str, str]) -> list[str]:
                 return [name for attr, name in fields.items() if getattr(new, attr) != getattr(base, attr)]
 
             rescan = diff(SCAN_FIELDS) + diff(PRIORITY_FIELDS)
             setup = diff(ONBOARDING_FIELDS)
-            changed = rescan + diff(NEXT_FILE_FIELDS) + diff(LIVE_FIELDS) + setup + hot
+            changed = rescan + diff(NEXT_FILE_FIELDS) + diff(LIVE_FIELDS) + setup
             if not changed and self._ocr_languages_changed(new):
                 changed = ["ocr (installed languages)"]
             setup_done = onboarding_done(new, self.store) if setup else None
@@ -1102,11 +1084,32 @@ class Daemon:
 
         return "+".join(ocr.effective_languages(cfg)) != recorded
 
+    def _unload_for_device_change(self, *, unload_index: bool, unload_query: bool) -> None:
+        def _do_unload() -> None:
+            if unload_index and hasattr(self.embedder, "unload_index"):
+                try:
+                    self.embedder.unload_index()
+                except Exception:
+                    log.exception("unloading the index model after a device change failed")
+            if unload_query and hasattr(self.embedder, "unload_query"):
+                try:
+                    self.embedder.unload_query()
+                except Exception:
+                    log.exception("unloading the query model after a device change failed")
+
+        try:
+            self._model_exec.submit(_do_unload).result()
+        except RuntimeError:
+            _do_unload()
+
     def _apply_config(self, cfg: Config) -> None:
         """On the worker, between scans and slices: every holder of the Config gets the new one
         (the next scan builds its Scanner and Scorer from it)."""
-        media_changed = (cfg.max_media_seconds != self.cfg.max_media_seconds
-                         or cfg.media_segment_seconds != self.cfg.media_segment_seconds)
+        old_cfg = self.cfg
+        media_changed = (cfg.max_media_seconds != old_cfg.max_media_seconds
+                         or cfg.media_segment_seconds != old_cfg.media_segment_seconds)
+        device_changed = cfg.device != old_cfg.device
+        query_device_changed = cfg.query_device != old_cfg.query_device
         self.cfg = cfg
         self.indexer.cfg = cfg
         if media_changed:
@@ -1126,6 +1129,12 @@ class Daemon:
             embedder.requested_device = cfg.device
         if hasattr(embedder, "requested_query_device"):
             embedder.requested_query_device = cfg.query_device
+        if device_changed or query_device_changed:
+            unload_index = device_changed
+            unload_query = query_device_changed or (
+                device_changed and (cfg.query_device or "auto").strip().lower() in ("", "auto")
+            )
+            self._unload_for_device_change(unload_index=unload_index, unload_query=unload_query)
         self._no_progress_until = 0.0
         if not cfg.pause_when_gpu_busy:
             self._gpu_busy = False

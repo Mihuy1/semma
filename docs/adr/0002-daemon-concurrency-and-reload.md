@@ -37,8 +37,7 @@ Accepted
   - **Rescan-triggering**: fields deciding what is indexed (roots, exclusions, kinds, extensions) or priority scores (which rescore every file, changed or not).
   - **Per-file / reconciliation**: fields read when indexing starts; changing media limits/segment lengths calls `Indexer.reconcile_media`, and changing OCR settings calls `Indexer.reconcile_ocr`.
   - **Immediate / live**: fields read at use time or pushed to components that cache them.
-- **Device selection before first model load**: the device setting is read only when a model actually loads. Until then, a new device choice applies immediately without restarting the daemon (preventing first-run setup from restarting the service or interrupting a model download). Once a model load has started, device changes wait for a restart and remain pending on subsequent reloads.
-- `_start_cfg` is copied before mutation so pending device changes do not leak into live settings before the worker swaps them in.
+- **Live device reload (`model.device` and `model.query_device`)**: device settings are hot-reloaded without restarting the daemon, even when a model is already loaded or loading. When `_apply_config` runs on the worker at a clean file/slice boundary (waking the worker promptly if idle), it updates `embedder.requested_device` / `embedder.requested_query_device` and serializes worker subprocess unloads through `_model_exec` so any in-flight load finishes before being unloaded. Exiting the worker subprocess reclaims VRAM/RAM and clears the resolved device state (`device` / `query_device`), and the next search or indexing pass lazily reloads on the new device.
 
 ### 5. First-Run Onboarding Pause
 - `onboarding_done = None` (key absent) indexes only if the user already has an existing index.

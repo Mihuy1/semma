@@ -302,3 +302,40 @@ def test_wizard_screenshots_page_position_and_save(
         "ocr": {"enabled": True, "languages": ["deu", "eng"]},
     }
 
+
+def test_wizard_device_help_popover_and_no_restart_note(
+    app: QtWidgets.QApplication, home: Path,
+) -> None:
+    wizard = OnboardingWindow(FakeClient(status()), config_path(home), home)
+    wizard.show()
+    for _ in range(5):
+        wizard.next_button.click()
+    app.processEvents()
+
+    label_texts = [lbl.text().lower() for lbl in wizard.device.box.findChildren(QtWidgets.QLabel)]
+    assert not any("restart" in text for text in label_texts)
+
+    btn = wizard.device.device_help_button
+    tooltip = btn.toolTip()
+    assert tooltip
+    assert "Automatic" in tooltip
+    assert "Vulkan" in tooltip
+    assert "CPU" in tooltip
+
+    popover = wizard.device.device_help_popover
+    assert not popover.isVisible()
+    btn.click()
+    app.processEvents()
+    assert popover.isVisible()
+    popover_text = popover.text()
+    assert "Automatic" in popover_text
+    assert "Graphics card" in popover_text
+    assert "Processor" in popover_text
+    assert "Vulkan" in popover_text
+    assert "CPU" in popover_text
+
+    popover.hide()
+    wizard.confirm_close = lambda: "later"
+    wizard.close()
+    app.processEvents()
+
