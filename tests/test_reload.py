@@ -257,14 +257,14 @@ def test_restart_keys_are_reported_and_not_applied(home: Path) -> None:
             await until_idle(d)
             settings = base_settings(home)
             settings["db_path"] = str(home / "elsewhere.db")
-            settings["model"] = {"device": "cpu", "name": "other/model"}
+            settings["model"] = {"name": "other/model"}
             settings["index"] = {"batch_sizes": {"text": 2}}
             settings["search"]["vector_cache_max_chunks"] = 5
             settings["daemon"]["krunner_max_results"] = 3
             restart = await reload_and_settle(d, home, settings, rescan=False)
-            assert sorted(restart) == ["db_path", "index.batch_sizes", "model.device", "model.name",
+            assert sorted(restart) == ["db_path", "index.batch_sizes", "model.name",
                                        "search.vector_cache_max_chunks"]
-            assert d.cfg.db_path == cfg.db_path and d.cfg.device is None and d.cfg.model_name == cfg.model_name
+            assert d.cfg.db_path == cfg.db_path and d.cfg.model_name == cfg.model_name
             assert d.cfg.batch_sizes == cfg.batch_sizes and d.cfg.krunner_max_results == 3
             assert sorted(await d.reload_config()) == sorted(restart)
             assert await reload_and_settle(d, home, base_settings(home), rescan=False) == []
@@ -296,38 +296,229 @@ def test_device_applies_without_a_restart_before_the_model_is_loaded(home: Path)
     asyncio.run(main())
 
 
-def test_device_change_needs_a_restart_while_the_model_is_loading(home: Path) -> None:
+def test_device_reload_while_model_is_loading_unloads_after_load_finishes(home: Path) -> None:
     async def main() -> None:
         cfg = start_cfg(home)
         from test_daemon import LifecycleEmbedder
-        emb = LifecycleEmbedder()
-        emb.loading = True
+        emb = LifecycleEmbedder(load_seconds=0.15)
+        emb.requested_device = None
+        emb.requested_query_device = "auto"
         d = make_daemon(cfg, embedder=emb)
-        settings = base_settings(home)
-        settings["model"] = {"device": "cpu"}
-        write_config(home, settings)
-        assert await d.reload_config() == ["model.device"]
-
-    asyncio.run(main())
-
-
-def test_device_change_needs_a_restart_once_the_model_is_loaded(home: Path) -> None:
-    async def main() -> None:
-        cfg = start_cfg(home)
-        d = make_daemon(cfg)
         d.start()
         try:
             await until_idle(d)
-            d.embedder.load()
+            emb.unload()
+            load_task = asyncio.ensure_future(d.ensure_model())
+            await wait_until(lambda: emb.loading, what="model load started")
             settings = base_settings(home)
             settings["model"] = {"device": "cpu"}
-            restart = await reload_and_settle(d, home, settings, rescan=False)
-            assert restart == ["model.device"]
-            assert d.cfg.device is None
+            write_config(home, settings)
+            restart = await d.reload_config()
+            assert restart == []
+            await load_task
+            await wait_until(lambda: not emb.loaded and emb.requested_device == "cpu", what="device reload applied")
+            assert d.cfg.device == "cpu"
+            assert emb.query_unloads >= 1
         finally:
             await d.stop()
 
     asyncio.run(main())
+
+
+def test_device_reload_while_idle_wakes_worker_and_unloads_lazily(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import numpy as np
+    from fakes import DIM, bag_of_words
+
+    from semma import embedder as emb_mod
+
+    spawned: list[dict[str, Any]] = []
+
+    class StubWorker:
+        def __init__(self, lib_dir: Path, text_model_path: Path, mmproj_path: Path | None, use_gpu: bool, **_kw: Any):
+            self.dim = DIM
+            self.use_gpu = use_gpu
+            self.device = "vulkan" if use_gpu else "cpu"
+            self.text_only = mmproj_path is None
+            self.closed = False
+            spawned.append({"use_gpu": use_gpu, "text_only": self.text_only, "worker": self})
+
+        def encode_query(self, inputs: list[str], **_kw: Any) -> np.ndarray:
+            return np.stack([bag_of_words(q) for q in inputs])
+
+        def encode(self, inputs: list[Any], **_kw: Any) -> np.ndarray:
+            return np.stack([bag_of_words(str(x)) for x in inputs])
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(emb_mod, "ensure_model_file", lambda kind, model_dir: model_dir / f"{kind}.gguf")
+    monkeypatch.setattr(emb_mod, "_WorkerHandle", StubWorker)
+    monkeypatch.setattr(emb_mod.Embedder, "_has_vulkan_lib", lambda self: True)
+    monkeypatch.setattr(emb_mod.Embedder, "model_files_status", lambda self: {"ready": True, "done": 0, "total": 0})
+
+    async def main() -> None:
+        settings = base_settings(home)
+        settings["model"] = {"device": "vulkan", "query_device": "auto"}
+        cfg = start_cfg(home, settings)
+        emb = emb_mod.Embedder(cfg)
+        d = make_daemon(cfg, embedder=emb)
+        d.start()
+        try:
+            await until_idle(d)
+            assert emb.index_model_loaded
+            assert emb.device == "vulkan"
+            first_worker = spawned[-1]["worker"]
+            spawn_count = len(spawned)
+
+            settings["model"] = {"device": "cpu", "query_device": "auto"}
+            restart = await reload_and_settle(d, home, settings, rescan=False)
+            assert restart == []
+            await wait_until(lambda: not emb.index_model_loaded, what="index model unloaded on device change")
+            assert d.cfg.device == "cpu"
+            assert emb.requested_device == "cpu"
+            assert not emb.query_model_loaded
+            assert emb.device is None
+            assert first_worker.closed
+            assert len(spawned) == spawn_count
+
+            await d.search("rocket launch oxygen")
+            assert len(spawned) == spawn_count + 1
+            assert spawned[-1]["use_gpu"] is False
+            assert emb.query_device == "cpu"
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
+def test_query_device_reload_unloads_query_model_and_switches_device(
+    home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    from fakes import DIM, bag_of_words
+
+    from semma import embedder as emb_mod
+
+    spawned: list[dict[str, Any]] = []
+
+    class StubWorker:
+        def __init__(self, lib_dir: Path, text_model_path: Path, mmproj_path: Path | None, use_gpu: bool, **_kw: Any):
+            self.dim = DIM
+            self.use_gpu = use_gpu
+            self.device = "vulkan" if use_gpu else "cpu"
+            self.text_only = mmproj_path is None
+            self.closed = False
+            spawned.append({"use_gpu": use_gpu, "text_only": self.text_only, "worker": self})
+
+        def encode_query(self, inputs: list[str], **_kw: Any) -> np.ndarray:
+            return np.stack([bag_of_words(q) for q in inputs])
+
+        def encode(self, inputs: list[Any], **_kw: Any) -> np.ndarray:
+            return np.stack([bag_of_words(str(x)) for x in inputs])
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(emb_mod, "ensure_model_file", lambda kind, model_dir: model_dir / f"{kind}.gguf")
+    monkeypatch.setattr(emb_mod, "_WorkerHandle", StubWorker)
+    monkeypatch.setattr(emb_mod.Embedder, "_has_vulkan_lib", lambda self: True)
+    monkeypatch.setattr(emb_mod.Embedder, "model_files_status", lambda self: {"ready": True, "done": 0, "total": 0})
+
+    async def main() -> None:
+        settings = base_settings(home)
+        settings["model"] = {"device": "vulkan", "query_device": "cpu"}
+        cfg = start_cfg(home, settings)
+        emb = emb_mod.Embedder(cfg)
+        d = make_daemon(cfg, embedder=emb)
+        d.start()
+        try:
+            await until_idle(d)
+            emb.unload_index()
+            assert not emb.index_model_loaded
+            assert emb.device is None
+
+            await d.search("warm sofa cat")
+            assert emb.query_model_loaded
+            assert emb.query_device == "cpu"
+            cpu_worker = spawned[-1]["worker"]
+            assert cpu_worker.use_gpu is False
+
+            settings["model"] = {"device": "vulkan", "query_device": "vulkan"}
+            restart = await reload_and_settle(d, home, settings, rescan=False)
+            assert restart == []
+            await wait_until(lambda: not emb.query_model_loaded, what="query model unloaded on query_device change")
+            assert d.cfg.query_device == "vulkan"
+            assert emb.requested_query_device == "vulkan"
+            assert emb.query_device is None
+            assert cpu_worker.closed
+
+            await d.search("rocket kerosene launch")
+            assert emb.query_model_loaded
+            assert emb.query_device == "vulkan"
+            assert spawned[-1]["use_gpu"] is True
+        finally:
+            await d.stop()
+
+    asyncio.run(main())
+
+
+def test_embedder_unload_clears_device_and_uses_loaded_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import contextlib
+    import numpy as np
+    from fakes import DIM, bag_of_words
+
+    from semma import embedder as emb_mod
+
+    class StubWorker:
+        def __init__(self, lib_dir: Path, text_model_path: Path, mmproj_path: Path | None, use_gpu: bool, **_kw: Any):
+            self.dim = DIM
+            self.device = "vulkan" if use_gpu else "cpu"
+            self.closed = False
+
+        def encode_query(self, inputs: list[str], **_kw: Any) -> np.ndarray:
+            return np.stack([bag_of_words(q) for q in inputs])
+
+        def encode(self, inputs: list[Any], **_kw: Any) -> np.ndarray:
+            return np.stack([bag_of_words(str(x)) for x in inputs])
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(emb_mod, "ensure_model_file", lambda kind, model_dir: model_dir / f"{kind}.gguf")
+    monkeypatch.setattr(emb_mod, "_WorkerHandle", StubWorker)
+    monkeypatch.setattr(emb_mod.Embedder, "_has_vulkan_lib", lambda self: True)
+    monkeypatch.setattr(emb_mod.Embedder, "model_files_status", lambda self: {"ready": True, "done": 0, "total": 0})
+
+    cfg = load_config(tmp_path / "missing.toml", home=tmp_path)
+    cfg.device = "vulkan"
+    cfg.query_device = "cpu"
+    e = emb_mod.Embedder(cfg)
+
+    e.load()
+    assert e.device == "vulkan"
+    assert e.unload_index() is True
+    assert e.device is None
+
+    e.load_query()
+    assert e.query_device == "cpu"
+
+    lock_devices: list[str | None] = []
+    orig_query_lock = e._query_lock
+
+    @contextlib.contextmanager
+    def spy_lock(device: str | None = None):
+        lock_devices.append(device)
+        with orig_query_lock(device):
+            yield
+
+    monkeypatch.setattr(e, "_query_lock", spy_lock)
+    e.requested_query_device = "vulkan"
+    assert e.unload_query() is True
+    assert lock_devices == ["cpu"]
+    assert e.query_device is None
+    assert e.device is None
 
 
 def test_live_settings_reach_every_holder_without_a_rescan(home: Path) -> None:
@@ -568,10 +759,10 @@ def test_reload_config_over_dbus(home: Path) -> None:
             await until_idle(d)
             assert await control_call("ReloadConfig", bus_name=name) == []
             settings = base_settings(home)
-            settings["model"] = {"query_device": "cpu"}
+            settings["model"] = {"name": "other/model"}
             settings["daemon"]["krunner_max_results"] = 5
             write_config(home, settings)
-            assert await asyncio.to_thread(daemon_reload_config, bus_name=name) == ["model.query_device"]
+            assert await asyncio.to_thread(daemon_reload_config, bus_name=name) == ["model.name"]
             await wait_until(lambda: d.cfg.krunner_max_results == 5, what="applied")
             (home / "config.toml").write_text("[scan\n", encoding="utf-8")
             from dbus_fast import DBusError

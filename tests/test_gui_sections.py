@@ -583,6 +583,42 @@ def test_performance_section_widget(app: QtWidgets.QApplication, home: Path) -> 
     }
 
 
+def test_performance_device_help_popover_and_no_restart_note(
+    app: QtWidgets.QApplication, home: Path,
+) -> None:
+    page = SettingsPage(FakeClient(status()), config_path(home), home)
+    page.show()
+    sec = page.select("performance")
+    app.processEvents()
+
+    label_texts = [lbl.text().lower() for lbl in sec.hw_box.findChildren(QtWidgets.QLabel)]
+    assert not any("restart" in text for text in label_texts)
+
+    btn = sec.device_help_button
+    tooltip = btn.toolTip()
+    assert tooltip
+    assert "Automatic" in tooltip
+    assert "Vulkan" in tooltip
+    assert "CPU" in tooltip
+
+    popover = sec.device_help_popover
+    assert not popover.isVisible()
+    btn.click()
+    app.processEvents()
+    assert popover.isVisible()
+    popover_text = popover.text()
+    assert "Automatic" in popover_text
+    assert "Graphics card" in popover_text
+    assert "Processor" in popover_text
+    assert "Vulkan" in popover_text
+    assert "CPU" in popover_text
+
+    popover.hide()
+    app.processEvents()
+    assert not popover.isVisible()
+    page.close()
+
+
 def _select_combo_data(combo: QtWidgets.QComboBox, value: object) -> None:
     for i in range(combo.count()):
         if combo.itemData(i) == value:

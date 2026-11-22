@@ -128,11 +128,10 @@ class _DevicePage(QWidget):
         )
         desc.setWordWrap(True)
         desc.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-        self.box = GraphicsCardGroup(
-            "Applied before the model is loaded. If it is already loaded, the service needs a restart.",
-            self,
-        )
+        self.box = GraphicsCardGroup(self)
         self.device_combo = self.box.device_combo
+        self.device_help_button = self.box.device_help_button
+        self.device_help_popover = self.box.device_help_popover
         self.pause_when_gpu_busy = self.box.pause_when_gpu_busy
         self.gpu_busy_label = self.box.gpu_busy_label
         self.gpu_busy_threshold = self.box.gpu_busy_threshold

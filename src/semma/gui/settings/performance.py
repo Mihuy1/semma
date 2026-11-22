@@ -2,22 +2,77 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QEvent, QPoint, Qt, Signal
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from ..widgets import theme_icon
 from . import performance_model as pfm
 from .base import SettingsSection
 from .context import Changes, Problem, SettingsContext
+
+_DEVICE_HELP_TOOLTIP = (
+    "Automatic: graphics card (Vulkan) when available, otherwise processor (CPU).\n"
+    "Graphics card: always Vulkan.\n"
+    "Processor: always CPU.\n"
+    "Click for details."
+)
+
+_DEVICE_HELP_HTML = (
+    "<p style='margin: 0 0 6px 0;'><b>Automatic</b>: Uses your graphics card (Vulkan) when "
+    "available, and falls back to your processor (CPU) if not.</p>"
+    "<p style='margin: 0 0 6px 0;'><b>Graphics card</b>: Always runs on your graphics card "
+    "via Vulkan (fails if no compatible GPU or driver is available).</p>"
+    "<p style='margin: 0;'><b>Processor</b>: Always runs on your processor (CPU).</p>"
+)
+
+
+class _HelpPopover(QFrame):
+    """Lightweight popup frame displaying wrapped help text anchored near a button."""
+
+    def __init__(self, html: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setFrameShadow(QFrame.Shadow.Raised)
+        self.setAutoFillBackground(True)
+        self.setBackgroundRole(QPalette.ColorRole.Window)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        self._label = QLabel(html, self)
+        self._label.setTextFormat(Qt.TextFormat.RichText)
+        self._label.setWordWrap(True)
+        self._label.setMaximumWidth(360)
+        self._label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(self._label)
+
+    def text(self) -> str:
+        return self._label.text()
+
+    def show_near(self, anchor: QWidget) -> None:
+        self.adjustSize()
+        pos = anchor.mapToGlobal(QPoint(0, anchor.height() + 4))
+        screen = anchor.screen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            x = min(max(pos.x(), avail.left()), max(avail.left(), avail.right() - self.width() + 1))
+            y = pos.y()
+            if y + self.height() > avail.bottom() + 1:
+                y = max(avail.top(), anchor.mapToGlobal(QPoint(0, 0)).y() - self.height() - 4)
+            pos = QPoint(x, y)
+        self.move(pos)
+        self.show()
 
 
 class GraphicsCardGroup(QGroupBox):
@@ -25,7 +80,7 @@ class GraphicsCardGroup(QGroupBox):
 
     edited = Signal()
 
-    def __init__(self, device_note: str, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Graphics card and processor", parent)
         hl = QVBoxLayout(self)
         hl.setSpacing(8)
@@ -36,15 +91,21 @@ class GraphicsCardGroup(QGroupBox):
         self.populate_devices(None)
         self.device_combo.currentIndexChanged.connect(self.edited)
         dev_label.setBuddy(self.device_combo)
+
+        self.device_help_button = QToolButton(self)
+        self.device_help_button.setAutoRaise(True)
+        self.device_help_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.device_help_button.setAccessibleName("About model device options")
+        self.device_help_button.setToolTip(_DEVICE_HELP_TOOLTIP)
+        self.device_help_button.clicked.connect(self._toggle_device_help)
+        self.device_help_popover = _HelpPopover(_DEVICE_HELP_HTML, self)
+        self._apply_icons()
+
         dev_row.addWidget(dev_label)
         dev_row.addWidget(self.device_combo)
+        dev_row.addWidget(self.device_help_button)
         dev_row.addStretch(1)
         hl.addLayout(dev_row)
-
-        note = QLabel(device_note, self)
-        note.setWordWrap(True)
-        note.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-        hl.addWidget(note)
 
         hl.addSpacing(4)
 
@@ -119,6 +180,27 @@ class GraphicsCardGroup(QGroupBox):
         self._set_gpu_threshold_enabled(checked)
         self.edited.emit()
 
+    def _apply_icons(self) -> None:
+        if not hasattr(self, "device_help_button"):
+            return
+        icon = theme_icon("help-contextual", "dialog-question", "help-about", widget=self)
+        if not icon.isNull():
+            self.device_help_button.setIcon(icon)
+            self.device_help_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        else:
+            self.device_help_button.setText("?")
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
+            self._apply_icons()
+
+    def _toggle_device_help(self) -> None:
+        if self.device_help_popover.isVisible():
+            self.device_help_popover.hide()
+        else:
+            self.device_help_popover.show_near(self.device_help_button)
+
 
 class PerformanceSection(SettingsSection):
     key = "performance"
@@ -139,11 +221,11 @@ class PerformanceSection(SettingsSection):
         super().__init__(parent)
         self._saved = pfm.PerformanceValues()
 
-        self.hw_box = GraphicsCardGroup(
-            "Changing this setting requires a service restart.", self
-        )
+        self.hw_box = GraphicsCardGroup(self)
         self.device_combo = self.hw_box.device_combo
         self.device = self.device_combo
+        self.device_help_button = self.hw_box.device_help_button
+        self.device_help_popover = self.hw_box.device_help_popover
         self.pause_when_gpu_busy = self.hw_box.pause_when_gpu_busy
         self.gpu_busy_label = self.hw_box.gpu_busy_label
         self.gpu_busy_threshold = self.hw_box.gpu_busy_threshold

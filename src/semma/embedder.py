@@ -1518,6 +1518,7 @@ class Embedder:
         self._loading = False
         self._query_loading = False
         self._index_loading = False
+        self._query_loading_device: str | None = None
         self._loaded_once = False
         self._model: Any = None
         self._query_model: Any = None
@@ -1551,6 +1552,7 @@ class Embedder:
         if self._model is not None and not _is_handle_alive(self._model):
             handle = self._model
             self._model = None
+            self.device = None
             if hasattr(handle, "close"):
                 try:
                     handle.close()
@@ -1561,6 +1563,7 @@ class Embedder:
         if self._query_model is not None and not _is_handle_alive(self._query_model):
             handle = self._query_model
             self._query_model = None
+            self.query_device = None
             if hasattr(handle, "close"):
                 try:
                     handle.close()
@@ -1658,6 +1661,7 @@ class Embedder:
             if self._query_model is not None and _is_gpu_device(self.query_device):
                 q_handle = self._query_model
                 self._query_model = None
+                self.query_device = None
                 if hasattr(q_handle, "close"):
                     q_handle.close()
             self._load_model()
@@ -1680,11 +1684,13 @@ class Embedder:
             return
         self._loading = True
         self._query_loading = True
+        self._query_loading_device = dev
         try:
             self._load_query_model(dev)
         finally:
             self._loading = False
             self._query_loading = False
+            self._query_loading_device = None
         now = time.monotonic()
         self.last_used = now
         self.query_last_used = now
@@ -1741,11 +1747,14 @@ class Embedder:
         Returns False if it was not loaded."""
         with self._gpu.query():
             if self._model is None:
+                if self._query_model is None:
+                    self.device = None
                 return False
             was_alive = _is_handle_alive(self._model)
             started = time.monotonic()
             handle = self._model
             self._model = None
+            self.device = None
             if hasattr(handle, "close"):
                 handle.close()
             if not was_alive:
@@ -1759,14 +1768,18 @@ class Embedder:
     def unload_query(self) -> bool:
         """Drop the text-only query worker and free its RAM/VRAM.
         Returns False if it was not loaded."""
-        dev = self.query_device or self._resolve_query_device()
+        dev = self.query_device or self._query_loading_device or self._resolve_query_device()
         with self._query_lock(dev):
             if self._query_model is None:
+                self.query_device = None
                 return False
             was_alive = _is_handle_alive(self._query_model)
             started = time.monotonic()
             handle = self._query_model
             self._query_model = None
+            self.query_device = None
+            if self._model is None:
+                self.device = None
             if hasattr(handle, "close"):
                 handle.close()
             if not was_alive:
