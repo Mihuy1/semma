@@ -354,6 +354,7 @@ def test_device_reload_while_idle_wakes_worker_and_unloads_lazily(home: Path, mo
     monkeypatch.setattr(emb_mod, "ensure_model_file", lambda kind, model_dir: model_dir / f"{kind}.gguf")
     monkeypatch.setattr(emb_mod, "_WorkerHandle", StubWorker)
     monkeypatch.setattr(emb_mod.Embedder, "_has_vulkan_lib", lambda self: True)
+    monkeypatch.setattr(emb_mod.Embedder, "model_files_status", lambda self: {"ready": True, "done": 0, "total": 0})
 
     async def main() -> None:
         settings = base_settings(home)
@@ -421,6 +422,7 @@ def test_query_device_reload_unloads_query_model_and_switches_device(
     monkeypatch.setattr(emb_mod, "ensure_model_file", lambda kind, model_dir: model_dir / f"{kind}.gguf")
     monkeypatch.setattr(emb_mod, "_WorkerHandle", StubWorker)
     monkeypatch.setattr(emb_mod.Embedder, "_has_vulkan_lib", lambda self: True)
+    monkeypatch.setattr(emb_mod.Embedder, "model_files_status", lambda self: {"ready": True, "done": 0, "total": 0})
 
     async def main() -> None:
         settings = base_settings(home)
@@ -487,6 +489,7 @@ def test_embedder_unload_clears_device_and_uses_loaded_lock(
     monkeypatch.setattr(emb_mod, "ensure_model_file", lambda kind, model_dir: model_dir / f"{kind}.gguf")
     monkeypatch.setattr(emb_mod, "_WorkerHandle", StubWorker)
     monkeypatch.setattr(emb_mod.Embedder, "_has_vulkan_lib", lambda self: True)
+    monkeypatch.setattr(emb_mod.Embedder, "model_files_status", lambda self: {"ready": True, "done": 0, "total": 0})
 
     cfg = load_config(tmp_path / "missing.toml", home=tmp_path)
     cfg.device = "vulkan"
