@@ -2,6 +2,8 @@
 
 Semantic file search for KDE KRunner and GNOME Shell search, powered by EmbeddingGemma 2. A background service indexes your files locally, and you search them by meaning from the desktop's search.
 
+https://github.com/user-attachments/assets/6d249eb9-0a71-49ad-afa7-bb7878e2b46c
+
 ## What can it find?
 
 Describe what you remember, rather than the filename. These are illustrative queries, not guaranteed matches:
@@ -35,6 +37,23 @@ sudo apt install ./semma_0.6.2-1_amd64.deb      # Ubuntu, Debian
 ```
 
 Then open **Semma** from the application menu and go through the setup wizard. Semma does not index anything until you finish the wizard. Review the indexed folders, exclusions, file types, and device settings before starting. The model (865 MB) downloads in the background the first time.
+
+<details>
+<summary>Setup wizard screenshots</summary>
+
+| 1. Welcome | 2. Folders |
+| --- | --- |
+| ![Step 1: Welcome to Semma](docs/images/wizard-1-welcome.png) | ![Step 2: Folders](docs/images/wizard-2-folders.png) |
+
+| 3. File types | 4. Media |
+| --- | --- |
+| ![Step 3: File types](docs/images/wizard-3-file-types.png) | ![Step 4: Media](docs/images/wizard-4-media.png) |
+
+| 5. Screenshots | 6. Performance |
+| --- | --- |
+| ![Step 5: Screenshots](docs/images/wizard-5-screenshots.png) | ![Step 6: Performance](docs/images/wizard-6-performance.png) |
+
+</details>
 
 On GNOME, log out and back in for the search provider to appear. Once files are indexed, search from KRunner or the GNOME overview; the Semma window shows indexing progress and settings.
 
