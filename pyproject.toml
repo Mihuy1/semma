@@ -1,6 +1,6 @@
 [project]
 name = "semma"
-version = "0.6.1"
+version = "0.6.2"
 description = "Semantic desktop search for KDE KRunner and GNOME Shell, powered by EmbeddingGemma 2 and sqlite-vec"
 readme = "README.md"
 license = "MIT"
