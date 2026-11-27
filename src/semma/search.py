@@ -18,11 +18,16 @@ over every stored vector), plus how many of the query's words the file contains.
    query requiring every word.
 3. meaning: the query's cosine with EVERY stored vector (one matrix-vector product over the
    in-memory VectorCache), minus the mean cosine of that vector's modality for this query (text,
-   image, audio and video vectors sit at different levels: image cosines run ~0.05 below text
-   ones; a modality in < MODALITY_MIN files uses the overall mean), divided by the standard
-   deviation of those centred values over all vectors (floored at STD_FLOOR) after subtracting
-   their mean. That is a z-score: how many standard deviations a chunk stands out from the whole
-   index for this query. The scale always comes from all vectors; `kinds` only restricts which
+   image, audio and video vectors sit at different levels, image ones usually lower; a modality
+   in < MODALITY_MIN files uses the overall mean, video the image mean when images have their
+   own), divided by the standard deviation of those centred values over all vectors (floored at
+   STD_FLOOR) after subtracting their mean. That is a z-score: how many standard deviations a
+   chunk stands out from the whole index for this query. Video and audio vectors count as many
+   as their files (one long recording would otherwise dominate a small index), and on small
+   indexes (effective weight <= CLIP_MAX_TOTAL) vectors above z CLIP_Z are left out of the mean
+   and std (re-estimated up to CLIP_ITERS times) so strong matches do not squash their own z
+   (on n vectors an unclipped z cannot exceed sqrt(n - 1)). The scale always comes from all
+   vectors; `kinds` only restricts which
    files are candidates. A file's meaning is its best chunk's z (its cosine is reported as
    `similarity`). Without the cache (sqlite-vec fallback, rare) the scale comes from a sample of
    about SCALE_SAMPLE vectors (stratified by modality, weighted back to the index's proportions),
@@ -91,6 +96,10 @@ _TERM = re.compile(r"[^\W_]+")
 
 MODALITY_MIN = 20
 STD_FLOOR = 0.02
+CLIP_Z = 3.0
+CLIP_ITERS = 2
+CLIP_MAX_TOTAL = 500
+PER_FILE_MODALITIES = frozenset({"video", "audio"})
 MAX_MEANING_ROWS = 4096
 W_WORDS = 2.0
 NAME_BONUS = 3.0
@@ -275,28 +284,29 @@ class Scale:
         return (cos - self.offset(modality)) / self.std
 
 
-def meaning_scale(sims: np.ndarray, modality: np.ndarray, names: Sequence[str],
-                  weights: np.ndarray | None = None,
-                  files: Sequence[int] | np.ndarray | None = None) -> Scale:
-    """The scale from cosines `sims` of vectors with modality codes `modality` (names[code]).
-    A sample passes `weights` (how many index vectors each sampled one stands for) and the
-    index's per-modality `files` (distinct files, which decide MODALITY_MIN; defaults to `w0`
-    when omitted). Everything comes from per-modality sums of w, w*cos and w*cos^2 (no
-    full-length temporaries besides the squares)."""
-    if not len(sims):
-        return Scale({}, 0.0, 0.0, 1.0)
-    codes = modality.astype(np.intp, copy=False)
-    k = len(names)
+def _scale_sums(sims: np.ndarray, codes: np.ndarray, weights: np.ndarray | None,
+                k: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if weights is None:
-        w0 = np.bincount(codes, minlength=k).astype(np.float64)
-        s1 = np.bincount(codes, weights=sims, minlength=k)
-        s2 = np.bincount(codes, weights=sims * sims, minlength=k)
-    else:
-        w0 = np.bincount(codes, weights=weights, minlength=k)
-        s1 = np.bincount(codes, weights=weights * sims, minlength=k)
-        s2 = np.bincount(codes, weights=weights * sims * sims, minlength=k)
-    have = (np.asarray(files if files is not None else w0, dtype=np.float64) >= MODALITY_MIN) & (w0 > 0)
+        return (np.bincount(codes, minlength=k).astype(np.float64),
+                np.bincount(codes, weights=sims, minlength=k),
+                np.bincount(codes, weights=sims * sims, minlength=k))
+    return (np.bincount(codes, weights=weights, minlength=k),
+            np.bincount(codes, weights=weights * sims, minlength=k),
+            np.bincount(codes, weights=weights * sims * sims, minlength=k))
+
+
+def _finish_scale(w0: np.ndarray, s1: np.ndarray, s2: np.ndarray, nf: np.ndarray,
+                  names: Sequence[str], k: int) -> Scale:
+    """The scale from per-modality sums of w, w*cos and w*cos^2 (`nf`: distinct files per
+    modality). A modality whose weight is (numerically) gone is dropped entirely."""
+    live = w0 > 1e-12
+    w0 = np.where(live, w0, 0.0)
+    s1 = np.where(live, s1, 0.0)
+    s2 = np.where(live, s2, 0.0)
     total = float(w0.sum())
+    if total <= 0.0:
+        return Scale({}, 0.0, 0.0, 1.0)
+    have = (nf >= MODALITY_MIN) & live
     overall = float(s1.sum() / total)
     raw_means = s1 / np.maximum(w0, 1e-12)
     means = np.where(have, raw_means, overall)
@@ -308,6 +318,49 @@ def meaning_scale(sims: np.ndarray, modality: np.ndarray, names: Sequence[str],
     var = float((s2 - 2 * means * s1 + w0 * means * means).sum() / total) - center * center
     std = max(float(np.sqrt(max(var, 0.0))), STD_FLOOR)
     return Scale({names[i]: float(means[i]) for i in range(k) if have[i]}, overall, center, std)
+
+
+def meaning_scale(sims: np.ndarray, modality: np.ndarray, names: Sequence[str],
+                  weights: np.ndarray | None = None,
+                  files: Sequence[int] | np.ndarray | None = None) -> Scale:
+    """The scale from cosines `sims` of vectors with modality codes `modality` (names[code]).
+    A sample passes `weights` (how many index vectors each sampled one stands for) and the
+    index's per-modality `files` (distinct files, which decide MODALITY_MIN; defaults to the
+    vector counts when omitted). Everything comes from per-modality sums of w, w*cos and
+    w*cos^2 (no full-length temporaries besides the squares).
+
+    A PER_FILE_MODALITIES modality (video, audio) counts as many vectors as it has files, so
+    one long recording does not outweigh the rest of a small index. On small indexes (total
+    effective weight <= CLIP_MAX_TOTAL), vectors above CLIP_Z are left out of the sums and the
+    scale recomputed (at most CLIP_ITERS times), so strong matches do not inflate the std they
+    are measured against; they are still scored on the resulting scale."""
+    if not len(sims):
+        return Scale({}, 0.0, 0.0, 1.0)
+    codes = modality.astype(np.intp, copy=False)
+    k = len(names)
+    w = None if weights is None else np.asarray(weights, dtype=np.float64)
+    w0, s1, s2 = _scale_sums(sims, codes, w, k)
+    nf = np.array(files if files is not None else w0, dtype=np.float64)
+    per_file = np.fromiter((name in PER_FILE_MODALITIES for name in names), dtype=bool, count=k)
+    fac = np.where(per_file & (w0 > 0), np.minimum(1.0, nf / np.maximum(w0, 1e-12)), 1.0)
+    w0, s1, s2 = w0 * fac, s1 * fac, s2 * fac
+    sc = _finish_scale(w0, s1, s2, nf, names, k)
+    if float(w0.sum()) > CLIP_MAX_TOTAL:
+        return sc
+    dropped = np.zeros(0, dtype=np.intp)
+    for _ in range(CLIP_ITERS):
+        hi = np.flatnonzero(sims > (sc.offsets(names) + np.float32(CLIP_Z * sc.std))[codes])
+        if np.array_equal(hi, dropped):
+            break
+        d0, d1, d2 = _scale_sums(sims[hi], codes[hi], None if w is None else w[hi], k)
+        r0, r1, r2 = w0 - d0 * fac, s1 - d1 * fac, s2 - d2 * fac
+        live = r0 > 1e-12
+        r0, r1, r2 = np.where(live, r0, 0.0), np.where(live, r1, 0.0), np.where(live, r2, 0.0)
+        if float(r0.sum()) <= 0.0:
+            break
+        dropped = hi
+        sc = _finish_scale(r0, r1, r2, nf, names, k)
+    return sc
 
 
 def _exists(path: str) -> bool:

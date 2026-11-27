@@ -14,7 +14,7 @@ from semma import filetypes as ft
 from semma import search as search_mod
 from semma.config import load_config
 from semma.query_filters import FILTERS, QueryFilter, parse_query, register, sql_filter_fn
-from semma.search import STD_FLOOR, Searcher, is_lookup, meaning_scale, query_words
+from semma.search import CLIP_ITERS, CLIP_MAX_TOTAL, CLIP_Z, STD_FLOOR, Searcher, is_lookup, meaning_scale, query_words
 from semma.store import Store
 
 
@@ -108,8 +108,10 @@ def test_kinds_filter_candidates_but_not_the_scale(realistic) -> None:
     s = Searcher(store, cfg, FakeEmbedder())
     both = s.search_vector(q, "", limit=10)
     only = s.search_vector(q, "", limit=10, kinds=[ft.IMAGE])
-    assert names(only) == ["a.jpg"]
+    assert names(only)[0] == "a.jpg" and {r.kind for r in only} == {ft.IMAGE}
     assert only[0].score == pytest.approx(next(r for r in both if r.path.endswith("a.jpg")).score)
+    in_both = {Path(r.path).name: r.z for r in both}
+    assert all(r.z == pytest.approx(in_both[Path(r.path).name]) for r in only if Path(r.path).name in in_both)
 
 
 def test_meaning_scale_on_tiny_and_uniform_indexes() -> None:
@@ -493,21 +495,50 @@ def test_sqlite_vec_sample_centres_a_rare_modality_on_its_own_mean(tmp_path: Pat
     store.close()
 
 
+def _direct_scale(sims: np.ndarray, mods: np.ndarray) -> tuple[np.ndarray, float, float, int]:
+    """meaning_scale spelled out on two modalities with enough files each: per-modality means,
+    centre and std over the kept vectors, dropping those above CLIP_Z (re-estimated up to
+    CLIP_ITERS times)."""
+    keep = np.ones(len(sims), dtype=bool)
+
+    def fit() -> tuple[np.ndarray, np.ndarray, float, float]:
+        means = np.array([sims[keep & (mods == m)].astype(np.float64).mean() for m in (0, 1)])
+        centred = sims - means[mods]
+        return means, centred, float(centred[keep].mean()), float(centred[keep].std())
+
+    means, centred, center, std = fit()
+    for _ in range(CLIP_ITERS):
+        new = centred - center <= CLIP_Z * std
+        if (new == keep).all():
+            break
+        keep = new
+        means, centred, center, std = fit()
+    return means, center, std, int((~keep).sum())
+
+
 def test_meaning_scale_matches_a_direct_computation_and_weights_act_as_copies() -> None:
     rng = np.random.default_rng(3)
-    sims = rng.normal(0.55, 0.05, 500).astype(np.float32)
-    mods = (rng.random(500) < 0.3).astype(np.int64)
+    sims = rng.normal(0.55, 0.05, 300).astype(np.float32)
+    mods = (rng.random(300) < 0.3).astype(np.int64)
+    sims[:3] = 0.9
     sc = meaning_scale(sims, mods, ["text", "image"])
-    means = np.array([sims[mods == 0].mean(), sims[mods == 1].mean()])
-    centred = sims - means[mods]
-    assert sc.center == pytest.approx(float(centred.mean()), abs=1e-6)
-    assert sc.std == pytest.approx(float(centred.std()), rel=1e-4)
-    w = np.where(np.arange(500) < 100, 2.0, 1.0)
+    means, center, std, dropped = _direct_scale(sims, mods)
+    assert dropped >= 3
+    assert [sc.means["text"], sc.means["image"]] == pytest.approx(means.tolist(), abs=1e-6)
+    assert sc.center == pytest.approx(center, abs=1e-6)
+    assert sc.std == pytest.approx(std, rel=1e-4)
+    assert sc.std < float((sims - means[mods]).std())
+    w = np.where(np.arange(300) < 100, 2.0, 1.0)
     dup = meaning_scale(np.concatenate([sims, sims[:100]]), np.concatenate([mods, mods[:100]]), ["text", "image"])
     weighted = meaning_scale(sims, mods, ["text", "image"], weights=w)
     assert weighted.std == pytest.approx(dup.std, rel=1e-5) and weighted.means == pytest.approx(dup.means)
+    assert weighted.center == pytest.approx(dup.center, abs=1e-7)
     few = meaning_scale(sims[:25], np.array([1] * 5 + [0] * 20), ["text", "image"], files=[20, 50])
     assert set(few.means) == {"text", "image"}
+
+    skewed = (0.45 + rng.gamma(2.0, 0.02, CLIP_MAX_TOTAL + 500)).astype(np.float32)
+    large = meaning_scale(skewed, np.zeros(len(skewed), dtype=np.int64), ["text"])
+    assert large.std == pytest.approx(float(skewed.astype(np.float64).std()), rel=1e-5)
 
 
 def test_sqlite_vec_sample_spreads_over_the_whole_index(tmp_path: Path, monkeypatch) -> None:
@@ -803,3 +834,128 @@ def test_vector_cache_file_stats_invalidate_on_remove_and_replace(tmp_path: Path
         assert (sc5.valid & (sc5.modality == vid_code)).sum() == 0
     store.close()
 
+
+@pytest.mark.parametrize("cache", [False, True], ids=["sqlite-vec", "cache"])
+def test_small_index_strong_matches_do_not_squash_their_own_z(tmp_path: Path, cache: bool) -> None:
+    """On 27 vectors an unclipped z cannot exceed sqrt(26) ~ 5.1, and two planted matches inflate
+    the std they are measured against: clipping lets them clear the floor, while a query that
+    matches nothing still finds nothing."""
+    cfg = make_cfg(tmp_path)
+    cfg.z_gate, cfg.z_floor = 2.0, 4.0
+    cfg.duplicate_similarity = {}
+    store = Store(cfg.db_path, vector_cache=cache)
+    q = unit(1)
+    put_background(store, tmp_path, q, n=25, mean=0.55, std=0.03)
+    put_vectors(store, [(str(tmp_path / "Pictures/match.jpg"), 30, with_cos(q, 0.75, 2)),
+                        (str(tmp_path / "Pictures/second.jpg"), 30, with_cos(q, 0.72, 3))])
+    s = Searcher(store, cfg, FakeEmbedder())
+    res = s.search_vector(q, "", limit=10)
+    assert names(res)[:2] == ["match.jpg", "second.jpg"]
+    assert res[0].z is not None and res[0].z >= cfg.z_floor
+    assert res[1].z is not None and res[1].z >= cfg.z_floor
+    noise = unit(77)
+    assert s.search_vector(noise, "", limit=10) == []
+    store.close()
+
+
+@pytest.mark.parametrize("cache", [False, True], ids=["sqlite-vec", "cache"])
+def test_one_long_video_does_not_dominate_a_small_index(tmp_path: Path, cache: bool, monkeypatch) -> None:
+    """21 video chunks among 60 text ones made the scale bimodal (mean pulled up, std doubled);
+    counted as one file the video stands out from the text bulk."""
+    cfg = make_cfg(tmp_path)
+    cfg.z_gate, cfg.z_floor = 2.0, 4.0
+    cfg.duplicate_similarity = {}
+    store = Store(cfg.db_path, vector_cache=cache)
+    q = unit(1)
+    put_background(store, tmp_path, q, n=60, mean=0.59, std=0.03, kind="text", modality="text", seed=5000)
+    _put_multi_chunk(store, str(tmp_path / "Videos/clip.mp4"), ft.VIDEO, "video",
+                     [with_cos(q, 0.74 if seq == 0 else 0.71, 900 + seq) for seq in range(21)])
+    res = Searcher(store, cfg, FakeEmbedder()).search_vector(q, "", limit=10)
+    assert names(res)[0] == "clip.mp4"
+    assert res[0].z is not None and res[0].z >= cfg.z_floor
+
+    sims = np.concatenate([np.full(60, 0.59), np.full(21, 0.71)]).astype(np.float32)
+    sims[:60] += np.random.default_rng(0).normal(0, 0.03, 60).astype(np.float32)
+    mods = np.array([0] * 60 + [1] * 21)
+    per_file = meaning_scale(sims, mods, ["text", "video"], files=[60, 1])
+    monkeypatch.setattr(search_mod, "PER_FILE_MODALITIES", frozenset())
+    per_chunk = meaning_scale(sims, mods, ["text", "video"], files=[60, 1])
+    assert per_file.z(0.74, "video") >= cfg.z_floor > per_chunk.z(0.74, "video")
+    store.close()
+
+
+def test_vector_cache_and_sample_scales_agree(tmp_path: Path) -> None:
+    """With the whole index in the sample, the sqlite-vec scale (weights + per-modality files)
+    equals the VectorCache one, per-file weighting of video and audio and clipping included."""
+    cfg = make_cfg(tmp_path)
+    store = Store(cfg.db_path, vector_cache=True)
+    q = unit(1)
+    put_background(store, tmp_path, q, n=60, mean=0.59, std=0.03, kind="text", modality="text", seed=5000)
+    put_background(store, tmp_path, q, n=30, mean=0.52, std=0.03)
+    _put_multi_chunk(store, str(tmp_path / "Videos/a.mp4"), ft.VIDEO, "video",
+                     [with_cos(q, 0.72, 900 + seq) for seq in range(21)])
+    _put_multi_chunk(store, str(tmp_path / "Videos/b.mp4"), ft.VIDEO, "video",
+                     [with_cos(q, 0.50, 950 + seq) for seq in range(5)])
+    _put_multi_chunk(store, str(tmp_path / "Music/c.mp3"), ft.AUDIO, "audio",
+                     [with_cos(q, 0.60, 980 + seq) for seq in range(8)])
+    put_vectors(store, [(str(tmp_path / "Pictures/match.jpg"), 30, with_cos(q, 0.80, 2))])
+    cache = store.vectors
+    assert cache is not None
+    with cache.lock:
+        cache.ensure_fresh(store.reader())
+        sc = cache.scores(q)
+        direct = meaning_scale(sc.sims, sc.modality, sc.names, files=sc.files)
+    sampled = Searcher(store, cfg, FakeEmbedder())._sample_scale(store.reader(), q)
+    assert sampled.means == pytest.approx(direct.means, abs=1e-6)
+    assert sampled.overall == pytest.approx(direct.overall, abs=1e-6)
+    assert sampled.center == pytest.approx(direct.center, abs=1e-6)
+    assert sampled.std == pytest.approx(direct.std, rel=1e-5)
+    assert set(direct.means) == {"text", "image"}
+    assert direct.offset("video") == pytest.approx(direct.offset("image"))
+    store.close()
+
+
+def test_meaning_scale_weights_and_files_act_as_copies_for_per_file_modalities() -> None:
+    rng = np.random.default_rng(11)
+    sims = np.concatenate([rng.normal(0.58, 0.03, 200), rng.normal(0.70, 0.01, 30),
+                           rng.normal(0.60, 0.02, 12)]).astype(np.float32)
+    mods = np.array([0] * 200 + [1] * 30 + [2] * 12)
+    names_ = ["text", "video", "audio"]
+    w = np.where(np.arange(len(sims)) % 3 == 0, 2.0, 1.0)
+    rep_ = np.repeat(np.arange(len(sims)), w.astype(int))
+    dup = meaning_scale(sims[rep_], mods[rep_], names_, files=[200, 2, 3])
+    weighted = meaning_scale(sims, mods, names_, weights=w, files=[200, 2, 3])
+    assert weighted.std == pytest.approx(dup.std, rel=1e-6)
+    assert weighted.center == pytest.approx(dup.center, abs=1e-7)
+    assert weighted.overall == pytest.approx(dup.overall, abs=1e-7)
+    assert set(weighted.means) == {"text"}
+    unweighted = meaning_scale(sims, mods, names_, files=[200, 30, 12])
+    assert weighted.z(0.72, "video") > unweighted.z(0.72, "video")
+
+
+def test_meaning_scale_degenerate_inputs() -> None:
+    names_ = ["text", "video"]
+    same = meaning_scale(np.full(40, 0.6, dtype=np.float32), np.array([0] * 20 + [1] * 20), names_, files=[20, 1])
+    assert same.std == STD_FLOOR and same.z(0.6, "video") == pytest.approx(0.0, abs=1e-5)
+    one = meaning_scale(np.array([0.5], dtype=np.float32), np.array([0]), names_)
+    assert one.std == STD_FLOOR and one.z(0.5, "text") == pytest.approx(0.0, abs=1e-5)
+    two = meaning_scale(np.array([0.5, 0.9], dtype=np.float32), np.array([0, 1]), names_)
+    assert two.std == pytest.approx(0.2, rel=1e-5) and two.overall == pytest.approx(0.7)
+    gone = meaning_scale(np.array([0.5, 0.6], dtype=np.float32), np.array([1, 1]), names_, files=[0, 0])
+    assert gone == search_mod.Scale({}, 0.0, 0.0, 1.0)
+    zero_w = meaning_scale(np.array([0.5, 0.6], dtype=np.float32), np.array([0, 1]), names_, weights=np.zeros(2))
+    assert zero_w == search_mod.Scale({}, 0.0, 0.0, 1.0)
+    rng = np.random.default_rng(5)
+    sims = rng.normal(0.55, 0.03, 60).astype(np.float32)
+    mods = (np.arange(60) % 2).astype(np.int64)
+    w = np.where(np.arange(60) % 3 == 0, 0.0, 1.0)
+    kept = w > 0
+    with_zeros = meaning_scale(sims, mods, names_, weights=w, files=[30, 30])
+    without = meaning_scale(sims[kept], mods[kept], names_, files=[30, 30])
+    assert with_zeros.means == pytest.approx(without.means, abs=1e-9)
+    assert with_zeros.center == pytest.approx(without.center, abs=1e-9)
+    assert with_zeros.std == pytest.approx(without.std, rel=1e-6)
+    heavy = meaning_scale(np.array([0.5, 0.9, 0.9, 0.9], dtype=np.float32), np.array([0, 0, 0, 0]), names_,
+                          weights=np.array([100.0, 1.0, 1.0, 1.0]))
+    assert heavy.std == pytest.approx(STD_FLOOR) and heavy.overall == pytest.approx(0.5)
+    assert heavy.z(0.9, "text") == pytest.approx(0.4 / STD_FLOOR, rel=1e-4)
