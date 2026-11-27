@@ -30,8 +30,8 @@ HEIC/HEIF photos are decoded with ffmpeg, which needs an HEVC decoder; Fedora's 
 Download the package for x86-64 Fedora 41+, Ubuntu 24.04+, or Debian 13+ from [Releases](https://github.com/Mihuy1/semma/releases/latest), then install it:
 
 ```sh
-sudo dnf install ./semma-0.6.1-1.x86_64.rpm     # Fedora
-sudo apt install ./semma_0.6.1-1_amd64.deb      # Ubuntu, Debian
+sudo dnf install ./semma-0.6.2-1.x86_64.rpm     # Fedora
+sudo apt install ./semma_0.6.2-1_amd64.deb      # Ubuntu, Debian
 ```
 
 Then open **Semma** from the application menu and go through the setup wizard. Semma does not index anything until you finish the wizard. Review the indexed folders, exclusions, file types, and device settings before starting. The model (865 MB) downloads in the background the first time.
